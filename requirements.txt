@@ -1,0 +1,6 @@
+yfinance
+pandas
+gspread
+google-auth
+lxml
+html5lib
