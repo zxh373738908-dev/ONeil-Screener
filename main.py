@@ -9,7 +9,7 @@ import datetime
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
 # 填入你的 Google 表格的完整链接或 ID
-SHEET_URL = "你的GOOGLE表格链接填在这里" 
+SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0" 
 
 # 连接 Google Sheets
 scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
