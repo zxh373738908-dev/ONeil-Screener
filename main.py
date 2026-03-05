@@ -22,14 +22,18 @@ sheet = client.open_by_url(SHEET_URL).worksheet("Screener")
 # 你也可以换成全量美股 Ticker 列表
 # ==========================================
 def get_tickers():
+    # 伪装成正常的电脑浏览器访问，防止被维基百科拦截 (403 错误)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
     # 抓取标普500
-    sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
+    sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
+    
     # 抓取纳斯达克100
-    ndx100 = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')[4]['Ticker'].tolist()
+    ndx100 = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]['Ticker'].tolist()
+    
     # 合并去重
     tickers = list(set(sp500 + ndx100))
-    return[t.replace('.', '-') for t in tickers] # yfinance的格式修复
-
+    return [t.replace('.', '-') for t in tickers]
 tickers = get_tickers()
 print(f"开始筛选股票池，共 {len(tickers)} 只股票...")
 
