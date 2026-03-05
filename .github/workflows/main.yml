@@ -1,0 +1,29 @@
+name: Daily O'Neil Screener
+
+on:
+  schedule:
+    # 每天 UTC 时间 22:00 运行 (相当于美东时间下午 5:00)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: # 允许手动点击运行
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create credentials.json
+        run: |
+          echo '${{ secrets.GCP_CREDENTIALS }}' > credentials.json
+
+      - name: Run Screener
+        run: python main.py
