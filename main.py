@@ -5,13 +5,14 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 import akshare as ak
+import time
 
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0" # ⚠️ 记得换成你的真实链接！
+SHEET_URL = "你的GOOGLE表格链接填在这里"  # ⚠️ 记得换成你的真实链接！
 
-scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
@@ -27,9 +28,9 @@ def screen_us_stocks():
         tickers = list(set([t.replace('.', '-') for t in (sp500 + ndx100)]))
     except Exception as e:
         print("获取美股列表失败")
-        return[]
+        return []
 
-    final_stocks =[]
+    final_stocks = []
     for ticker in tickers:
         try:
             stock = yf.Ticker(ticker)
@@ -63,66 +64,63 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 3. [A股] 机构主升浪终极过滤模块 (对接腾讯/东方财富全市场数据)
+# 3. [A股] 机构主升浪终极过滤模块 (V2.0 极速优化版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (底层对接全市场数据) ==========")
+    print("\n========== 开始处理 A股 (极速优化版) ==========")
     try:
-        # 1. 获取全市场 A 股实时行情 (包含最新价、市值、换手率等)
+        # 1. 获取全市场 A 股实时行情
+        print("正在获取东方财富全市场实时数据...")
         spot_df = ak.stock_zh_a_spot_em()
         
-        # 数据类型清洗
+        # 强制转换数据类型
         spot_df['最新价'] = pd.to_numeric(spot_df['最新价'], errors='coerce')
         spot_df['总市值'] = pd.to_numeric(spot_df['总市值'], errors='coerce')
         spot_df['成交额'] = pd.to_numeric(spot_df['成交额'], errors='coerce')
         spot_df['换手率'] = pd.to_numeric(spot_df['换手率'], errors='coerce')
+        spot_df['60日涨跌幅'] = pd.to_numeric(spot_df['60日涨跌幅'], errors='coerce') # 直接获取60日涨幅
         
-        # 2. 严格执行市值与流动性过滤
-        # 总市值 ≥ 150亿, 股价 ≥ 10, 日成交额 ≥ 5亿(500,000,000), 换手率 ≥ 1.5%
+        # 2. 核心前置过滤 (速度提升 10 倍的关键)
+        # 总市值 ≥ 150亿(15,000,000,000), 股价 ≥ 10, 日成交额 ≥ 5亿, 换手率 ≥ 1.5%, 60日涨幅 ≥ 30%
         cond1 = spot_df['最新价'] >= 10
-        cond2 = spot_df['总市值'] >= 150_000_000_000  # 接口单位为元
+        cond2 = spot_df['总市值'] >= 15_000_000_000  # 之前这里多写了个0，已修复为 150亿
         cond3 = spot_df['成交额'] >= 500_000_000
         cond4 = spot_df['换手率'] >= 1.5
+        cond5 = spot_df['60日涨跌幅'] >= 30  # 动量前置：连 30% 都没有的直接踢掉
         
-        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4]
-        tickers = filtered_df['代码'].tolist()
-        names = filtered_df['名称'].tolist()
+        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4 & cond5].copy()
+        print(f"第一轮漏斗过滤完成：全市场 5000 只股票中，满足【150亿市值+动量主升浪】的候选股共有 {len(filtered_df)} 只。")
         
-        print(f"第一轮基础过滤完成：全市场 5000 多只股票中，仅剩 {len(tickers)} 只满足顶级流动性要求。开始扫描技术面...")
-        
-        final_a_stocks =[]
+        final_a_stocks = []
         # 准备时间范围 (抓取过去400天数据，确保有足够的 250 个交易日)
         end_date = datetime.datetime.now().strftime("%Y%m%d")
         start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y%m%d")
         
-        for i, code in enumerate(tickers):
+        # 3. 深入测算这几十只候选股的技术形态
+        for index, row in filtered_df.iterrows():
+            code = row['代码']
+            name = row['名称']
             try:
-                # 获取该股票的日K线历史 (前复权)
+                # 获取日K线历史 (前复权)
                 hist = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 if len(hist) < 250:
                     continue
                     
                 close = hist['收盘'].iloc[-1]
                 
-                # 3. 趋势结构测算
+                # A. 均线多头测算
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
                 
-                # 收盘价 > MA20, MA60, MA120 且 MA20 > MA60
-                if not (close > ma20 and close > ma60 and close > ma120): continue
-                if not (ma20 > ma60): continue
+                # 收盘价 > MA20 > MA60 > MA120 (严格多头排列)
+                if not (close > ma20 and ma20 > ma60 and ma60 > ma120): continue
                     
-                # 4. 突破位置测算 (近250日最高价的 85% 以上)
+                # B. 突破位置测算 (当前价 >= 250日最高价的 85%)
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.85): continue
                     
-                # 5. 动量测算 (60日涨幅 >= 30%)
-                close_60 = hist['收盘'].iloc[-61]
-                ret_60 = (close - close_60) / close_60
-                if ret_60 < 0.30: continue
-                    
-                # 6. RSI (14) >= 55 测算
+                # C. RSI (14) >= 55 测算
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -132,35 +130,32 @@ def screen_a_shares():
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 if rsi < 55: continue
                     
-                # ================= 满足所有严苛条件，加入白名单 =================
-                name = names[i]
-                turnover_rate = filtered_df.iloc[i]['换手率']
-                turnover_amt = filtered_df.iloc[i]['成交额']
-                
-                ret_1d = (close - hist['收盘'].iloc[-2]) / hist['收盘'].iloc[-2]
-                
+                # ================= 满足所有终极条件，加入白名单 =================
                 final_a_stocks.append({
                     "Ticker": code,
                     "Name": name,
                     "Price": round(close, 2),
-                    "1D%": f"{round(ret_1d * 100, 2)}%",
-                    "60D_Return%": f"{round(ret_60 * 100, 2)}%",
-                    "Turnover(亿)": round(turnover_amt / 100_000_000, 2),
-                    "Turnover_Rate%": f"{turnover_rate}%",
+                    "60D_Return%": f"{round(row['60日涨跌幅'], 2)}%",
+                    "Turnover(亿)": round(row['成交额'] / 100_000_000, 2),
+                    "Turnover_Rate%": f"{row['换手率']}%",
                     "RSI": round(rsi, 2),
-                    "Struct": "MA20>MA60>MA120",
-                    "Fundamentals": "Check (ROE>15%, Growth>20%)" # 提醒看基本面
+                    "Trend": "MA20>60>120",
+                    "Score": "Check ROE>15%" # 提醒看基本面
                 })
-                print(f"✅ 捕获 A 股主升浪标的: {code} {name}")
+                print(f"✅ 捕获 A 股欧奈尔硬核资产: {code} {name}")
+                
+                # 停顿0.1秒，防止被服务器拉黑
+                time.sleep(0.1)
                 
             except Exception as e:
+                print(f"读取 {name} K线时出错，跳过...")
                 continue
                 
         return final_a_stocks
         
     except Exception as e:
         print(f"A 股扫描发生致命错误: {e}")
-        return[]
+        return []
 
 # ==========================================
 # 4. 写入 Google Sheets
@@ -170,7 +165,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
         if final_stocks:
             df = pd.DataFrame(final_stocks)
-            # 排序 (美股按90日涨幅，A股按60日涨幅降序，抓最强动量)
+            # 按涨幅降序排序，把最暴力的票放前面
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
             
@@ -181,11 +176,12 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sheet.update_cell(1, len(df.columns) + 2, "Last Updated:")
             sheet.update_cell(1, len(df.columns) + 3, now_time)
-            print(f"🎉 成功将 {len(df)} 只最强股票写入 {sheet_name}！")
+            print(f"🎉 成功将 {len(df)} 只欧奈尔主升浪股票写入 {sheet_name}！")
         else:
             sheet.clear()
-            sheet.update_acell("A1", "今天大盘较弱，没有完全符合条件的欧奈尔突破股。")
-            print(f"⚠️ {sheet_name}: 今天无符合条件的股票。")
+            now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sheet.update_acell("A1", f"[{now_time}] 当下大盘较弱，全市场无一只股票同时满足：150亿市值、5亿成交额、60日涨幅超30%、且均线多头排列。空仓等待！")
+            print(f"⚠️ {sheet_name}: 筛选严格，今天无符合条件的股票。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
