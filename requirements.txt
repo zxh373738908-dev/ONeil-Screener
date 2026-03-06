@@ -4,3 +4,4 @@ gspread
 google-auth
 lxml
 html5lib
+akshare
