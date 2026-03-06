@@ -1,4 +1,3 @@
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -7,6 +6,9 @@ from google.oauth2.service_account import Credentials
 import datetime
 import akshare as ak
 import time
+import requests
+import json
+import re
 
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
@@ -65,101 +67,94 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 3. [A股] 防阻断获取大盘数据核心逻辑
+# 3. [A股] 新浪财经高匿分页爬虫 (完美无视 GitHub 防火墙)
 # ==========================================
-def get_a_share_market_data():
-    # 策略1：尝试直接获取全市场（重试3次）
-    for attempt in range(3):
+def get_sina_market_snapshot():
+    print("🚀 启动【新浪财经】高匿分页拉取引擎 (绕过东财防火墙阻断)...")
+    all_data = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Referer': 'http://finance.sina.com.cn/'
+    }
+    
+    # 全市场约 5300 只股票，每次请求 80 只，循环 80 次绝对能抓全
+    for page in range(1, 80):
+        url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a"
         try:
-            print(f"📡 尝试获取 A 股全市场数据 (第 {attempt+1} 次)...")
-            df = ak.stock_zh_a_spot_em()
-            if not df.empty:
-                print("✅ 全市场数据获取成功！")
-                return df
+            res = requests.get(url, headers=headers, timeout=5)
+            text = res.text
+            # 到底了，退出循环
+            if text == "[]" or text == "null" or not text:
+                break
+                
+            # 极少数情况下新浪返回的 JSON 键没有引号，这里做个正则修复以防解析报错
+            text = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', text)
+            data = json.loads(text)
+            all_data.extend(data)
         except Exception as e:
-            print(f"⚠️ 第 {attempt+1} 次被防火墙阻断: {e}")
-            time.sleep(2) # 停顿2秒再试
+            continue
             
-    # 策略2：如果全市场被彻底封杀，采用“分块拉取”策略（沪深分离，大幅降低单次请求体积）
-    print("🚀 全市场接口受限，启动【拆包分块下载】策略绕过防火墙...")
-    try:
-        df_sh = ak.stock_sh_a_spot_em() # 仅拉取上海
-        time.sleep(1)
-        df_sz = ak.stock_sz_a_spot_em() # 仅拉取深圳
-        df_all = pd.concat([df_sh, df_sz], ignore_index=True)
-        print("✅ 分拆拉取成功！已重新拼接全市场数据。")
-        return df_all
-    except Exception as e:
-        print(f"❌ 终极获取失败，API 完全瘫痪: {e}")
-        return pd.DataFrame() # 返回空表
+    print(f"✅ 隐身拉取成功！共获取全市场 {len(all_data)} 只股票基础数据。")
+    return pd.DataFrame(all_data)
 
 # ==========================================
 # 4. [A股] 欧奈尔核心筛选模块
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (强力抗阻断版) ==========")
+    print("\n========== 开始处理 A股 (极速稳定版) ==========")
     try:
-        spot_df = get_a_share_market_data()
-        if spot_df.empty: return []
+        spot_df = get_sina_market_snapshot()
+        if spot_df.empty: 
+            print("❌ 获取数据失败。")
+            return []
         
-        # 强制转换数据类型
-        spot_df['最新价'] = pd.to_numeric(spot_df['最新价'], errors='coerce')
-        spot_df['总市值'] = pd.to_numeric(spot_df['总市值'], errors='coerce')
-        spot_df['成交额'] = pd.to_numeric(spot_df['成交额'], errors='coerce')
-        spot_df['换手率'] = pd.to_numeric(spot_df['换手率'], errors='coerce')
-        
-        # 处理 60日涨跌幅 可能不存在的情况 (兼容沪深分块数据)
-        if '60日涨跌幅' in spot_df.columns:
-            spot_df['60日涨跌幅'] = pd.to_numeric(spot_df['60日涨跌幅'], errors='coerce')
-            has_momentum = True
-        else:
-            has_momentum = False
+        # 数据清洗与单位转换 (新浪接口的市值单位是“万元”，成交额单位是“元”)
+        spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
+        spot_df['mktcap'] = pd.to_numeric(spot_df['mktcap'], errors='coerce') * 10000  # 转成 元
+        spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
+        spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
 
         # 核心初筛：市值 ≥ 150亿，股价 ≥ 10，日成交额 ≥ 5亿，换手率 ≥ 1.5%
-        cond = (spot_df['最新价'] >= 10) & (spot_df['总市值'] >= 15_000_000_000) & (spot_df['成交额'] >= 500_000_000) & (spot_df['换手率'] >= 1.5)
-        
-        if has_momentum:
-            cond = cond & (spot_df['60日涨跌幅'] >= 30)
+        cond1 = spot_df['trade'] >= 10
+        cond2 = spot_df['mktcap'] >= 15_000_000_000
+        cond3 = spot_df['amount'] >= 500_000_000
+        cond4 = spot_df['turnoverratio'] >= 1.5
             
-        filtered_df = spot_df[cond].copy()
-        print(f"初筛完成：满足顶级流动性的候选股剩 {len(filtered_df)} 只。开始 K 线形态扫描...")
+        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
+        print(f"第一轮初筛完成：满足 150亿市值 等顶级流动性要求的候选股剩 {len(filtered_df)} 只。开始深度扫描 K 线...")
 
         final_a_stocks = []
         end_date = datetime.datetime.now().strftime("%Y%m%d")
         start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y%m%d")
         
         for index, row in filtered_df.iterrows():
-            code = row['代码']
-            name = row['名称']
+            code = row['code']
+            name = row['name']
             try:
-                # 停顿 0.3 秒，防止查询 K 线时再次被拉黑
-                time.sleep(0.3)
+                # 停顿 0.2 秒读取 K 线 (因为过滤后只剩几十只，慢一点绝不会被封)
+                time.sleep(0.2)
                 hist = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 if len(hist) < 250: continue
                     
                 close = hist['收盘'].iloc[-1]
                 
-                # 如果没用上 60日接口，手动测算动量
-                if not has_momentum:
-                    close_60 = hist['收盘'].iloc[-61]
-                    ret_60 = (close - close_60) / close_60
-                    if ret_60 < 0.30: continue
-                    momentum_60d = ret_60 * 100
-                else:
-                    momentum_60d = row['60日涨跌幅']
+                # 1. 手动测算 60日动量 (>= 30%)
+                close_60 = hist['收盘'].iloc[-61]
+                ret_60 = (close - close_60) / close_60
+                if ret_60 < 0.30: continue
                 
-                # 均线多头测算
+                # 2. 均线多头测算
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
                 if not (close > ma20 and close > ma60 and close > ma120): continue
                 if not (ma20 > ma60): continue
                     
-                # 突破历史新高测算 (250日最高价 85%)
+                # 3. 突破历史新高测算 (250日最高价 85%)
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.85): continue
                     
-                # RSI 测算
+                # 4. RSI 测算
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -174,14 +169,14 @@ def screen_a_shares():
                     "Ticker": code,
                     "Name": name,
                     "Price": round(close, 2),
-                    "60D_Return%": f"{round(momentum_60d, 2)}%",
-                    "Turnover(亿)": round(row['成交额'] / 100_000_000, 2),
-                    "Turnover_Rate%": f"{row['换手率']}%",
+                    "60D_Return%": f"{round(ret_60 * 100, 2)}%",
+                    "Turnover(亿)": round(row['amount'] / 100_000_000, 2),
+                    "Turnover_Rate%": f"{row['turnoverratio']}%",
                     "RSI": round(rsi, 2),
                     "Trend": "MA20>60>120",
                     "Fundamental": "Check ROE>15%" 
                 })
-                print(f"🎯 捕获主升浪: {code} {name} (60日涨幅 {round(momentum_60d, 2)}%)")
+                print(f"🎯 捕获主升浪: {code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
                 
             except Exception as e:
                 continue
