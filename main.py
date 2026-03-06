@@ -20,7 +20,7 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 (黄金坑回调低吸版)
+# 2. [美股] 欧奈尔选股模块 (最新优化：抓取机构护盘黄金坑)
 # ==========================================
 def screen_us_stocks():
     print("\n========== 开始处理美股 (兼容机构护盘与黄金坑标的) ==========")
@@ -45,25 +45,25 @@ def screen_us_stocks():
             volume = hist['Volume'].iloc[-1]
             if close < 15 or (close * volume) < 50000000: continue
             
-            # 【优化1】均线多头：允许跌破 20日线洗盘，但必须守住 150/200日 长线生命线
+            # 均线多头：允许跌破 20日线洗盘，但必须守住长线生命线
             ma20 = hist['Close'].rolling(20).mean().iloc[-1]
             ma50 = hist['Close'].rolling(50).mean().iloc[-1]
             ma150 = hist['Close'].rolling(150).mean().iloc[-1]
             ma200 = hist['Close'].rolling(200).mean().iloc[-1]
             
-            # 机构大趋势不能变坏 (MA50必须在MA200之上)，且股价必须在长线支撑位之上
+            # 机构大趋势不能变坏，且股价必须在长线支撑位之上
             if not (ma50 > ma200): continue
             if not (close > ma150 and close > ma200): continue
             
-            # 【优化2】突破历史新高测算：容忍 20% 的杯柄/双底回撤深度 (以前是15%，太严苛)
+            # 突破历史新高测算：容忍 20% 的回撤深度
             high_250 = hist['High'].rolling(250).max().iloc[-1]
             if close < (high_250 * 0.80): continue
             
-            # 【优化3】动量要求降维：90日涨幅 >= 15% (将区域银行和震荡洗盘的软件股纳入射程)
+            # 动量要求降维：90日涨幅 >= 15% 
             ret_90d = (close - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
             if ret_90d < 0.15: continue
             
-            # 【优化4】RSI底线降至 45：允许短期情绪进入洗盘降温期，只要不崩盘即可
+            # RSI底线降至 45：允许短期洗盘降温
             delta = hist['Close'].diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
@@ -73,7 +73,7 @@ def screen_us_stocks():
             rsi = 100 - (100 / (1 + rs)).iloc[-1]
             if rsi < 45: continue
             
-            # 判断当前是突破态还是回调态 (打标签方便你在表格里区分)
+            # 自动打标签：突破追涨(Breakout) 还是 黄金坑低吸(Pullback)
             struct_label = "Breakout (>MA20)" if close > ma20 else "Pullback (Near MA50)"
             
             final_stocks.append({
@@ -88,21 +88,48 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (A股高波动回调低吸版)
+# 3. [A股] 新浪财经高匿分页爬虫 (绕过防火墙)
+# ==========================================
+def get_sina_market_snapshot():
+    print("🚀 启动【新浪财经】高匿分页拉取引擎...")
+    all_data = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'http://finance.sina.com.cn/'
+    }
+    
+    for page in range(1, 80):
+        url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            text = res.text
+            if text == "[]" or text == "null" or not text:
+                break
+            text = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', text)
+            data = json.loads(text)
+            all_data.extend(data)
+        except:
+            continue
+            
+    print(f"✅ 隐身拉取成功！共获取全市场 {len(all_data)} 只股票基础数据。")
+    return pd.DataFrame(all_data)
+
+# ==========================================
+# 4. [A股] 欧奈尔核心筛选模块 (完全还原上一版 A 股逻辑)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (兼容主升浪回调洗盘标的) ==========")
+    print("\n========== 开始处理 A股 (还原 Hold MA60 洗盘版) ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: return []
         
-        # 数据清洗与单位转换 (市值转为元)
+        # 数据清洗与单位转换 
         spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
         spot_df['mktcap'] = pd.to_numeric(spot_df['mktcap'], errors='coerce') * 10000
         spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
         spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
 
-        # 【优化1】市值门槛降至 50亿 (防止次新股流通盘计算差异错杀)，成交额维持 2亿 (确认主力资金活跃度)
+        # 还原上一版的门槛：50亿市值 / 2亿成交额 / 1.5%换手
         cond1 = spot_df['trade'] >= 10
         cond2 = spot_df['mktcap'] >= 5_000_000_000   # 50亿
         cond3 = spot_df['amount'] >= 200_000_000     # 2亿
@@ -127,23 +154,23 @@ def screen_a_shares():
                     
                 close = hist['收盘'].iloc[-1]
                 
-                # 动量要求：60日涨幅 >= 20%
+                # 还原：60日涨幅 >= 20%
                 close_60 = hist['收盘'].iloc[-61]
                 ret_60 = (close - close_60) / close_60
                 if ret_60 < 0.20: continue
                 
-                # 【优化2】均线多头测算：允许股价暂时跌破20日线洗盘，但必须站稳60日/120日线，且中期趋势(MA20>MA60)保持向上
+                # 还原：允许跌破20日线，守住60日/120日生命线
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
-                if not (close > ma60 and close > ma120): continue # 守住生命线
-                if not (ma20 > ma60): continue # 中期多头排列未被破坏
+                if not (close > ma60 and close > ma120): continue 
+                if not (ma20 > ma60): continue 
                     
-                # 【优化3】突破历史新高测算：容忍250日最高价向下回撤 20% (A股杯柄形态常见深度)
+                # 还原：容忍 20% 的回撤
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80): continue 
                     
-                # 【优化4】RSI 测算：底线降至 50，允许短期情绪降温，只要没进入空头趋势即可
+                # 还原：RSI 底线 50
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -153,7 +180,7 @@ def screen_a_shares():
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 if rsi < 50: continue
                     
-                # ================= 满足条件，加入白名单 =================
+                # 还原：原汁原味的字典输出 (Trend 固定为 Hold MA60)
                 final_a_stocks.append({
                     "Ticker": pure_code,
                     "Name": name,
@@ -198,7 +225,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
         else:
             sheet.clear()
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股满足机构建仓要求，请保持空仓。")
+            sheet.update_acell("A1", f"[{now_time}] 当下大盘无符合条件的标的，请保持耐心。")
             print(f"⚠️ {sheet_name}: 无符合条件的股票。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
