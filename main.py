@@ -13,14 +13,14 @@ import re
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  # ⚠️ 记得换成你的真实链接！
+SHEET_URL = "你的GOOGLE表格链接填在这里"  # ⚠️ 记得换成你的真实链接！
 
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 
+# 2. [美股] 欧奈尔选股模块 (保持原版严格突破逻辑)
 # ==========================================
 def screen_us_stocks():
     print("\n========== 开始处理美股 ==========")
@@ -73,7 +73,7 @@ def get_sina_market_snapshot():
     print("🚀 启动【新浪财经】高匿分页拉取引擎...")
     all_data = []
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
         'Referer': 'http://finance.sina.com.cn/'
     }
     
@@ -94,10 +94,10 @@ def get_sina_market_snapshot():
     return pd.DataFrame(all_data)
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (参数优化版)
+# 4. [A股] 欧奈尔核心筛选模块 (A股高波动回调低吸版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (参数优化极速版) ==========")
+    print("\n========== 开始处理 A股 (兼容主升浪回调洗盘标的) ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: return []
@@ -108,14 +108,14 @@ def screen_a_shares():
         spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
         spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
 
-        # 核心初筛 (更加贴合A股机构建仓特征)：市值 ≥ 100亿，股价 ≥ 10，成交额 ≥ 2亿，换手率 ≥ 1.5%
+        # 【优化1】市值门槛降至 50亿 (防止次新股流通盘计算差异错杀)，成交额维持 2亿 (确认主力资金活跃度)
         cond1 = spot_df['trade'] >= 10
-        cond2 = spot_df['mktcap'] >= 10_000_000_000  # 100亿
-        cond3 = spot_df['amount'] >= 200_000_000    # 2亿
+        cond2 = spot_df['mktcap'] >= 5_000_000_000   # 50亿
+        cond3 = spot_df['amount'] >= 200_000_000     # 2亿
         cond4 = spot_df['turnoverratio'] >= 1.5
             
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
-        print(f"第一轮初筛完成：满足 100亿市值/2亿成交额 的候选股剩 {len(filtered_df)} 只。开始扫描 K 线...")
+        print(f"第一轮初筛完成：满足 50亿市值/2亿成交额 的候选股剩 {len(filtered_df)} 只。开始扫描 K 线...")
 
         final_a_stocks = []
         end_date = datetime.datetime.now().strftime("%Y%m%d")
@@ -123,8 +123,7 @@ def screen_a_shares():
         
         for index, row in filtered_df.iterrows():
             raw_code = row['code']
-            # 【关键修复】提取后 6 位纯数字代码，防止 Akshare 报错跳过
-            pure_code = raw_code[-6:] 
+            pure_code = raw_code[-6:] # 截取后6位纯数字
             name = row['name']
             
             try:
@@ -134,23 +133,23 @@ def screen_a_shares():
                     
                 close = hist['收盘'].iloc[-1]
                 
-                # 1. 动量要求优化：60日涨幅 >= 20% (抓突破起涨点)
+                # 动量要求：60日涨幅 >= 20%
                 close_60 = hist['收盘'].iloc[-61]
                 ret_60 = (close - close_60) / close_60
                 if ret_60 < 0.20: continue
                 
-                # 2. 均线多头测算
+                # 【优化2】均线多头测算：允许股价暂时跌破20日线洗盘，但必须站稳60日/120日线，且中期趋势(MA20>MA60)保持向上
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
-                if not (close > ma20 and close > ma60 and close > ma120): continue
-                if not (ma20 > ma60): continue
+                if not (close > ma60 and close > ma120): continue # 守住生命线
+                if not (ma20 > ma60): continue # 中期多头排列未被破坏
                     
-                # 3. 突破历史新高测算 (250日最高价 85%)
+                # 【优化3】突破历史新高测算：容忍250日最高价向下回撤 20% (A股杯柄形态常见深度)
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
-                if close < (high_250 * 0.85): continue
+                if close < (high_250 * 0.80): continue 
                     
-                # 4. RSI 测算
+                # 【优化4】RSI 测算：底线降至 50，允许短期情绪降温，只要没进入空头趋势即可
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -158,9 +157,9 @@ def screen_a_shares():
                 ema_down = down.ewm(com=13, adjust=False).mean()
                 rs = ema_up / ema_down
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
-                if rsi < 55: continue
+                if rsi < 50: continue
                     
-                # ================= 白名单 =================
+                # ================= 满足条件，加入白名单 =================
                 final_a_stocks.append({
                     "Ticker": pure_code,
                     "Name": name,
@@ -169,10 +168,10 @@ def screen_a_shares():
                     "Turnover(亿)": round(row['amount'] / 100_000_000, 2),
                     "Turnover_Rate%": f"{row['turnoverratio']}%",
                     "RSI": round(rsi, 2),
-                    "Trend": "MA20>60>120",
+                    "Trend": "Hold MA60",
                     "Fundamental": "Check ROE>15%" 
                 })
-                print(f"🎯 捕获主升浪: {pure_code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
+                print(f"🎯 捕获主升浪标的: {pure_code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
                 
             except Exception as e:
                 continue
@@ -205,7 +204,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
         else:
             sheet.clear()
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股同时满足：100亿市值、2亿成交额、60日涨幅超20% 且逼近历史新高。")
+            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股满足条件 (50亿市值/2亿成交额/60日涨幅超20%)。")
             print(f"⚠️ {sheet_name}: 无符合条件的股票。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
