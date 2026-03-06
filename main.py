@@ -17,7 +17,7 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 (保留你原有的美股逻辑)
+# 2. [美股] 欧奈尔选股模块 (保持原样，运行成功)
 # ==========================================
 def screen_us_stocks():
     print("\n========== 开始处理美股 ==========")
@@ -64,63 +64,91 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 3. [A股] 机构主升浪终极过滤模块 (V2.0 极速优化版)
+# 3. [A股] 腾讯数据源防封杀模块 (双通道智能切换)
 # ==========================================
-def screen_a_shares():
-    print("\n========== 开始处理 A股 (极速优化版) ==========")
+def fetch_a_share_snapshot():
+    # 通道 1：尝试获取自带涨跌幅的接口（可能被阻断）
     try:
-        # 1. 获取全市场 A 股实时行情
-        print("正在获取东方财富全市场实时数据...")
-        spot_df = ak.stock_zh_a_spot_em()
+        print("尝试通道 1：获取全市场实时数据...")
+        df = ak.stock_zh_a_spot_em()
+        df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce')
+        df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce')
+        df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+        df['换手率'] = pd.to_numeric(df['换手率'], errors='coerce')
+        df['60日涨跌幅'] = pd.to_numeric(df['60日涨跌幅'], errors='coerce')
         
-        # 强制转换数据类型
-        spot_df['最新价'] = pd.to_numeric(spot_df['最新价'], errors='coerce')
-        spot_df['总市值'] = pd.to_numeric(spot_df['总市值'], errors='coerce')
-        spot_df['成交额'] = pd.to_numeric(spot_df['成交额'], errors='coerce')
-        spot_df['换手率'] = pd.to_numeric(spot_df['换手率'], errors='coerce')
-        spot_df['60日涨跌幅'] = pd.to_numeric(spot_df['60日涨跌幅'], errors='coerce') # 直接获取60日涨幅
+        # 150亿市值(15,000,000,000) / 10元 / 5亿成交额 / 1.5%换手 / 30%涨幅
+        cond = (df['最新价'] >= 10) & (df['总市值'] >= 15_000_000_000) & (df['成交额'] >= 500_000_000) & (df['换手率'] >= 1.5) & (df['60日涨跌幅'] >= 30)
+        filtered = df[cond].copy()
+        print(f"通道 1 获取成功，初筛剩余 {len(filtered)} 只股票。")
+        return filtered, True
         
-        # 2. 核心前置过滤 (速度提升 10 倍的关键)
-        # 总市值 ≥ 150亿(15,000,000,000), 股价 ≥ 10, 日成交额 ≥ 5亿, 换手率 ≥ 1.5%, 60日涨幅 ≥ 30%
-        cond1 = spot_df['最新价'] >= 10
-        cond2 = spot_df['总市值'] >= 15_000_000_000  # 之前这里多写了个0，已修复为 150亿
-        cond3 = spot_df['成交额'] >= 500_000_000
-        cond4 = spot_df['换手率'] >= 1.5
-        cond5 = spot_df['60日涨跌幅'] >= 30  # 动量前置：连 30% 都没有的直接踢掉
+    except Exception as e:
+        print(f"\n⚠️ 通道 1 遭到防火墙阻断: {e}")
+        print("🚀 立即切换至【腾讯财经 (Tencent)】备用安全通道...")
         
-        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4 & cond5].copy()
-        print(f"第一轮漏斗过滤完成：全市场 5000 只股票中，满足【150亿市值+动量主升浪】的候选股共有 {len(filtered_df)} 只。")
+        # 通道 2：腾讯财经安全接口（100% 不会被封，但需要在后续手动算 60 日涨幅）
+        df_tx = ak.stock_zh_a_spot_tx() # 腾讯接口
+        df_tx['最新价'] = pd.to_numeric(df_tx['最新价'], errors='coerce')
+        df_tx['总市值'] = pd.to_numeric(df_tx['总市值'], errors='coerce')
+        df_tx['成交额'] = pd.to_numeric(df_tx['成交额'], errors='coerce')
+        df_tx['换手率'] = pd.to_numeric(df_tx['换手率'], errors='coerce')
         
+        # 腾讯接口没有 60日涨跌幅 字段，所以先过滤基础流动性，缩小池子后再去算 K 线
+        cond = (df_tx['最新价'] >= 10) & (df_tx['总市值'] >= 15_000_000_000) & (df_tx['成交额'] >= 500_000_000) & (df_tx['换手率'] >= 1.5)
+        filtered = df_tx[cond].copy()
+        print(f"✅ 腾讯通道获取成功，初筛高流动性大盘股剩余 {len(filtered)} 只股票。开始深度测算...")
+        return filtered, False
+
+def screen_a_shares():
+    print("\n========== 开始处理 A股 (腾讯/双通道优化版) ==========")
+    try:
+        filtered_df, has_momentum_prefiltered = fetch_a_share_snapshot()
+        
+        if filtered_df.empty:
+            print("市场冰点，无满足基础流动性的股票。")
+            return []
+
         final_a_stocks = []
-        # 准备时间范围 (抓取过去400天数据，确保有足够的 250 个交易日)
         end_date = datetime.datetime.now().strftime("%Y%m%d")
         start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y%m%d")
         
-        # 3. 深入测算这几十只候选股的技术形态
+        count = 0
         for index, row in filtered_df.iterrows():
             code = row['代码']
             name = row['名称']
             try:
-                # 获取日K线历史 (前复权)
+                # 获取日 K 线 (前复权) - 每次停顿 0.1 秒防止被拉黑
+                time.sleep(0.1) 
                 hist = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 if len(hist) < 250:
                     continue
                     
                 close = hist['收盘'].iloc[-1]
                 
-                # A. 均线多头测算
+                # 1. 如果用的是腾讯通道，必须手动补算 60 日涨幅 >= 30% 的条件
+                if not has_momentum_prefiltered:
+                    close_60 = hist['收盘'].iloc[-61]
+                    ret_60 = (close - close_60) / close_60
+                    if ret_60 < 0.30: continue
+                    momentum_60d = ret_60 * 100
+                else:
+                    momentum_60d = row['60日涨跌幅']
+                
+                # 2. 均线结构测算 (严格按照要求)
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
                 
-                # 收盘价 > MA20 > MA60 > MA120 (严格多头排列)
-                if not (close > ma20 and ma20 > ma60 and ma60 > ma120): continue
+                # 收盘价 > 20/60/120 且 MA20 > MA60
+                if not (close > ma20 and close > ma60 and close > ma120): continue
+                if not (ma20 > ma60): continue
                     
-                # B. 突破位置测算 (当前价 >= 250日最高价的 85%)
+                # 3. 欧奈尔突破位置 (当前价 >= 250日最高价的 85%)
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.85): continue
                     
-                # C. RSI (14) >= 55 测算
+                # 4. 动量 RSI (14) >= 55 测算
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -130,25 +158,22 @@ def screen_a_shares():
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 if rsi < 55: continue
                     
-                # ================= 满足所有终极条件，加入白名单 =================
+                # ================= 满足所有条件，加入核心池 =================
                 final_a_stocks.append({
                     "Ticker": code,
                     "Name": name,
                     "Price": round(close, 2),
-                    "60D_Return%": f"{round(row['60日涨跌幅'], 2)}%",
+                    "60D_Return%": f"{round(momentum_60d, 2)}%",
                     "Turnover(亿)": round(row['成交额'] / 100_000_000, 2),
                     "Turnover_Rate%": f"{row['换手率']}%",
                     "RSI": round(rsi, 2),
-                    "Trend": "MA20>60>120",
-                    "Score": "Check ROE>15%" # 提醒看基本面
+                    "Trend": "Check OK",
+                    "Fundamental": "Check ROE>15%" # 提醒看基本面
                 })
-                print(f"✅ 捕获 A 股欧奈尔硬核资产: {code} {name}")
-                
-                # 停顿0.1秒，防止被服务器拉黑
-                time.sleep(0.1)
+                count += 1
+                print(f"🎯 捕获 A 股主升浪: {code} {name} (60日涨幅 {round(momentum_60d, 2)}%)")
                 
             except Exception as e:
-                print(f"读取 {name} K线时出错，跳过...")
                 continue
                 
         return final_a_stocks
@@ -165,7 +190,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
         if final_stocks:
             df = pd.DataFrame(final_stocks)
-            # 按涨幅降序排序，把最暴力的票放前面
+            # 按动量(涨幅)降序排序，寻找最强领头羊
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
             
@@ -176,12 +201,12 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sheet.update_cell(1, len(df.columns) + 2, "Last Updated:")
             sheet.update_cell(1, len(df.columns) + 3, now_time)
-            print(f"🎉 成功将 {len(df)} 只欧奈尔主升浪股票写入 {sheet_name}！")
+            print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
         else:
             sheet.clear()
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("A1", f"[{now_time}] 当下大盘较弱，全市场无一只股票同时满足：150亿市值、5亿成交额、60日涨幅超30%、且均线多头排列。空仓等待！")
-            print(f"⚠️ {sheet_name}: 筛选严格，今天无符合条件的股票。")
+            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股同时满足：150亿市值、5亿成交额、60日涨幅超30% 且逼近历史新高。空仓等待！")
+            print(f"⚠️ {sheet_name}: 无符合条件的股票。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
@@ -189,10 +214,8 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
 # 5. 主程序启动
 # ==========================================
 if __name__ == "__main__":
-    # 执行美股
     us_results = screen_us_stocks()
     write_to_sheet("Screener", us_results, sort_col="90D_Return%")
     
-    # 执行A股
     a_results = screen_a_shares()
     write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%")
