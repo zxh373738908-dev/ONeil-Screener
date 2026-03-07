@@ -17,14 +17,14 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股核心
+# 2. [美股] 欧奈尔选股核心 (全参数补全版)
 # ==========================================
 def fetch_us_hist(ticker):
     stock = yf.Ticker(ticker)
     return stock.history(period="1y")
 
 def screen_us_stocks():
-    print("\n========== 开始处理美股 [独立运行版] ==========")
+    print("\n========== 开始处理美股 [全参数补全版] ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
@@ -53,6 +53,11 @@ def screen_us_stocks():
             
             close = hist['Close'].iloc[-1]
             volume = hist['Volume'].iloc[-1]
+            
+            # 【新增】欧奈尔突破放量指标：计算今日量比 (Vol Ratio)
+            avg_vol_50 = hist['Volume'].tail(50).mean()
+            vol_ratio = volume / avg_vol_50 if avg_vol_50 > 0 else 0
+            
             if close < 15 or (close * volume) < 50000000: continue
             
             ma20 = hist['Close'].rolling(20).mean().iloc[-1]
@@ -64,6 +69,9 @@ def screen_us_stocks():
             
             high_250 = hist['High'].rolling(250).max().iloc[-1]
             if close < (high_250 * 0.80): continue
+            
+            # 【新增】欧奈尔新高指标：计算当前距离52周最高点的距离
+            dist_high = (close - high_250) / high_250
             
             ret_90d = (close - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
             if ret_90d < 0.15: continue
@@ -83,6 +91,9 @@ def screen_us_stocks():
                 "Ticker": ticker,
                 "Price": round(close, 2),
                 "90D_Return%": f"{round(ret_90d * 100, 2)}%",
+                "RSI": round(rsi, 2),
+                "Vol_Ratio": round(vol_ratio, 2),
+                "Dist_High%": f"{round(dist_high * 100, 2)}%",
                 "Turnover(M)": round((close * volume) / 1000000, 2),
                 "Struct": struct_label
             })
