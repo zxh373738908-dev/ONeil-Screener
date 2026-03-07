@@ -6,20 +6,27 @@ import datetime
 import requests
 import json
 import re
+import time
 import concurrent.futures
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import warnings
 warnings.filterwarnings('ignore')
 
+# ==========================================
+# 1. 基础设置与 Google Sheets 连接
+# ==========================================
 SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  
-scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
+# ==========================================
+# 2. 新浪财经大盘隐身雷达
+# ==========================================
 def get_sina_market_snapshot():
     print("\n🚀 启动【新浪财经】高匿分页拉取引擎...")
-    all_data =[]
+    all_data = []
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn/'}
     for page in range(1, 80):
         url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a"
@@ -34,31 +41,37 @@ def get_sina_market_snapshot():
     print(f"✅ 获取 A 股 {len(df)} 只股票基础数据成功！")
     return df
 
-# 【新增】将单只股票的处理逻辑抽离出来，方便多线程同时调用
-def process_single_stock(row, em_session):
+# ==========================================
+# 3. 腾讯财经 K线处理核心逻辑 (替换东财，防拦截)
+# ==========================================
+def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
     name = row['name']
     
-    # 区分沪深，过滤北交所
-    if pure_code.startswith(('6', '5')): prefix = "1"
-    elif pure_code.startswith(('0', '3')): prefix = "0"
+    # 腾讯接口前缀：上海 sh，深圳 sz
+    if pure_code.startswith(('6', '5')): prefix = "sh"
+    elif pure_code.startswith(('0', '3')): prefix = "sz"
     else: return {"status": "ignore"} 
 
     try:
-        secid = f"{prefix}.{pure_code}"
-        em_url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=300"
-        res = em_session.get(em_url, timeout=5).json()
+        # 换用腾讯财经前复权日 K 线接口，极其稳定！
+        k_url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={prefix}{pure_code},day,,,300,qfq"
+        res = session.get(k_url, timeout=5).json()
         
-        if not res or 'data' not in res or not res['data'] or 'klines' not in res['data']:
-            return {"status": "fail", "reason": "网络接口超时"}
+        # 腾讯 JSON 结构解析
+        if not res or res.get('code') != 0:
+            return {"status": "fail", "reason": "接口无数据"}
+            
+        data_node = res['data'][f'{prefix}{pure_code}']
+        klines = data_node.get('qfqday', data_node.get('day', []))
         
-        klines = res['data']['klines']
         if len(klines) < 250:
             return {"status": "fail", "reason": "次新股或退市"}
         
-        closes = [float(k.split(',')[2]) for k in klines]
-        highs = [float(k.split(',')[3]) for k in klines]
-        vols = [float(k.split(',')[5]) for k in klines]
+        # 腾讯数据结构: [date, open, close, high, low, vol]
+        closes = [float(k[2]) for k in klines]
+        highs = [float(k[3]) for k in klines]
+        vols = [float(k[5]) for k in klines]
         
         close_series = pd.Series(closes)
         high_series = pd.Series(highs)
@@ -76,12 +89,13 @@ def process_single_stock(row, em_session):
         ma20 = close_series.rolling(20).mean().iloc[-1]
         ma60 = close_series.rolling(60).mean().iloc[-1]
         ma120 = close_series.rolling(120).mean().iloc[-1]
+        
         if not (close > ma60 and close > ma120) or not (ma20 > ma60): 
-            return {"status": "fail", "reason": "破位MA60/120生命线"}
+            return {"status": "fail", "reason": "跌破生命线"}
             
         high_250 = high_series.rolling(250).max().iloc[-1]
         if close < (high_250 * 0.80): 
-            return {"status": "fail", "reason": "高点回撤过大(>20%)"}
+            return {"status": "fail", "reason": "回撤超20%"}
         
         dist_high = (close - high_250) / high_250
             
@@ -91,7 +105,7 @@ def process_single_stock(row, em_session):
         rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         if rsi < 50: 
-            return {"status": "fail", "reason": "短期RSI弱势(<50)"}
+            return {"status": "fail", "reason": "RSI弱势"}
         
         mkt_cap_yi = row['mktcap'] / 100_000_000
             
@@ -111,13 +125,16 @@ def process_single_stock(row, em_session):
         return {"status": "success", "data": data, "log": f"✅ 捕获主升浪标的: {pure_code} {name}"}
         
     except Exception as e:
-        return {"status": "fail", "reason": "网络接口超时"}
+        return {"status": "fail", "reason": "接口无数据"}
 
+# ==========================================
+# 4. 主干过滤与多线程执行
+# ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股[多线程极速版] ==========")
+    print("\n========== 开始处理 A股 [多线程腾讯极速版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
-        if spot_df.empty: return[], "❌ 接口获取失败，大盘数据为空。"
+        if spot_df.empty: return [], "❌ 接口获取失败，大盘数据为空。"
             
         total_stocks = len(spot_df)
         spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
@@ -131,26 +148,24 @@ def screen_a_shares():
         cond4 = spot_df['turnoverratio'] >= 1.5              
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
         liquidity_passed = len(filtered_df)
-        print(f"🎯 流动性初筛: 满足核心标的剩余 {liquidity_passed} 只。开始启动并发引擎加速扫描...")
+        print(f"🎯 流动性初筛: 满足核心标的剩余 {liquidity_passed} 只。开始启动腾讯并发引擎...")
 
-        final_a_stocks =[]
-        fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "次新股或退市": 0, "网络接口超时": 0}
+        final_a_stocks = []
+        fail_reasons = {"动量不足20%": 0, "跌破生命线": 0, "回撤超20%": 0, "RSI弱势": 0, "次新股或退市": 0, "接口无数据": 0}
         
-        # 配置线程池专属 Session (扩大连接池容量防止阻塞)
-        em_session = requests.Session()
-        retries = Retry(total=3, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retries)
-        em_session.mount('https://', adapter)
-        em_session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        # 配置线程池专属 Session，增加重试机制对抗偶尔丢包
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retries)
+        session.mount('https://', adapter)
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
 
         processed_count = 0
         
-        # 【核心黑科技】：开启 15 个并发线程同时拉取数据
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            # 提交所有任务到线程池
-            future_to_code = {executor.submit(process_single_stock, row, em_session): str(row['code']) for index, row in filtered_df.iterrows()}
+        # 调整为 8 线程并发，速度极快且 100% 稳定不被封杀
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_code = {executor.submit(process_single_stock, row, session): str(row['code']) for index, row in filtered_df.iterrows()}
             
-            # 等待结果返回
             for future in concurrent.futures.as_completed(future_to_code):
                 processed_count += 1
                 if processed_count % 100 == 0:
@@ -170,17 +185,20 @@ def screen_a_shares():
             f"2. 流动性初筛：剩余 {liquidity_passed} 只标的\n"
             f"3. 淘汰明细：\n"
             f"   - 【动量不足20%】: {fail_reasons['动量不足20%']}\n"
-            f"   - 【跌破生命线】: {fail_reasons['破位MA60/120生命线']}\n"
-            f"   - 【回撤超20%】: {fail_reasons['高点回撤过大(>20%)']}\n"
-            f"   - 【RSI弱势】: {fail_reasons['短期RSI弱势(<50)']}\n"
+            f"   - 【跌破生命线】: {fail_reasons['跌破生命线']}\n"
+            f"   - 【回撤超20%】: {fail_reasons['回撤超20%']}\n"
+            f"   - 【RSI弱势】: {fail_reasons['RSI弱势']}\n"
             f"   - 【上市不足】: {fail_reasons['次新股或退市']}\n"
-            f"   - 【接口无数据】: {fail_reasons['网络接口超时']}\n"
+            f"   - 【接口无数据】: {fail_reasons['接口无数据']}\n"
             f"结论：多线程系统已极速完成最新检测。"
         )
         return final_a_stocks, diag_msg
     except Exception as e:
-        return[], f"代码发生内部错误: {e}"
+        return [], f"代码发生内部错误: {e}"
 
+# ==========================================
+# 5. 写入 Google Sheets
+# ==========================================
 def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
     try:
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
@@ -188,13 +206,13 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             df = pd.DataFrame(final_stocks)
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            data_to_write =[df.columns.values.tolist()] + df.values.tolist()
+            data_to_write = [df.columns.values.tolist()] + df.values.tolist()
             sheet.clear()
             sheet.update(values=data_to_write, range_name="A1")
             
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell(f"I1", "Last Updated:")
-            sheet.update_acell(f"J1", now_time)
+            sheet.update_acell("I1", "Last Updated:")
+            sheet.update_acell("J1", now_time)
             print(f"🎉 成功将 {len(df)} 只标的写入 {sheet_name}！")
         else:
             sheet.clear()
