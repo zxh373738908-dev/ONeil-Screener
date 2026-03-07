@@ -23,7 +23,7 @@ client = gspread.authorize(creds)
 # 2. [美股] 欧奈尔选股模块 (黄金坑回调低吸版)
 # ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 (兼容机构护盘与黄金坑标的) ==========")
+    print("\n========== 开始处理美股 ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
@@ -81,7 +81,7 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 3. [A股] 东方财富底层原生接口 (绝对防屏蔽)
+# 3. [A股] 东方财富底层原生接口
 # ==========================================
 def get_eastmoney_spot():
     print("🚀 启动【东方财富底层原生 API】拉取全市场数据...")
@@ -89,7 +89,8 @@ def get_eastmoney_spot():
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     for page in range(1, 60):
-        url = f"http://82.push2.eastmoney.com/api/qt/clist/get?pn={page}&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f2,f6,f8,f12,f14,f20"
+        # 移除CDN前缀，使用最稳定的主节点
+        url = f"http://push2.eastmoney.com/api/qt/clist/get?pn={page}&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f2,f6,f8,f12,f14,f20"
         try:
             res = requests.get(url, headers=headers, timeout=5).json()
             if not res.get('data') or not res['data'].get('diff'):
@@ -103,32 +104,37 @@ def get_eastmoney_spot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (弱市/慢牛兼容版)
+# 4. [A股] 欧奈尔核心筛选模块 (严格 20% 版 + 自动诊断报告)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (50亿/2亿/慢牛兼容版) ==========")
+    print("\n========== 开始处理 A股 (严格 20% + 上帝视角诊断) ==========")
     try:
         spot_df = get_eastmoney_spot()
-        if spot_df.empty: return []
+        if spot_df.empty: 
+            return [], "❌ 东方财富接口数据获取失败，可能遇到临时网络波动。"
         
+        total_stocks = len(spot_df)
         spot_df = spot_df.replace("-", pd.NA)
         spot_df['f2'] = pd.to_numeric(spot_df['f2'], errors='coerce')   
         spot_df['f20'] = pd.to_numeric(spot_df['f20'], errors='coerce') 
         spot_df['f6'] = pd.to_numeric(spot_df['f6'], errors='coerce')   
         spot_df['f8'] = pd.to_numeric(spot_df['f8'], errors='coerce')   
 
-        # 【调整1】：换手率底线降至 1.0%，防止错杀超级大盘机构股
+        # 【流动性初筛】股价10 / 50亿市值 / 2亿成交额 / 1.5%换手
         cond1 = spot_df['f2'] >= 10
-        cond2 = spot_df['f20'] >= 5_000_000_000   # 50亿市值
-        cond3 = spot_df['f6'] >= 200_000_000      # 2亿成交额
-        cond4 = spot_df['f8'] >= 1.0              # 1.0%换手
+        cond2 = spot_df['f20'] >= 5_000_000_000   
+        cond3 = spot_df['f6'] >= 200_000_000      
+        cond4 = spot_df['f8'] >= 1.5              
             
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
-        print(f"🎯 漏斗1 (流动性过滤): 满足条件的标的剩余 {len(filtered_df)} 只。开始深度扫描...")
+        liquidity_passed = len(filtered_df)
+        print(f"🎯 流动性初筛: 满足 50亿/2亿 的核心标的剩余 {liquidity_passed} 只。开始深入 K 线扫描...")
 
         final_a_stocks = []
         headers = {'User-Agent': 'Mozilla/5.0'}
-        fail_reasons = {"动量不足15%": 0, "破位MA60/120": 0, "回撤超20%": 0, "RSI弱势": 0}
+        
+        # 统计淘汰原因
+        fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线缺失/停牌": 0}
         
         for index, row in filtered_df.iterrows():
             code = str(row['f12']).zfill(6)
@@ -142,34 +148,37 @@ def screen_a_shares():
                 
                 closes = [float(k.split(',')[2]) for k in klines]
                 highs = [float(k.split(',')[3]) for k in klines]
-                if len(closes) < 250: continue
+                
+                if len(closes) < 250: 
+                    fail_reasons["K线缺失/停牌"] += 1
+                    continue
                 
                 close_series = pd.Series(closes)
                 high_series = pd.Series(highs)
                 close = close_series.iloc[-1]
                 
-                # 【调整2】：60 日涨跌幅底线降至 15% (适应慢牛/震荡市)
+                # 动量 60日 >= 20%
                 close_60 = close_series.iloc[-61]
                 ret_60 = (close - close_60) / close_60
-                if ret_60 < 0.15:
-                    fail_reasons["动量不足15%"] += 1
+                if ret_60 < 0.20:
+                    fail_reasons["动量不足20%"] += 1
                     continue
                 
-                # 均线多头 (守住 MA60 和 MA120)
+                # 均线多头
                 ma20 = close_series.rolling(20).mean().iloc[-1]
                 ma60 = close_series.rolling(60).mean().iloc[-1]
                 ma120 = close_series.rolling(120).mean().iloc[-1]
                 if not (close > ma60 and close > ma120) or not (ma20 > ma60):
-                    fail_reasons["破位MA60/120"] += 1
+                    fail_reasons["破位MA60/120生命线"] += 1
                     continue 
                     
-                # 逼近历史新高 (容忍回撤20%)
+                # 容忍回撤20%
                 high_250 = high_series.rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80):
-                    fail_reasons["回撤超20%"] += 1
+                    fail_reasons["高点回撤过大(>20%)"] += 1
                     continue 
                     
-                # 【调整3】：RSI 底线降至 45 (允许深蹲回踩洗盘)
+                # RSI > 50
                 delta = close_series.diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -177,8 +186,8 @@ def screen_a_shares():
                 ema_down = down.ewm(com=13, adjust=False).mean()
                 rs = ema_up / ema_down
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
-                if rsi < 45:
-                    fail_reasons["RSI弱势"] += 1
+                if rsi < 50:
+                    fail_reasons["短期RSI弱势(<50)"] += 1
                     continue
                     
                 # ================= 白名单 =================
@@ -193,28 +202,36 @@ def screen_a_shares():
                     "Trend": "Hold MA60",
                     "Fundamental": "Check ROE>15%" 
                 })
-                print(f"✅ 捕获主升浪标的: {code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
-                
+                print(f"✅ 捕获主升浪标的: {code} {name}")
                 time.sleep(0.02)
                 
             except Exception as e:
                 continue
                 
-        # 打印淘汰统计报告
-        print(f"\n📊 淘汰统计报告:")
-        for reason, count in fail_reasons.items():
-            print(f" - 因【{reason}】被淘汰: {count} 只")
-            
-        return final_a_stocks
+        # 组装超级诊断报告！
+        now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        diag_msg = (
+            f"[{now_time}] 欧奈尔系统诊断报告：\n"
+            f"1. 全市场扫描：共获取 {total_stocks} 只股票\n"
+            f"2. 流动性初筛 (股价>10 / 市值>50亿 / 成交额>2亿)：剩余 {liquidity_passed} 只核心资金标的\n"
+            f"3. 技术面K线淘汰明细：\n"
+            f"   - 因【动量不足20%】淘汰: {fail_reasons['动量不足20%']} 只\n"
+            f"   - 因【跌破生命线MA60/120】淘汰: {fail_reasons['破位MA60/120生命线']} 只\n"
+            f"   - 因【高点回撤超过20%】淘汰: {fail_reasons['高点回撤过大(>20%)']} 只\n"
+            f"   - 因【短期RSI弱势低于50】淘汰: {fail_reasons['短期RSI弱势(<50)']} 只\n"
+            f"结论：当前市场极其恶劣，大资金处于装死或派发期，系统强制执行空仓保护！"
+        )
+        
+        return final_a_stocks, diag_msg
         
     except Exception as e:
         print(f"❌ A 股扫描发生致命错误: {e}")
-        return []
+        return [], "代码发生内部错误，请检查日志。"
 
 # ==========================================
-# 5. 写入 Google Sheets
+# 5. 写入 Google Sheets (支持诊断报告输出)
 # ==========================================
-def write_to_sheet(sheet_name, final_stocks, sort_col):
+def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
     try:
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
         if final_stocks:
@@ -232,9 +249,10 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
             print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
         else:
             sheet.clear()
-            now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股满足条件 (50亿市值/2亿成交额/60日涨幅超15%)。")
-            print(f"⚠️ {sheet_name}: 无符合条件的股票。")
+            # 如果有诊断报告，直接把长长的诊断报告写进 A1 单元格！
+            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
+            sheet.update_acell("A1", final_msg)
+            print(f"⚠️ {sheet_name}: 无符合条件的股票，已输出诊断报告。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
@@ -245,5 +263,6 @@ if __name__ == "__main__":
     us_results = screen_us_stocks()
     write_to_sheet("Screener", us_results, sort_col="90D_Return%")
     
-    a_results = screen_a_shares()
-    write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%")
+    # 获取选股结果和诊断报告
+    a_results, a_diag_msg = screen_a_shares()
+    write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
