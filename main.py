@@ -8,38 +8,58 @@ import time
 import requests
 import json
 import re
+import concurrent.futures
 import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  # ⚠️ 记得换成你的真实链接！
+SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  
 
-scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
+# 封装带超时的 YFinance 请求
+def fetch_us_hist(ticker):
+    stock = yf.Ticker(ticker)
+    return stock.history(period="1y")
+
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 (完美运作版)
+# 2. [美股] 欧奈尔选股模块 (动态寻表 + 熔断防挂起)
 # ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 ==========")
+    print("\n========== 开始处理美股[V5.0 熔断防卡死版] ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
-        ndx100 = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]['Ticker'].tolist()
-        tickers = list(set([t.replace('.', '-') for t in (sp500 + ndx100)]))
+        # 动态寻找包含 Symbol/Ticker 的表格，彻底解决维基百科改版报错
+        sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
+        sp500 = next(df['Symbol'].tolist() for df in sp_tables if 'Symbol' in df.columns)
+        
+        ndx_tables = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)
+        ndx100 = next(df['Ticker'].tolist() for df in ndx_tables if 'Ticker' in df.columns)
+        
+        tickers = list(set([str(t).replace('.', '-') for t in (sp500 + ndx100)]))
+        print(f"✅ 成功获取美股名单！共合并去重 {len(tickers)} 只核心股票。")
     except Exception as e:
-        print("获取美股列表失败")
+        print(f"❌ 获取美股列表失败: {e}")
         return []
 
-    final_stocks = []
+    final_stocks =[]
+    consecutive_fails = 0  # 连续失败计数器
+    
     for ticker in tickers:
         try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="1y")
-            if len(hist) < 200: continue
+            # 【核心】8秒强制超时，绝不允许 yfinance 无限卡死！
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetch_us_hist, ticker)
+                hist = future.result(timeout=8)
+            
+            if hist is None or len(hist) < 200: 
+                continue
+                
+            consecutive_fails = 0 # 成功则重置失败计数器
             
             close = hist['Close'].iloc[-1]
             volume = hist['Volume'].iloc[-1]
@@ -77,56 +97,55 @@ def screen_us_stocks():
                 "Turnover(M)": round((close * volume) / 1000000, 2),
                 "Struct": struct_label
             })
-        except:
+            print(f"✅ 捕获美股标的: {ticker}")
+            
+        except Exception as e:
+            consecutive_fails += 1
+            if consecutive_fails > 20:
+                print("\n⚠️ [警告] 连续 20 只美股获取失败！雅虎财经已封锁当前 GitHub IP。已触发熔断，强制中断美股扫描！")
+                break  # 熔断，直接退出循环，保护后续 A股 正常执行
             continue
+            
     return final_stocks
 
 # ==========================================
-# 3. [A股] 新浪财经隐身雷达 (绝对防屏蔽)
+# 3. [A股] 新浪财经隐身雷达
 # ==========================================
 def get_sina_market_snapshot():
-    print("🚀 启动【新浪财经】高匿分页拉取引擎...")
-    all_data = []
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'http://finance.sina.com.cn/'
-    }
+    print("\n🚀 启动【新浪财经】高匿分页拉取引擎...")
+    all_data =[]
+    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn/'}
     
     for page in range(1, 80):
         url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a"
         try:
             res = requests.get(url, headers=headers, timeout=5)
             text = res.text
-            if text == "[]" or text == "null" or not text:
-                break
+            if text == "[]" or text == "null" or not text: break
             text = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', text)
-            data = json.loads(text)
-            all_data.extend(data)
+            all_data.extend(json.loads(text))
         except:
             continue
-            
     df = pd.DataFrame(all_data)
     print(f"✅ 获取 A 股 {len(df)} 只股票基础数据成功！")
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选 (腾讯原生K线 + 诊断报告)
+# 4. [A股] 欧奈尔核心筛选 (腾讯防崩版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 [V4.0 腾讯K线终极版] ==========")
+    print("\n========== 开始处理 A股 [V5.0 腾讯防崩溃版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: 
-            return [], "❌ 接口获取失败，大盘数据为空。"
+            return[], "❌ 接口获取失败，大盘数据为空。"
             
         total_stocks = len(spot_df)
-        
         spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
         spot_df['mktcap'] = pd.to_numeric(spot_df['mktcap'], errors='coerce') * 10000
         spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
         spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
 
-        # 【流动性初筛】
         cond1 = spot_df['trade'] >= 10
         cond2 = spot_df['mktcap'] >= 5_000_000_000   
         cond3 = spot_df['amount'] >= 200_000_000      
@@ -134,38 +153,45 @@ def screen_a_shares():
             
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
         liquidity_passed = len(filtered_df)
-        print(f"🎯 流动性初筛: 满足核心标的剩余 {liquidity_passed} 只。开始腾讯 K 线扫描...")
+        print(f"🎯 流动性初筛: 满足核心标的剩余 {liquidity_passed} 只。")
 
-        final_a_stocks = []
+        final_a_stocks =[]
         fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线获取失败": 0}
         
+        consecutive_fails = 0
+        
         for index, row in filtered_df.iterrows():
-            raw_code = row['code']  # 例: sh600519
+            raw_code = str(row['code'])
             pure_code = raw_code[-6:] 
             name = row['name']
-            prefix = "sh" if pure_code.startswith(('6', '5')) else "sz"
             
+            # 安全前缀分配，避开北交所导致的报错
+            if pure_code.startswith(('6', '5')): prefix = "sh"
+            elif pure_code.startswith(('0', '3')): prefix = "sz"
+            else: continue # 过滤北交所等特种股票
+
             try:
-                # 🚀 绝密武器：直接调用腾讯财经前复权 K 线接口
                 k_url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={prefix}{pure_code},day,,,300,qfq"
                 res = requests.get(k_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
                 
-                # 腾讯接口解析
-                data_node = res['data'][f'{prefix}{pure_code}']
-                klines = data_node.get('qfqday', data_node.get('day', []))
+                # 安全解析，防止 KeyError
+                data_node = res.get('data', {}).get(f'{prefix}{pure_code}', {})
+                klines = data_node.get('qfqday', data_node.get('day',[]))
                 
-                if len(klines) < 250:
+                if not klines or len(klines) < 250:
                     fail_reasons["K线获取失败"] += 1
                     continue
                 
-                closes = [float(k[2]) for k in klines]
-                highs = [float(k[3]) for k in klines]
+                consecutive_fails = 0 # 成功则重置熔断计数
                 
+                closes = [float(k[2]) for k in klines]
+                highs =[float(k[3]) for k in klines]
                 close_series = pd.Series(closes)
                 high_series = pd.Series(highs)
-                close = close_series.iloc[-1]
                 
+                close = close_series.iloc[-1]
                 close_60 = close_series.iloc[-61]
+                
                 ret_60 = (close - close_60) / close_60
                 if ret_60 < 0.20:
                     fail_reasons["动量不足20%"] += 1
@@ -206,31 +232,34 @@ def screen_a_shares():
                     "Fundamental": "Check ROE>15%" 
                 })
                 print(f"✅ 捕获主升浪标的: {pure_code} {name}")
-                time.sleep(0.05) # 微弱停顿防止超载
+                time.sleep(0.05)
                 
             except Exception as e:
                 fail_reasons["K线获取失败"] += 1
+                consecutive_fails += 1
+                if consecutive_fails > 30:
+                    print("⚠️ 连续 30 只A股获取失败，触发腾讯接口限流熔断！跳过剩余股票。")
+                    break
                 continue
                 
         now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         diag_msg = (
             f"[{now_time}] 欧奈尔系统诊断报告：\n"
             f"1. 全市场扫描：共获取 {total_stocks} 只股票\n"
-            f"2. 流动性初筛 (股价>10/市值>50亿/成交额>2亿/换手>1.5%)：剩余 {liquidity_passed} 只标的\n"
-            f"3. 技术面K线淘汰明细：\n"
-            f"   - 因【动量不足20%】淘汰: {fail_reasons['动量不足20%']} 只\n"
-            f"   - 因【跌破生命线MA60/120】淘汰: {fail_reasons['破位MA60/120生命线']} 只\n"
-            f"   - 因【高点回撤超过20%】淘汰: {fail_reasons['高点回撤过大(>20%)']} 只\n"
-            f"   - 因【短期RSI弱势低于50】淘汰: {fail_reasons['短期RSI弱势(<50)']} 只\n"
-            f"   - 因【停牌或无数据】排除: {fail_reasons['K线获取失败']} 只\n"
-            f"结论：大资金处于装死或派发期，系统强制执行空仓保护！"
+            f"2. 流动性初筛：剩余 {liquidity_passed} 只标的\n"
+            f"3. 淘汰明细：\n"
+            f"   - 【动量不足20%】: {fail_reasons['动量不足20%']}\n"
+            f"   - 【跌破生命线】: {fail_reasons['破位MA60/120生命线']}\n"
+            f"   - 【回撤超20%】: {fail_reasons['高点回撤过大(>20%)']}\n"
+            f"   - 【RSI弱势】: {fail_reasons['短期RSI弱势(<50)']}\n"
+            f"   - 【停牌或报错】: {fail_reasons['K线获取失败']}\n"
+            f"结论：系统已完成最新一轮检测。"
         )
-        
         return final_a_stocks, diag_msg
         
     except Exception as e:
-        print(f"❌ A 股扫描发生致命错误: {e}")
-        return [], "代码发生内部错误，请检查日志。"
+        print(f"❌ A 股扫描致命错误: {e}")
+        return[], "代码发生内部错误，请检查日志。"
 
 # ==========================================
 # 5. 写入 Google Sheets
@@ -248,23 +277,31 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             sheet.update(values=data_to_write, range_name="A1")
             
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_cell(1, len(df.columns) + 2, "Last Updated:")
-            sheet.update_cell(1, len(df.columns) + 3, now_time)
+            sheet.update_acell(f"I1", "Last Updated:")
+            sheet.update_acell(f"J1", now_time)
             print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
         else:
             sheet.clear()
-            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
+            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票，或接口遭遇熔断。"
             sheet.update_acell("A1", final_msg)
-            print(f"⚠️ {sheet_name}: 已输出诊断报告。")
+            print(f"⚠️ {sheet_name}: 已输出诊断报告/空仓警告。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
 # ==========================================
-# 6. 主程序启动
+# 6. 主程序启动 (隔离执行机制)
 # ==========================================
 if __name__ == "__main__":
-    us_results = screen_us_stocks()
-    write_to_sheet("Screener", us_results, sort_col="90D_Return%")
-    
-    a_results, a_diag_msg = screen_a_shares()
-    write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
+    # 【隔离执行机制】：即便美股报错或熔断，绝对不影响 A股 的运行
+    print("\n>>> 开始执行策略流...")
+    try:
+        us_results = screen_us_stocks()
+        write_to_sheet("Screener", us_results, sort_col="90D_Return%")
+    except Exception as e:
+        print(f"❌ 美股模块发生异常中断: {e}")
+        
+    try:
+        a_results, a_diag_msg = screen_a_shares()
+        write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
+    except Exception as e:
+        print(f"❌ A股模块发生异常中断: {e}")
