@@ -1,3 +1,4 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import gspread
@@ -7,8 +8,7 @@ import time
 import requests
 import json
 import re
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import concurrent.futures
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -21,112 +21,65 @@ scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# ==========================================
-# 2. [美股] 欧奈尔选股 (去雅虎化，100% 东方财富极速版)
-# ==========================================
-def get_us_secid_map():
-    """独家黑科技：获取全美股 Ticker 到东方财富内部 secid 的映射字典"""
-    url = "https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=20000&fs=m:105,m:106,m:107&fields=f12,f13"
-    em_secid_map = {}
-    try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).json()
-        items = res.get('data', {}).get('diff',[])
-        for item in items:
-            raw_ticker = str(item['f12'])
-            # 构建类似 105.AAPL 的专属代码
-            secid = f"{item['f13']}.{raw_ticker}"
-            em_secid_map[raw_ticker] = secid
-            em_secid_map[raw_ticker.replace('.', '-')] = secid
-            em_secid_map[raw_ticker.replace('-', '.')] = secid
-    except Exception as e:
-        print(f"获取美股映射字典失败: {e}")
-    return em_secid_map
+# 封装带超时的 YFinance 请求
+def fetch_us_hist(ticker):
+    stock = yf.Ticker(ticker)
+    return stock.history(period="1y")
 
+# ==========================================
+# 2. [美股] 欧奈尔选股模块 (动态寻表 + 熔断防挂起)
+# ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 [V6.1 去雅虎化极速版] ==========")
+    print("\n========== 开始处理美股[V5.0 熔断防卡死版] ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
+        # 动态寻找包含 Symbol/Ticker 的表格，彻底解决维基百科改版报错
         sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
-        sp500 = next((df['Symbol'].tolist() for df in sp_tables if 'Symbol' in df.columns),[])
+        sp500 = next(df['Symbol'].tolist() for df in sp_tables if 'Symbol' in df.columns)
         
         ndx_tables = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)
-        ndx100 =[]
-        for df in ndx_tables:
-            if 'Ticker' in df.columns: ndx100 = df['Ticker'].tolist(); break
-            elif 'Symbol' in df.columns: ndx100 = df['Symbol'].tolist(); break
+        ndx100 = next(df['Ticker'].tolist() for df in ndx_tables if 'Ticker' in df.columns)
         
         tickers = list(set([str(t).replace('.', '-') for t in (sp500 + ndx100)]))
-        print(f"✅ 成功获取美股名单！合并去重共 {len(tickers)} 只核心股票。")
+        print(f"✅ 成功获取美股名单！共合并去重 {len(tickers)} 只核心股票。")
     except Exception as e:
         print(f"❌ 获取美股列表失败: {e}")
-        return[]
-
-    em_secid_map = get_us_secid_map()
-    if not em_secid_map:
-        print("⚠️ 无法获取东方财富美股字典，扫描中断。")
         return []
 
     final_stocks =[]
-    consecutive_fails = 0
-    
-    # 建立强力防抖连接池
-    em_session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-    em_session.mount('https://', HTTPAdapter(max_retries=retries))
-    em_session.headers.update({'User-Agent': 'Mozilla/5.0'})
+    consecutive_fails = 0  # 连续失败计数器
     
     for ticker in tickers:
-        secid = em_secid_map.get(ticker) or em_secid_map.get(ticker.replace('-', '.'))
-        if not secid:
-            continue
-            
         try:
-            # 同样使用 Push2His，彻底摆脱 yfinance 限制
-            em_url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=300"
-            res = em_session.get(em_url, timeout=5).json()
+            # 【核心】8秒强制超时，绝不允许 yfinance 无限卡死！
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(fetch_us_hist, ticker)
+                hist = future.result(timeout=8)
             
-            if not res or 'data' not in res or not res['data'] or 'klines' not in res['data']:
-                consecutive_fails += 1
-                if consecutive_fails > 25:
-                    print("\n⚠️ [警告] 美股连续获取失败，已触发熔断！")
-                    break 
+            if hist is None or len(hist) < 200: 
                 continue
                 
-            klines = res['data']['klines']
-            if len(klines) < 200:
-                continue
-                
-            consecutive_fails = 0 
+            consecutive_fails = 0 # 成功则重置失败计数器
             
-            closes = [float(k.split(',')[2]) for k in klines]
-            highs = [float(k.split(',')[3]) for k in klines]
-            vols = [float(k.split(',')[5]) for k in klines]
-            amounts = [float(k.split(',')[6]) for k in klines] # f57 成交额直接返回美元计价
+            close = hist['Close'].iloc[-1]
+            volume = hist['Volume'].iloc[-1]
+            if close < 15 or (close * volume) < 50000000: continue
             
-            close_series = pd.Series(closes)
-            high_series = pd.Series(highs)
+            ma20 = hist['Close'].rolling(20).mean().iloc[-1]
+            ma50 = hist['Close'].rolling(50).mean().iloc[-1]
+            ma150 = hist['Close'].rolling(150).mean().iloc[-1]
+            ma200 = hist['Close'].rolling(200).mean().iloc[-1]
             
-            close = close_series.iloc[-1]
-            amount = amounts[-1]
-            vol = vols[-1]
+            if not (ma50 > ma200): continue
+            if not (close > ma150 and close > ma200): continue
             
-            if amount == 0: amount = close * vol
-            if close < 15 or amount < 50000000: continue
-            
-            ma20 = close_series.rolling(20).mean().iloc[-1]
-            ma50 = close_series.rolling(50).mean().iloc[-1]
-            ma150 = close_series.rolling(150).mean().iloc[-1]
-            ma200 = close_series.rolling(200).mean().iloc[-1]
-            
-            if not (ma50 > ma200) or not (close > ma150 and close > ma200): continue
-            
-            high_250 = high_series.rolling(250).max().iloc[-1]
+            high_250 = hist['High'].rolling(250).max().iloc[-1]
             if close < (high_250 * 0.80): continue
             
-            ret_90d = (close - close_series.iloc[-63]) / close_series.iloc[-63]
+            ret_90d = (close - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
             if ret_90d < 0.15: continue
             
-            delta = close_series.diff()
+            delta = hist['Close'].diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
             ema_up = up.ewm(com=13, adjust=False).mean()
@@ -141,19 +94,22 @@ def screen_us_stocks():
                 "Ticker": ticker,
                 "Price": round(close, 2),
                 "90D_Return%": f"{round(ret_90d * 100, 2)}%",
-                "Turnover(M)": round(amount / 1000000, 2),
+                "Turnover(M)": round((close * volume) / 1000000, 2),
                 "Struct": struct_label
             })
-            print(f"✅ 捕获美股强势标的: {ticker}")
+            print(f"✅ 捕获美股标的: {ticker}")
             
         except Exception as e:
             consecutive_fails += 1
+            if consecutive_fails > 20:
+                print("\n⚠️ [警告] 连续 20 只美股获取失败！雅虎财经已封锁当前 GitHub IP。已触发熔断，强制中断美股扫描！")
+                break  # 熔断，直接退出循环，保护后续 A股 正常执行
             continue
             
     return final_stocks
 
 # ==========================================
-# 3.[A股] 新浪财经隐身雷达
+# 3. [A股] 新浪财经隐身雷达
 # ==========================================
 def get_sina_market_snapshot():
     print("\n🚀 启动【新浪财经】高匿分页拉取引擎...")
@@ -175,10 +131,10 @@ def get_sina_market_snapshot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选 (修复断点 Bug 版)
+# 4. [A股] 欧奈尔核心筛选 (腾讯防崩版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 [V6.1 修复时间戳断点版] ==========")
+    print("\n========== 开始处理 A股 [V5.0 腾讯防崩溃版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: 
@@ -197,56 +153,39 @@ def screen_a_shares():
             
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
         liquidity_passed = len(filtered_df)
-        print(f"🎯 流动性初筛: 满足核心资金门槛剩余 {liquidity_passed} 只标的。")
+        print(f"🎯 流动性初筛: 满足核心标的剩余 {liquidity_passed} 只。")
 
         final_a_stocks =[]
-        fail_reasons = {
-            "动量不足20%": 0, 
-            "破位MA60/120生命线": 0, 
-            "高点回撤过大(>20%)": 0, 
-            "短期RSI弱势(<50)": 0, 
-            "次新股(不足250天)": 0,
-            "接口拦截或退市": 0
-        }
+        fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线获取失败": 0}
         
         consecutive_fails = 0
-        
-        em_session = requests.Session()
-        retries = Retry(total=3, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-        em_session.mount('https://', HTTPAdapter(max_retries=retries))
-        em_session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
         
         for index, row in filtered_df.iterrows():
             raw_code = str(row['code'])
             pure_code = raw_code[-6:] 
             name = row['name']
             
-            if pure_code.startswith(('6', '5')): prefix = "1"
-            elif pure_code.startswith(('0', '3')): prefix = "0"
-            else: continue
+            # 安全前缀分配，避开北交所导致的报错
+            if pure_code.startswith(('6', '5')): prefix = "sh"
+            elif pure_code.startswith(('0', '3')): prefix = "sz"
+            else: continue # 过滤北交所等特种股票
 
             try:
-                secid = f"{prefix}.{pure_code}"
-                # 【修复】修正了 end 日期为正确的 20500101，保证接口顺利拉取历史数据
-                em_url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=300"
+                k_url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={prefix}{pure_code},day,,,300,qfq"
+                res = requests.get(k_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()
                 
-                res = em_session.get(em_url, timeout=5).json()
+                # 安全解析，防止 KeyError
+                data_node = res.get('data', {}).get(f'{prefix}{pure_code}', {})
+                klines = data_node.get('qfqday', data_node.get('day',[]))
                 
-                if not res or 'data' not in res or not res['data'] or 'klines' not in res['data']:
-                    fail_reasons["接口拦截或退市"] += 1
-                    consecutive_fails += 1
+                if not klines or len(klines) < 250:
+                    fail_reasons["K线获取失败"] += 1
                     continue
                 
-                consecutive_fails = 0 
-                klines = res['data']['klines']
+                consecutive_fails = 0 # 成功则重置熔断计数
                 
-                if len(klines) < 250:
-                    fail_reasons["次新股(不足250天)"] += 1
-                    continue
-                
-                closes = [float(k.split(',')[2]) for k in klines]
-                highs = [float(k.split(',')[3]) for k in klines]
-                
+                closes = [float(k[2]) for k in klines]
+                highs =[float(k[3]) for k in klines]
                 close_series = pd.Series(closes)
                 high_series = pd.Series(highs)
                 
@@ -293,12 +232,13 @@ def screen_a_shares():
                     "Fundamental": "Check ROE>15%" 
                 })
                 print(f"✅ 捕获主升浪标的: {pure_code} {name}")
+                time.sleep(0.05)
                 
             except Exception as e:
-                fail_reasons["接口拦截或退市"] += 1
+                fail_reasons["K线获取失败"] += 1
                 consecutive_fails += 1
                 if consecutive_fails > 30:
-                    print("⚠️ 连续 30 只A股获取失败，触发熔断！")
+                    print("⚠️ 连续 30 只A股获取失败，触发腾讯接口限流熔断！跳过剩余股票。")
                     break
                 continue
                 
@@ -308,13 +248,12 @@ def screen_a_shares():
             f"1. 全市场扫描：共获取 {total_stocks} 只股票\n"
             f"2. 流动性初筛：剩余 {liquidity_passed} 只标的\n"
             f"3. 淘汰明细：\n"
-            f"   - 【动量不足20%】: {fail_reasons['动量不足20%']} 只\n"
-            f"   - 【跌破生命线】: {fail_reasons['破位MA60/120生命线']} 只\n"
-            f"   - 【回撤超20%】: {fail_reasons['高点回撤过大(>20%)']} 只\n"
-            f"   - 【RSI弱势】: {fail_reasons['短期RSI弱势(<50)']} 只\n"
-            f"   - 【次新股不足天数】: {fail_reasons['次新股(不足250天)']} 只\n"
-            f"   - 【网络错误/退市】: {fail_reasons['接口拦截或退市']} 只\n"
-            f"结论：已完成最新一轮检测。"
+            f"   - 【动量不足20%】: {fail_reasons['动量不足20%']}\n"
+            f"   - 【跌破生命线】: {fail_reasons['破位MA60/120生命线']}\n"
+            f"   - 【回撤超20%】: {fail_reasons['高点回撤过大(>20%)']}\n"
+            f"   - 【RSI弱势】: {fail_reasons['短期RSI弱势(<50)']}\n"
+            f"   - 【停牌或报错】: {fail_reasons['K线获取失败']}\n"
+            f"结论：系统已完成最新一轮检测。"
         )
         return final_a_stocks, diag_msg
         
@@ -338,21 +277,22 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             sheet.update(values=data_to_write, range_name="A1")
             
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("I1", "Last Updated:")
-            sheet.update_acell("J1", now_time)
+            sheet.update_acell(f"I1", "Last Updated:")
+            sheet.update_acell(f"J1", now_time)
             print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
         else:
             sheet.clear()
-            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票，或遇到极端行情空仓保护。"
+            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票，或接口遭遇熔断。"
             sheet.update_acell("A1", final_msg)
             print(f"⚠️ {sheet_name}: 已输出诊断报告/空仓警告。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
 # ==========================================
-# 6. 主程序启动
+# 6. 主程序启动 (隔离执行机制)
 # ==========================================
 if __name__ == "__main__":
+    # 【隔离执行机制】：即便美股报错或熔断，绝对不影响 A股 的运行
     print("\n>>> 开始执行策略流...")
     try:
         us_results = screen_us_stocks()
