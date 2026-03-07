@@ -1,4 +1,4 @@
-import yfinance as yf
+import concurrent.futures  # 【新增】处理强制超时的库import yfinance as yf
 import pandas as pd
 import numpy as np
 import gspread
@@ -140,14 +140,25 @@ def get_sina_market_snapshot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (严格 20% 版 + 自动诊断报告)
+# 4. [A股] 欧奈尔核心筛选模块 (带并发防卡死 + 重试机制)
 # ==========================================
+
+def fetch_hist_with_retry(pure_code, start_date, end_date, retries=3):
+    """【新增】带重试机制的K线获取器"""
+    for i in range(retries):
+        try:
+            # 调用东方财富接口获取K线
+            return ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+        except Exception:
+            time.sleep(1) # 失败后停顿1秒再试
+    return pd.DataFrame()
+
 def screen_a_shares():
-    print("\n========== 开始处理 A股 [V3.0 新浪核心诊断版] ==========")
+    print("\n========== 开始处理 A股[V3.1 防卡死强力版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: 
-            return [], "❌ 新浪接口获取失败，大盘数据为空。"
+            return[], "❌ 新浪接口获取失败，大盘数据为空。"
             
         total_stocks = len(spot_df)
         
@@ -165,23 +176,41 @@ def screen_a_shares():
         liquidity_passed = len(filtered_df)
         print(f"🎯 流动性初筛: 满足 50亿/2亿 的核心标的剩余 {liquidity_passed} 只。开始深入 K 线扫描...")
 
-        final_a_stocks = []
-        fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线缺失/停牌": 0}
+        final_a_stocks =[]
+        fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线缺失或网络超时": 0}
         
         end_date = datetime.datetime.now().strftime("%Y%m%d")
         start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y%m%d")
         
+        processed_count = 0
+        
         for index, row in filtered_df.iterrows():
+            processed_count += 1
             raw_code = row['code']
             pure_code = raw_code[-6:] 
             name = row['name']
             
+            # 【新增】A股进度打印，让你知道它卡在哪个进度了
+            if processed_count % 50 == 0:
+                print(f"   ...已扫描 {processed_count}/{liquidity_passed} 只A股...")
+            
             try:
-                time.sleep(0.1)
-                hist = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+                # 【修改】将延迟从 0.1 提高到 0.3，极大降低被东财拉黑的概率
+                time.sleep(0.3)
                 
-                if len(hist) < 250: 
-                    fail_reasons["K线缺失/停牌"] += 1
+                # 【修改核心】使用线程池加上 8 秒强制超时机制。一旦卡死超过8秒，直接斩断跳过！
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(fetch_hist_with_retry, pure_code, start_date, end_date)
+                    try:
+                        hist = future.result(timeout=8)  # 8秒等不到数据直接抛出 TimeoutError
+                    except concurrent.futures.TimeoutError:
+                        print(f"⚠️ 警告: 获取 {pure_code} {name} 接口卡死超时，已强制跳过防挂起。")
+                        fail_reasons["K线缺失或网络超时"] += 1
+                        continue
+                
+                # 检查数据有效性
+                if hist is None or hist.empty or len(hist) < 250: 
+                    fail_reasons["K线缺失或网络超时"] += 1
                     continue
                 
                 close = hist['收盘'].iloc[-1]
@@ -229,7 +258,7 @@ def screen_a_shares():
                 print(f"✅ 捕获主升浪标的: {pure_code} {name}")
                 
             except Exception as e:
-                fail_reasons["K线缺失/停牌"] += 1
+                fail_reasons["K线缺失或网络超时"] += 1
                 continue
                 
         now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -242,6 +271,7 @@ def screen_a_shares():
             f"   - 因【跌破生命线MA60/120】淘汰: {fail_reasons['破位MA60/120生命线']} 只\n"
             f"   - 因【高点回撤超过20%】淘汰: {fail_reasons['高点回撤过大(>20%)']} 只\n"
             f"   - 因【短期RSI弱势低于50】淘汰: {fail_reasons['短期RSI弱势(<50)']} 只\n"
+            f"   - 因【接口限流/K线缺失】淘汰: {fail_reasons['K线缺失或网络超时']} 只\n"
             f"结论：当前大资金处于装死或派发期，系统强制执行空仓保护！"
         )
         
@@ -249,41 +279,11 @@ def screen_a_shares():
         
     except Exception as e:
         print(f"❌ A 股扫描发生致命错误: {e}")
-        return [], "代码发生内部错误，请检查日志。"
+        return
 
-# ==========================================
-# 5. 写入 Google Sheets (支持诊断报告输出)
-# ==========================================
-def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
-    try:
-        sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
-        if final_stocks:
-            df = pd.DataFrame(final_stocks)
-            df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
-            df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            
-            data_to_write = [df.columns.values.tolist()] + df.values.tolist()
-            sheet.clear()
-            sheet.update(values=data_to_write, range_name="A1")
-            
-            now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_cell(1, len(df.columns) + 2, "Last Updated:")
-            sheet.update_cell(1, len(df.columns) + 3, now_time)
-            print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
-        else:
-            sheet.clear()
-            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
-            sheet.update_acell("A1", final_msg)
-            print(f"⚠️ {sheet_name}: 无符合条件的股票，已输出反馈。")
-    except Exception as e:
-        print(f"❌ 写入 {sheet_name} 失败: {e}")
 
-# ==========================================
-# 6. 主程序启动
-# ==========================================
-if __name__ == "__main__":
-    us_results = screen_us_stocks()
-    write_to_sheet("Screener", us_results, sort_col="90D_Return%")
-    
-    a_results, a_diag_msg = screen_a_shares()
-    write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
+
+
+
+
+
