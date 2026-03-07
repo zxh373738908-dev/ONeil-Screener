@@ -15,17 +15,17 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  # ⚠️ 记得换成你的真实链接！
+SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=913399386#gid=913399386"  # ⚠️ 记得换成你的真实链接！
 
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 (黄金坑回调低吸版)
+# 2. [美股] 欧奈尔选股模块 
 # ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 ==========")
+    print("\n========== 开始处理美股 [V3.0 黄金坑低吸版] ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
@@ -111,10 +111,10 @@ def get_sina_market_snapshot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (严格 20% 版 + 自动诊断报告)
+# 4. [A股] 欧奈尔核心筛选模块 
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (严格 20% + 上帝视角诊断) ==========")
+    print("\n========== 开始处理 A股 [V3.0 新浪核心诊断版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: 
@@ -122,7 +122,6 @@ def screen_a_shares():
             
         total_stocks = len(spot_df)
         
-        # 数据清洗与单位转换 (新浪市值单位是万元，需转为元)
         spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
         spot_df['mktcap'] = pd.to_numeric(spot_df['mktcap'], errors='coerce') * 10000
         spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
@@ -140,7 +139,6 @@ def screen_a_shares():
 
         final_a_stocks = []
         
-        # 统计淘汰原因
         fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线缺失/停牌": 0}
         
         end_date = datetime.datetime.now().strftime("%Y%m%d")
@@ -148,11 +146,10 @@ def screen_a_shares():
         
         for index, row in filtered_df.iterrows():
             raw_code = row['code']
-            pure_code = raw_code[-6:] # 截取后6位纯数字供 Akshare 读取
+            pure_code = raw_code[-6:] 
             name = row['name']
             
             try:
-                # 使用 Akshare 稳健获取 K 线，停顿0.1秒防止被拉黑
                 time.sleep(0.1)
                 hist = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 
@@ -162,14 +159,12 @@ def screen_a_shares():
                 
                 close = hist['收盘'].iloc[-1]
                 
-                # 动量 60日 >= 20%
                 close_60 = hist['收盘'].iloc[-61]
                 ret_60 = (close - close_60) / close_60
                 if ret_60 < 0.20:
                     fail_reasons["动量不足20%"] += 1
                     continue
                 
-                # 均线多头
                 ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
                 ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
                 ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
@@ -177,13 +172,11 @@ def screen_a_shares():
                     fail_reasons["破位MA60/120生命线"] += 1
                     continue 
                     
-                # 容忍回撤20%
                 high_250 = hist['最高'].rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80):
                     fail_reasons["高点回撤过大(>20%)"] += 1
                     continue 
                     
-                # RSI > 50
                 delta = hist['收盘'].diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -195,7 +188,6 @@ def screen_a_shares():
                     fail_reasons["短期RSI弱势(<50)"] += 1
                     continue
                     
-                # ================= 白名单 =================
                 final_a_stocks.append({
                     "Ticker": pure_code,
                     "Name": name,
@@ -213,7 +205,6 @@ def screen_a_shares():
                 fail_reasons["K线缺失/停牌"] += 1
                 continue
                 
-        # 组装超级诊断报告！
         now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         diag_msg = (
             f"[{now_time}] 欧奈尔系统诊断报告：\n"
@@ -224,7 +215,7 @@ def screen_a_shares():
             f"   - 因【跌破生命线MA60/120】淘汰: {fail_reasons['破位MA60/120生命线']} 只\n"
             f"   - 因【高点回撤超过20%】淘汰: {fail_reasons['高点回撤过大(>20%)']} 只\n"
             f"   - 因【短期RSI弱势低于50】淘汰: {fail_reasons['短期RSI弱势(<50)']} 只\n"
-            f"结论：当前市场动量极其疲软，大资金处于装死或派发期，系统强制执行空仓保护！"
+            f"结论：当前大资金处于装死或派发期，系统强制执行空仓保护！"
         )
         
         return final_a_stocks, diag_msg
@@ -267,6 +258,5 @@ if __name__ == "__main__":
     us_results = screen_us_stocks()
     write_to_sheet("Screener", us_results, sort_col="90D_Return%")
     
-    # 获取 A 股选股结果和诊断报告
     a_results, a_diag_msg = screen_a_shares()
     write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
