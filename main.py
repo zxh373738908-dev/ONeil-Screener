@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=913399386#gid=913399386"  # ⚠️ 记得换成你的真实链接！
+SHEET_URL = "你的GOOGLE表格链接填在这里"  # ⚠️ 记得换成你的真实链接！
 
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
@@ -83,7 +83,7 @@ def screen_us_stocks():
     return final_stocks
 
 # ==========================================
-# 3. [A股] 新浪财经隐身雷达 (已被验证 100% 防火墙穿透)
+# 3. [A股] 新浪财经隐身雷达 (绝对防屏蔽)
 # ==========================================
 def get_sina_market_snapshot():
     print("🚀 启动【新浪财经】高匿分页拉取引擎 (绝对防屏蔽)...")
@@ -254,7 +254,6 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             print(f"🎉 成功将 {len(df)} 只最强龙头写入 {sheet_name}！")
         else:
             sheet.clear()
-            # 只有 A股模块 返回了 diag_msg，美股是 None
             final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
             sheet.update_acell("A1", final_msg)
             print(f"⚠️ {sheet_name}: 无符合条件的股票，已输出反馈。")
