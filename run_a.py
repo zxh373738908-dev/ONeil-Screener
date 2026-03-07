@@ -34,7 +34,7 @@ def get_sina_market_snapshot():
     return df
 
 def screen_a_shares():
-    print("\n========== 开始处理 A股[独立运行版: 东方财富直连] ==========")
+    print("\n========== 开始处理 A股[全参数补全版] ==========")
     try:
         spot_df = get_sina_market_snapshot()
         if spot_df.empty: return[], "❌ 接口获取失败，大盘数据为空。"
@@ -84,10 +84,18 @@ def screen_a_shares():
                 
                 closes = [float(k.split(',')[2]) for k in klines]
                 highs = [float(k.split(',')[3]) for k in klines]
+                vols = [float(k.split(',')[5]) for k in klines] # 【新增】抽取成交量
+                
                 close_series = pd.Series(closes)
                 high_series = pd.Series(highs)
+                vol_series = pd.Series(vols)
+                
                 close = close_series.iloc[-1]
                 close_60 = close_series.iloc[-61]
+                
+                # 【新增】欧奈尔突破放量指标：量比
+                avg_vol_50 = vol_series.tail(50).mean()
+                vol_ratio = vol_series.iloc[-1] / avg_vol_50 if avg_vol_50 > 0 else 0
                 
                 ret_60 = (close - close_60) / close_60
                 if ret_60 < 0.20: fail_reasons["动量不足20%"] += 1; continue
@@ -99,6 +107,9 @@ def screen_a_shares():
                     
                 high_250 = high_series.rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80): fail_reasons["高点回撤过大(>20%)"] += 1; continue 
+                
+                # 【新增】欧奈尔新高指标：距离最高点的跌幅
+                dist_high = (close - high_250) / high_250
                     
                 delta = close_series.diff()
                 up = delta.clip(lower=0)
@@ -106,13 +117,22 @@ def screen_a_shares():
                 rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 if rsi < 50: fail_reasons["短期RSI弱势(<50)"] += 1; continue
+                
+                # 将总市值转换为“亿”
+                mkt_cap_yi = row['mktcap'] / 100_000_000
                     
                 final_a_stocks.append({
-                    "Ticker": pure_code, "Name": name, "Price": round(close, 2),
+                    "Ticker": pure_code, 
+                    "Name": name, 
+                    "Price": round(close, 2),
                     "60D_Return%": f"{round(ret_60 * 100, 2)}%",
+                    "RSI": round(rsi, 2),
+                    "Turnover_Rate%": f"{row['turnoverratio']}%", # 欧奈尔活跃度(换手率)
+                    "Vol_Ratio": round(vol_ratio, 2),             # 欧奈尔突破动能(量比)
+                    "Dist_High%": f"{round(dist_high * 100, 2)}%",# 欧奈尔新高形态(距最高点)
+                    "Mkt_Cap(亿)": round(mkt_cap_yi, 2),          # 机构建仓池(总市值)
                     "Turnover(亿)": round(row['amount'] / 100_000_000, 2),
-                    "Turnover_Rate%": f"{row['turnoverratio']}%", "RSI": round(rsi, 2),
-                    "Trend": "Hold MA60", "Fundamental": "Check ROE>15%" 
+                    "Trend": "Hold MA60"
                 })
                 print(f"✅ 捕获主升浪标的: {pure_code} {name}")
             except Exception as e:
