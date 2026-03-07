@@ -88,7 +88,6 @@ def get_eastmoney_spot():
     all_data = []
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 抓取全市场 (f2=最新价, f6=成交额, f8=换手率, f12=代码, f14=名称, f20=总市值)
     for page in range(1, 60):
         url = f"http://82.push2.eastmoney.com/api/qt/clist/get?pn={page}&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f2,f6,f8,f12,f14,f20"
         try:
@@ -104,35 +103,32 @@ def get_eastmoney_spot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (100% 防漏极速版)
+# 4. [A股] 欧奈尔核心筛选模块 (弱市/慢牛兼容版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (50亿/2亿/原生K线计算版) ==========")
+    print("\n========== 开始处理 A股 (50亿/2亿/慢牛兼容版) ==========")
     try:
         spot_df = get_eastmoney_spot()
         if spot_df.empty: return []
         
-        # 将空数据 "-" 替换为 NaN，并转为数字
         spot_df = spot_df.replace("-", pd.NA)
-        spot_df['f2'] = pd.to_numeric(spot_df['f2'], errors='coerce')   # 价格
-        spot_df['f20'] = pd.to_numeric(spot_df['f20'], errors='coerce') # 总市值
-        spot_df['f6'] = pd.to_numeric(spot_df['f6'], errors='coerce')   # 成交额
-        spot_df['f8'] = pd.to_numeric(spot_df['f8'], errors='coerce')   # 换手率
+        spot_df['f2'] = pd.to_numeric(spot_df['f2'], errors='coerce')   
+        spot_df['f20'] = pd.to_numeric(spot_df['f20'], errors='coerce') 
+        spot_df['f6'] = pd.to_numeric(spot_df['f6'], errors='coerce')   
+        spot_df['f8'] = pd.to_numeric(spot_df['f8'], errors='coerce')   
 
-        # 【第一道漏斗】：只过滤基础门槛 (抛弃容易缺失的涨跌幅字段，100%防漏)
+        # 【调整1】：换手率底线降至 1.0%，防止错杀超级大盘机构股
         cond1 = spot_df['f2'] >= 10
         cond2 = spot_df['f20'] >= 5_000_000_000   # 50亿市值
         cond3 = spot_df['f6'] >= 200_000_000      # 2亿成交额
-        cond4 = spot_df['f8'] >= 1.5              # 1.5%换手
+        cond4 = spot_df['f8'] >= 1.0              # 1.0%换手
             
         filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
-        print(f"🎯 漏斗1 (流动性过滤): 满足 50亿/2亿 的核心标的剩余 {len(filtered_df)} 只。开始深入 K 线扫描...")
+        print(f"🎯 漏斗1 (流动性过滤): 满足条件的标的剩余 {len(filtered_df)} 只。开始深度扫描...")
 
         final_a_stocks = []
         headers = {'User-Agent': 'Mozilla/5.0'}
-        
-        # 记录淘汰原因，方便复盘
-        fail_reasons = {"动量不足20%": 0, "破位MA60/120": 0, "回撤超20%": 0, "RSI弱势": 0}
+        fail_reasons = {"动量不足15%": 0, "破位MA60/120": 0, "回撤超20%": 0, "RSI弱势": 0}
         
         for index, row in filtered_df.iterrows():
             code = str(row['f12']).zfill(6)
@@ -140,28 +136,26 @@ def screen_a_shares():
             secid = f"1.{code}" if code.startswith('6') else f"0.{code}"
             
             try:
-                # 抓取 300 天 K 线
                 k_url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=300"
                 res = requests.get(k_url, headers=headers, timeout=5).json()
                 klines = res['data']['klines']
                 
                 closes = [float(k.split(',')[2]) for k in klines]
                 highs = [float(k.split(',')[3]) for k in klines]
-                
                 if len(closes) < 250: continue
                 
                 close_series = pd.Series(closes)
                 high_series = pd.Series(highs)
                 close = close_series.iloc[-1]
                 
-                # 【漏斗2】：手动精准计算 60 日涨跌幅 >= 20%
+                # 【调整2】：60 日涨跌幅底线降至 15% (适应慢牛/震荡市)
                 close_60 = close_series.iloc[-61]
                 ret_60 = (close - close_60) / close_60
-                if ret_60 < 0.20:
-                    fail_reasons["动量不足20%"] += 1
+                if ret_60 < 0.15:
+                    fail_reasons["动量不足15%"] += 1
                     continue
                 
-                # 【漏斗3】：均线多头 (守住 MA60 和 MA120)
+                # 均线多头 (守住 MA60 和 MA120)
                 ma20 = close_series.rolling(20).mean().iloc[-1]
                 ma60 = close_series.rolling(60).mean().iloc[-1]
                 ma120 = close_series.rolling(120).mean().iloc[-1]
@@ -169,13 +163,13 @@ def screen_a_shares():
                     fail_reasons["破位MA60/120"] += 1
                     continue 
                     
-                # 【漏斗4】：逼近历史新高 (容忍回撤20%)
+                # 逼近历史新高 (容忍回撤20%)
                 high_250 = high_series.rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80):
                     fail_reasons["回撤超20%"] += 1
                     continue 
                     
-                # 【漏斗5】：RSI > 50
+                # 【调整3】：RSI 底线降至 45 (允许深蹲回踩洗盘)
                 delta = close_series.diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
@@ -183,7 +177,7 @@ def screen_a_shares():
                 ema_down = down.ewm(com=13, adjust=False).mean()
                 rs = ema_up / ema_down
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
-                if rsi < 50:
+                if rsi < 45:
                     fail_reasons["RSI弱势"] += 1
                     continue
                     
@@ -201,7 +195,6 @@ def screen_a_shares():
                 })
                 print(f"✅ 捕获主升浪标的: {code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
                 
-                # 停顿极短时间，接口超快不怕封
                 time.sleep(0.02)
                 
             except Exception as e:
@@ -240,7 +233,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col):
         else:
             sheet.clear()
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股满足条件 (50亿市值/2亿成交额/60日涨幅超20%)。")
+            sheet.update_acell("A1", f"[{now_time}] 当下大盘无个股满足条件 (50亿市值/2亿成交额/60日涨幅超15%)。")
             print(f"⚠️ {sheet_name}: 无符合条件的股票。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
