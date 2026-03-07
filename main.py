@@ -22,21 +22,48 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 
+# 2. [美股] 欧奈尔选股模块 (自动寻表防崩溃 + 进度打印版)
 # ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 [V3.0 黄金坑低吸版] ==========")
+    print("\n========== 开始处理美股 [V4.0 动态寻表防崩溃版] ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
-        ndx100 = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[4]['Ticker'].tolist()
-        tickers = list(set([t.replace('.', '-') for t in (sp500 + ndx100)]))
+        
+        # 1. 获取标普500 (动态寻找表头包含 Symbol 的表格)
+        sp500_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
+        sp500 = []
+        for df in sp500_tables:
+            if 'Symbol' in df.columns:
+                sp500 = df['Symbol'].tolist()
+                break
+                
+        # 2. 获取纳斯达克100 (动态寻找表头包含 Ticker 的表格)
+        ndx_tables = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)
+        ndx100 = []
+        for df in ndx_tables:
+            if 'Ticker' in df.columns:
+                ndx100 = df['Ticker'].tolist()
+                break
+            elif 'Symbol' in df.columns:
+                ndx100 = df['Symbol'].tolist()
+                break
+                
+        tickers = list(set([str(t).replace('.', '-') for t in (sp500 + ndx100)]))
+        print(f"✅ 成功获取美股名单！共合并去重 {len(tickers)} 只核心股票。开始扫描...")
+        
     except Exception as e:
-        print("获取美股列表失败")
+        print(f"❌ 获取美股列表发生致命错误: {e}")
         return []
 
     final_stocks = []
+    processed_count = 0
+    
     for ticker in tickers:
+        processed_count += 1
+        # 每扫描100只打印一次进度，让你知道它没有卡死
+        if processed_count % 100 == 0:
+            print(f"   ...已扫描 {processed_count}/{len(tickers)} 只美股...")
+            
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1y")
@@ -78,15 +105,17 @@ def screen_us_stocks():
                 "Turnover(M)": round((close * volume) / 1000000, 2),
                 "Struct": struct_label
             })
+            print(f"✅ 捕获美股强势标的: {ticker}")
         except:
             continue
+            
     return final_stocks
 
 # ==========================================
 # 3. [A股] 新浪财经隐身雷达 (绝对防屏蔽)
 # ==========================================
 def get_sina_market_snapshot():
-    print("🚀 启动【新浪财经】高匿分页拉取引擎 (绝对防屏蔽)...")
+    print("\n🚀 启动【新浪财经】高匿分页拉取引擎 (绝对防屏蔽)...")
     all_data = []
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -111,7 +140,7 @@ def get_sina_market_snapshot():
     return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 
+# 4. [A股] 欧奈尔核心筛选模块 (严格 20% 版 + 自动诊断报告)
 # ==========================================
 def screen_a_shares():
     print("\n========== 开始处理 A股 [V3.0 新浪核心诊断版] ==========")
@@ -127,7 +156,6 @@ def screen_a_shares():
         spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
         spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
 
-        # 【流动性初筛】股价10 / 50亿市值 / 2亿成交额 / 1.5%换手
         cond1 = spot_df['trade'] >= 10
         cond2 = spot_df['mktcap'] >= 5_000_000_000   
         cond3 = spot_df['amount'] >= 200_000_000      
@@ -138,7 +166,6 @@ def screen_a_shares():
         print(f"🎯 流动性初筛: 满足 50亿/2亿 的核心标的剩余 {liquidity_passed} 只。开始深入 K 线扫描...")
 
         final_a_stocks = []
-        
         fail_reasons = {"动量不足20%": 0, "破位MA60/120生命线": 0, "高点回撤过大(>20%)": 0, "短期RSI弱势(<50)": 0, "K线缺失/停牌": 0}
         
         end_date = datetime.datetime.now().strftime("%Y%m%d")
