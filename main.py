@@ -152,7 +152,7 @@ def screen_a_shares():
             name = row['name']
             
             try:
-                # 使用 Akshare 稳健获取 K 线，停顿防止被拉黑
+                # 使用 Akshare 稳健获取 K 线，停顿0.1秒防止被拉黑
                 time.sleep(0.1)
                 hist = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 
