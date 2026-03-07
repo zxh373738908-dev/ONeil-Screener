@@ -4,11 +4,11 @@ import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime
-import akshare as ak
 import time
 import requests
 import json
-import re
+import warnings
+warnings.filterwarnings('ignore')
 
 # ==========================================
 # 1. 基础设置与 Google Sheets 连接
@@ -20,10 +20,10 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 欧奈尔选股模块 (保持原版严格突破逻辑)
+# 2. [美股] 欧奈尔选股模块 (黄金坑回调低吸版)
 # ==========================================
 def screen_us_stocks():
-    print("\n========== 开始处理美股 ==========")
+    print("\n========== 开始处理美股 (兼容机构护盘与黄金坑标的) ==========")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
@@ -46,111 +46,130 @@ def screen_us_stocks():
             
             ma20 = hist['Close'].rolling(20).mean().iloc[-1]
             ma50 = hist['Close'].rolling(50).mean().iloc[-1]
+            ma150 = hist['Close'].rolling(150).mean().iloc[-1]
             ma200 = hist['Close'].rolling(200).mean().iloc[-1]
-            if not (close > ma20 and ma20 > ma50 and close > ma200): continue
+            
+            if not (ma50 > ma200): continue
+            if not (close > ma150 and close > ma200): continue
             
             high_250 = hist['High'].rolling(250).max().iloc[-1]
-            if close < (high_250 * 0.85): continue
+            if close < (high_250 * 0.80): continue
             
             ret_90d = (close - hist['Close'].iloc[-63]) / hist['Close'].iloc[-63]
-            if ret_90d < 0.25: continue
+            if ret_90d < 0.15: continue
+            
+            delta = hist['Close'].diff()
+            up = delta.clip(lower=0)
+            down = -1 * delta.clip(upper=0)
+            ema_up = up.ewm(com=13, adjust=False).mean()
+            ema_down = down.ewm(com=13, adjust=False).mean()
+            rs = ema_up / ema_down
+            rsi = 100 - (100 / (1 + rs)).iloc[-1]
+            if rsi < 45: continue
+            
+            struct_label = "Breakout (>MA20)" if close > ma20 else "Pullback (Near MA50)"
             
             final_stocks.append({
                 "Ticker": ticker,
                 "Price": round(close, 2),
                 "90D_Return%": f"{round(ret_90d * 100, 2)}%",
                 "Turnover(M)": round((close * volume) / 1000000, 2),
-                "Struct": "MA20>MA50"
+                "Struct": struct_label
             })
         except:
             continue
     return final_stocks
 
 # ==========================================
-# 3. [A股] 新浪财经高匿分页爬虫 (绕过防火墙)
+# 3. [A股] 东方财富底层原生接口 (彻底抛弃第三方库，绝不被墙)
 # ==========================================
-def get_sina_market_snapshot():
-    print("🚀 启动【新浪财经】高匿分页拉取引擎...")
+def get_eastmoney_spot():
+    print("🚀 启动【东方财富底层原生 API】直接拉取全市场数据...")
     all_data = []
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-        'Referer': 'http://finance.sina.com.cn/'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    for page in range(1, 80):
-        url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a"
+    # 获取全市场数据 (f2=最新价, f6=成交额, f8=换手率, f12=代码, f14=名称, f20=总市值, f24=60日涨跌幅)
+    for page in range(1, 60):
+        url = f"http://82.push2.eastmoney.com/api/qt/clist/get?pn={page}&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f2,f6,f8,f12,f14,f20,f24"
         try:
-            res = requests.get(url, headers=headers, timeout=5)
-            text = res.text
-            if text == "[]" or text == "null" or not text:
+            res = requests.get(url, headers=headers, timeout=5).json()
+            if not res.get('data') or not res['data'].get('diff'):
                 break
-            text = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', text)
-            data = json.loads(text)
-            all_data.extend(data)
+            all_data.extend(res['data']['diff'])
         except:
             continue
             
-    print(f"✅ 隐身拉取成功！共获取全市场 {len(all_data)} 只股票基础数据。")
-    return pd.DataFrame(all_data)
+    df = pd.DataFrame(all_data)
+    print(f"✅ 成功穿透防火墙！获取 A 股 {len(df)} 只股票基础数据。")
+    return df
 
 # ==========================================
-# 4. [A股] 欧奈尔核心筛选模块 (A股高波动回调低吸版)
+# 4. [A股] 欧奈尔核心筛选模块 (原生极速版)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (兼容主升浪回调洗盘标的) ==========")
+    print("\n========== 开始处理 A股 (50亿/2亿/原生K线拉取极速版) ==========")
     try:
-        spot_df = get_sina_market_snapshot()
+        spot_df = get_eastmoney_spot()
         if spot_df.empty: return []
         
-        # 数据清洗与单位转换 (市值转为元)
-        spot_df['trade'] = pd.to_numeric(spot_df['trade'], errors='coerce')
-        spot_df['mktcap'] = pd.to_numeric(spot_df['mktcap'], errors='coerce') * 10000
-        spot_df['amount'] = pd.to_numeric(spot_df['amount'], errors='coerce')
-        spot_df['turnoverratio'] = pd.to_numeric(spot_df['turnoverratio'], errors='coerce')
+        # 将空数据 "-" 替换为 NaN，并转为数字
+        spot_df = spot_df.replace("-", pd.NA)
+        spot_df['f2'] = pd.to_numeric(spot_df['f2'], errors='coerce')   # 价格
+        spot_df['f20'] = pd.to_numeric(spot_df['f20'], errors='coerce') # 总市值
+        spot_df['f6'] = pd.to_numeric(spot_df['f6'], errors='coerce')   # 成交额
+        spot_df['f8'] = pd.to_numeric(spot_df['f8'], errors='coerce')   # 换手率
+        spot_df['f24'] = pd.to_numeric(spot_df['f24'], errors='coerce') # 60日涨跌幅
 
-        # 【优化1】市值门槛降至 50亿 (防止次新股流通盘计算差异错杀)，成交额维持 2亿 (确认主力资金活跃度)
-        cond1 = spot_df['trade'] >= 10
-        cond2 = spot_df['mktcap'] >= 5_000_000_000   # 50亿
-        cond3 = spot_df['amount'] >= 200_000_000     # 2亿
-        cond4 = spot_df['turnoverratio'] >= 1.5
+        # 【黄金第一层漏斗】直接在服务器层面过滤，瞬间剔除 95% 的垃圾股
+        cond1 = spot_df['f2'] >= 10
+        cond2 = spot_df['f20'] >= 5_000_000_000   # 50亿市值
+        cond3 = spot_df['f6'] >= 200_000_000      # 2亿成交额
+        cond4 = spot_df['f8'] >= 1.5              # 1.5%换手
+        cond5 = spot_df['f24'] >= 20              # 60天涨幅超20% (自带字段，无需查K线)
             
-        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4].copy()
-        print(f"第一轮初筛完成：满足 50亿市值/2亿成交额 的候选股剩 {len(filtered_df)} 只。开始扫描 K 线...")
+        filtered_df = spot_df[cond1 & cond2 & cond3 & cond4 & cond5].copy()
+        print(f"🎯 第一轮初筛完成：满足所有流动性与 20% 动量的硬核资产仅剩 {len(filtered_df)} 只。开始精准扫描 K 线形态...")
 
         final_a_stocks = []
-        end_date = datetime.datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=400)).strftime("%Y%m%d")
+        headers = {'User-Agent': 'Mozilla/5.0'}
         
         for index, row in filtered_df.iterrows():
-            raw_code = row['code']
-            pure_code = raw_code[-6:] # 截取后6位纯数字
-            name = row['name']
+            code = str(row['f12']).zfill(6)
+            name = row['f14']
+            
+            # 构建东方财富底层 K 线 API 的特定前缀 (沪市为1. 深圳为0.)
+            secid = f"1.{code}" if code.startswith('6') else f"0.{code}"
             
             try:
-                time.sleep(0.1) # 停顿防止被拉黑
-                hist = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-                if len(hist) < 250: continue
-                    
-                close = hist['收盘'].iloc[-1]
+                # 直接获取底层 300 天前复权日 K 线数据 (速度极快，防屏蔽)
+                k_url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=300"
+                res = requests.get(k_url, headers=headers, timeout=5).json()
+                klines = res['data']['klines']
                 
-                # 动量要求：60日涨幅 >= 20%
-                close_60 = hist['收盘'].iloc[-61]
-                ret_60 = (close - close_60) / close_60
-                if ret_60 < 0.20: continue
+                # 提取收盘价和最高价
+                closes = [float(k.split(',')[2]) for k in klines]
+                highs = [float(k.split(',')[3]) for k in klines]
                 
-                # 【优化2】均线多头测算：允许股价暂时跌破20日线洗盘，但必须站稳60日/120日线，且中期趋势(MA20>MA60)保持向上
-                ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
-                ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
-                ma120 = hist['收盘'].rolling(120).mean().iloc[-1]
-                if not (close > ma60 and close > ma120): continue # 守住生命线
-                if not (ma20 > ma60): continue # 中期多头排列未被破坏
+                if len(closes) < 250: continue
+                
+                close_series = pd.Series(closes)
+                high_series = pd.Series(highs)
+                close = close_series.iloc[-1]
+                
+                # 均线测算 (还原 Hold MA60)
+                ma20 = close_series.rolling(20).mean().iloc[-1]
+                ma60 = close_series.rolling(60).mean().iloc[-1]
+                ma120 = close_series.rolling(120).mean().iloc[-1]
+                
+                if not (close > ma60 and close > ma120): continue 
+                if not (ma20 > ma60): continue 
                     
-                # 【优化3】突破历史新高测算：容忍250日最高价向下回撤 20% (A股杯柄形态常见深度)
-                high_250 = hist['最高'].rolling(250).max().iloc[-1]
+                # 容忍250日最高价向下回撤 20%
+                high_250 = high_series.rolling(250).max().iloc[-1]
                 if close < (high_250 * 0.80): continue 
                     
-                # 【优化4】RSI 测算：底线降至 50，允许短期情绪降温，只要没进入空头趋势即可
-                delta = hist['收盘'].diff()
+                # RSI 测算底线 50
+                delta = close_series.diff()
                 up = delta.clip(lower=0)
                 down = -1 * delta.clip(upper=0)
                 ema_up = up.ewm(com=13, adjust=False).mean()
@@ -159,19 +178,20 @@ def screen_a_shares():
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 if rsi < 50: continue
                     
-                # ================= 满足条件，加入白名单 =================
+                # ================= 加入白名单 =================
                 final_a_stocks.append({
-                    "Ticker": pure_code,
+                    "Ticker": code,
                     "Name": name,
                     "Price": round(close, 2),
-                    "60D_Return%": f"{round(ret_60 * 100, 2)}%",
-                    "Turnover(亿)": round(row['amount'] / 100_000_000, 2),
-                    "Turnover_Rate%": f"{row['turnoverratio']}%",
+                    "60D_Return%": f"{round(row['f24'], 2)}%",
+                    "Turnover(亿)": round(row['f6'] / 100_000_000, 2),
+                    "Turnover_Rate%": f"{row['f8']}%",
                     "RSI": round(rsi, 2),
                     "Trend": "Hold MA60",
                     "Fundamental": "Check ROE>15%" 
                 })
-                print(f"🎯 捕获主升浪标的: {pure_code} {name} (60日涨幅 {round(ret_60 * 100, 2)}%)")
+                print(f"✅ 捕获主升浪标的: {code} {name}")
+                time.sleep(0.1)
                 
             except Exception as e:
                 continue
@@ -179,7 +199,7 @@ def screen_a_shares():
         return final_a_stocks
         
     except Exception as e:
-        print(f"A 股扫描发生致命错误: {e}")
+        print(f"❌ A 股扫描发生致命错误: {e}")
         return []
 
 # ==========================================
