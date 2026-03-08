@@ -17,7 +17,6 @@ scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# 🚀 黑科技：绝对数值清洗器 (将 0.205, "20.5%", "20.5" 统一清洗为 20.5)
 def parse_pct(val):
     if pd.isna(val) or str(val).strip() == '': return 0.0
     s = str(val).replace(',', '').strip()
@@ -25,12 +24,9 @@ def parse_pct(val):
     s = s.replace('%', '')
     try:
         f = float(s)
-        # 如果没有 % 且数值在 -2 到 2 之间，极大概率是小数格式 (如 0.205 代表 20.5%)
-        if not is_pct and -2 <= f <= 2:
-            return f * 100.0
+        if not is_pct and -2 <= f <= 2: return f * 100.0
         return f
-    except:
-        return 0.0
+    except: return 0.0
 
 def parse_float(val):
     if pd.isna(val) or str(val).strip() == '': return 0.0
@@ -38,26 +34,42 @@ def parse_float(val):
     except: return 0.0
 
 # ==========================================
-# 2. [第一阶] 读取板块大方向 (智能模糊匹配版)
+# 2. [第一阶] 读取板块大方向 (AI自动跨表寻表版)
 # ==========================================
 def get_target_sectors():
-    print("\n🌍 [STEP 1] 正在连接宏观大盘，读取板块景气度模型...")
+    print("\n🌍 [STEP 1] 正在连接宏观大盘，寻找板块景气度模型...")
     try:
-        sheet = client.open_by_url(SECTOR_SHEET_URL).sheet1
-        raw_data = sheet.get_all_values()
+        doc = client.open_by_url(SECTOR_SHEET_URL)
+        raw_data = []
+        sheet_name = ""
         
-        if len(raw_data) < 2: return []
+        # 🚀 智能雷达：翻遍这个链接里的所有工作表(Tab)，寻找真正的板块数据！
+        for ws in doc.worksheets():
+            data = ws.get_all_values()
+            if not data: continue
             
+            # 把第一行拼起来看看有没有特征词
+            headers_str = "".join([str(h).upper() for h in data[0]])
+            if 'R120' in headers_str or 'REL20' in headers_str or 'RANK' in headers_str:
+                raw_data = data
+                sheet_name = ws.title
+                break
+                
+        if not raw_data:
+            print("⚠️ 致命错误：在提供的链接中，所有的工作表里都没找到包含 'R120' 或 'REL20' 的表头！请检查表格内容。")
+            return []
+            
+        print(f"✅ 智能雷达触发：自动锁定数据工作表 ➡️ [{sheet_name}]")
+        
         headers = [str(h).strip() for h in raw_data[0]]
         df = pd.DataFrame(raw_data[1:], columns=headers)
         
-        # 🚀 黑科技：模糊寻找表头 (只要包含这些关键字就能识别)
         def get_fuzzy_col(keywords, is_pct=True):
             for kw in keywords:
                 for col in df.columns:
-                    if kw.lower() in col.lower():
+                    if kw.lower() in str(col).lower().replace(' ', ''):
                         return df[col].apply(parse_pct if is_pct else parse_float)
-            print(f"⚠️ 警告: 未找到包含 {keywords} 的列，已用 0.0 填充。")
+            print(f"⚠️ 警告: 未找到 {keywords} 列，已用 0.0 填充。")
             return pd.Series(0.0, index=df.index)
 
         # 智能提取列数据
@@ -69,20 +81,17 @@ def get_target_sectors():
         r20 = get_fuzzy_col(['R20', '20日'], True)
         rel5 = get_fuzzy_col(['REL5', '5日'], True)
         
-        # 打印第一行解析后的数据，让你一眼看出系统是不是算错了！
         name_col = df.columns[0]
         for col in df.columns:
             if '名' in col or 'Name' in col: name_col = col
             
-        print(f"\n🔍 [上帝视角] 第一行数据清洗结果展示:")
-        print(f"板块名称: {df[name_col].iloc[0]}")
-        print(f"解析数值 -> R120: {r120.iloc[0]}%, Rank: {rank.iloc[0]}, REL20: {rel20.iloc[0]}%, REL60: {rel60.iloc[0]}%, R60: {r60.iloc[0]}%, R20: {r20.iloc[0]}%, REL5: {rel5.iloc[0]}%")
-        print("-" * 40)
+        print(f"\n🔍 [上帝视角] [{sheet_name}] 第一行数据解析展示:")
+        print(f"板块: {df[name_col].iloc[0]} | R120:{r120.iloc[0]}%, Rank:{rank.iloc[0]}, REL20:{rel20.iloc[0]}%, REL5:{rel5.iloc[0]}%")
         
-        # 👑【强势热门板块】 (注意：清洗后 20% 就是 20.0，所以这里用 > 20)
-        cond_main = (r120 > 20.0) & (rank >= 80) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
+        # 👑【强势热门板块 (主战场)】
+        cond_main = (r120 > 20.0) & (rank >= 80.0) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
         
-        # 🎯【加速期回踩】
+        # 🎯【加速期回踩 (黄金坑)】
         cond_dip = (r120 > 15.0) & (r20 < 0) & (rel5 > 0)
         
         hot_sectors = df[cond_main][name_col].tolist()
@@ -204,14 +213,13 @@ def process_single_stock(row, session):
         }
         return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
     except Exception as e: 
-        err_msg = str(e)[:10]
-        return {"status": "fail", "reason": f"接口错({err_msg})"}
+        return {"status": "fail", "reason": "接口报错"}
 
 # ==========================================
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (严格自上而下 Top-Down) ==========")
+    print("\n========== 开始处理 A股 (AI 智能寻表 + 降维打击) ==========")
     
     target_sectors = get_target_sectors()
     if not target_sectors:
@@ -285,7 +293,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
     except Exception as e: print(f"❌ 写入失败: {e}")
 
 # ==========================================
-# 7. 主程序启动
+# 7. 主程序启动 (跳过美股，专注测试 A股)
 # ==========================================
 if __name__ == "__main__":
     try:
