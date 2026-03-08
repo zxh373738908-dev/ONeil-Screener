@@ -229,4 +229,36 @@ if __name__ == "__main__":
         error_trace = traceback.format_exc()
         crash_msg = f"[{now_time}] ❌ 致命错误导致程序中途崩溃:\n\n{error_trace}"
         print(crash_msg)
-        write_to_sheet("A-Share Screener",[], sort_col="60D_Return%", diag_msg=crash_msg)
+        # ==========================================
+# 4. 写入 Google Sheets (修复排版覆盖 Bug)
+# ==========================================
+def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
+    try:
+        sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
+        if final_stocks:
+            df = pd.DataFrame(final_stocks)
+            df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
+            df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
+            data_to_write =[df.columns.values.tolist()] + df.values.tolist()
+            
+            # 清空并写入基础数据 (占用 A 到 K 列)
+            sheet.clear()
+            sheet.update(values=data_to_write, range_name="A1")
+            
+            # 【修复1】：将时间戳向右推移到 M 和 N 列，不再吞掉市值和成交额表头！
+            now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sheet.update_acell("M1", "Last Updated:")
+            sheet.update_acell("N1", now_time)
+            
+            # 【修复2】：有数据时，也把诊断报告自动输出在表格最右侧（O1单元格），一目了然！
+            if diag_msg:
+                sheet.update_acell("O1", diag_msg)
+                
+            print(f"🎉 成功将 {len(df)} 只标的写入 {sheet_name}！")
+        else:
+            sheet.clear()
+            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
+            sheet.update_acell("A1", final_msg)
+            print(f"⚠️ {sheet_name}: 已输出诊断报告/空仓警告。")
+    except Exception as e:
+        print(f"❌ 写入 {sheet_name} 失败: {e}")
