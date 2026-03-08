@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 基础设置与双向 Google Sheets 连接
 # ==========================================
-# 读取宏观板块方向的表格 (⚠️ 记得给 credentials.json 里的邮箱开通此表的分享权限！)
+# 读取宏观板块方向的表格 (已确认权限OK)
 SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/1BoYIVL3lb8nZE3U1qAkuO3MTrM117x2qycN1RdrDZgo/edit?gid=0#gid=0"
 # 写入选股结果的表格
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
@@ -29,23 +29,28 @@ def safe_pct(val):
     return 0.0
 
 def safe_float(val, default=0.0):
+    if not val or val == '': return 0.0
     try: return float(val)
     except: return default
 
 # ==========================================
-# 2. [第一阶] 读取板块大方向 (Top-Down 核心)
+# 2. [第一阶] 读取板块大方向 (暴力抗错版)
 # ==========================================
 def get_target_sectors():
     print("\n🌍 [STEP 1] 正在连接宏观大盘，读取板块景气度模型...")
     try:
         sheet = client.open_by_url(SECTOR_SHEET_URL).sheet1
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        # 🚀 放弃强迫症方法，使用底层获取所有值，无视空白列报错
+        raw_data = sheet.get_all_values()
         
-        # 清洗列名，防止用户表格里有多余空格
-        df.columns = [str(c).strip() for c in df.columns]
+        if len(raw_data) < 2:
+            print("⚠️ 板块表格数据为空。")
+            return []
+            
+        # 第一行作为表头，其余作为数据
+        headers = [str(h).strip() for h in raw_data[0]]
+        df = pd.DataFrame(raw_data[1:], columns=headers)
         
-        # 安全提取列数据
         def get_col(col_name, is_pct=True):
             if col_name not in df.columns: return pd.Series(0.0, index=df.index)
             return df[col_name].apply(safe_pct if is_pct else safe_float)
@@ -76,7 +81,7 @@ def get_target_sectors():
         
         return all_target_sectors
     except Exception as e:
-        print(f"⚠️ 读取板块表格失败 (请确认是否给机器人邮箱开通了分享权限): {e}")
+        print(f"⚠️ 读取板块表格发生解析错误: {e}")
         return []
 
 # ==========================================
@@ -128,7 +133,7 @@ def get_sina_market_snapshot():
     return pd.DataFrame(all_data)
 
 # ==========================================
-# 5. [第四阶] 腾讯WEB极速 K 线引擎 (防屏蔽换源)
+# 5. [第四阶] 腾讯WEB极速 K 线引擎
 # ==========================================
 def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
@@ -136,7 +141,6 @@ def process_single_stock(row, session):
     prefix = "sh" if pure_code.startswith(('6', '5')) else "sz"
     
     try:
-        # 换用腾讯最稳定的 WEB 端主节点
         k_url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{pure_code},day,,,300,qfq"
         res = session.get(k_url, timeout=4).json()
         
@@ -192,7 +196,7 @@ def process_single_stock(row, session):
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (降维打击 + 腾讯WEB极速版) ==========")
+    print("\n========== 开始处理 A股 (完美降维打击 + 腾讯极速版) ==========")
     
     # 1. 自上而下获取核心股票池
     target_sectors = get_target_sectors()
@@ -211,7 +215,7 @@ def screen_a_shares():
     if core_tickers:
         spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
-        print(f"🎯 板块降维完成：目标池缩小至 {len(f_df)} 只板块核心股。")
+        print(f"🎯 板块降维完成：全市场 {total} 只股票 -> 目标池骤降至 {len(f_df)} 只板块核心股。")
     else:
         f_df = spot_df.copy()
         print(f"⚠️ 板块降维未生效，执行全市场 {total} 只股票硬扫模式。")
@@ -262,7 +266,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             print(f"🎉 成功将 {len(df)} 只标的写入表格！")
         else:
             sheet.update_acell("A1", diag_msg if diag_msg else "无符合条件的股票。")
-            print("⚠️ 无符合条件的股票，已写入空仓诊断报告。")
+            print("⚠️ 筛选极为严苛，今日无符合条件股票，已写入空仓诊断报告。")
     except Exception as e: print(f"❌ 写入失败: {e}")
 
 # ==========================================
