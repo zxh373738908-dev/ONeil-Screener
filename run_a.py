@@ -34,7 +34,7 @@ def parse_float(val):
     except: return 0.0
 
 # ==========================================
-# 2. [第一阶] 读取板块大方向 (AI自动跨表寻表版)
+# 2. [第一阶] 读取板块大方向 (自动下钻寻表头版)
 # ==========================================
 def get_target_sectors():
     print("\n🌍 [STEP 1] 正在连接宏观大盘，寻找板块景气度模型...")
@@ -42,27 +42,34 @@ def get_target_sectors():
         doc = client.open_by_url(SECTOR_SHEET_URL)
         raw_data = []
         sheet_name = ""
+        header_row_index = -1
         
-        # 🚀 智能雷达：翻遍这个链接里的所有工作表(Tab)，寻找真正的板块数据！
+        # 🚀 雷达向下挖掘：不管你在上面加了多少行日期和备注，只要往下找，总能找到真正的表头
         for ws in doc.worksheets():
             data = ws.get_all_values()
             if not data: continue
             
-            # 把第一行拼起来看看有没有特征词
-            headers_str = "".join([str(h).upper() for h in data[0]])
-            if 'R120' in headers_str or 'REL20' in headers_str or 'RANK' in headers_str:
-                raw_data = data
-                sheet_name = ws.title
+            # 扫描前 10 行，寻找包含 R120 / Rank / REL20 的真正表头
+            for i, row in enumerate(data[:10]):
+                row_str = "".join([str(h).upper() for h in row])
+                if 'R120' in row_str or 'RANK' in row_str or 'NAME' in row_str:
+                    raw_data = data
+                    sheet_name = ws.title
+                    header_row_index = i
+                    break
+            
+            if header_row_index != -1:
                 break
                 
-        if not raw_data:
-            print("⚠️ 致命错误：在提供的链接中，所有的工作表里都没找到包含 'R120' 或 'REL20' 的表头！请检查表格内容。")
+        if header_row_index == -1:
+            print("⚠️ 致命错误：找遍了所有表格的前 10 行，都没有发现包含 'R120' 或 'Name' 的表头！请检查。")
             return []
             
-        print(f"✅ 智能雷达触发：自动锁定数据工作表 ➡️ [{sheet_name}]")
+        print(f"✅ 智能雷达触发：在工作表 [{sheet_name}] 的第 {header_row_index + 1} 行发现了真正的表头！")
         
-        headers = [str(h).strip() for h in raw_data[0]]
-        df = pd.DataFrame(raw_data[1:], columns=headers)
+        # 将找到的那一行作为表头，它下面的所有行作为数据
+        headers = [str(h).strip() for h in raw_data[header_row_index]]
+        df = pd.DataFrame(raw_data[header_row_index + 1:], columns=headers)
         
         def get_fuzzy_col(keywords, is_pct=True):
             for kw in keywords:
@@ -72,7 +79,6 @@ def get_target_sectors():
             print(f"⚠️ 警告: 未找到 {keywords} 列，已用 0.0 填充。")
             return pd.Series(0.0, index=df.index)
 
-        # 智能提取列数据
         r120 = get_fuzzy_col(['R120', '120日'], True)
         rank = get_fuzzy_col(['Rank', '排名', '强度'], False)
         rel20 = get_fuzzy_col(['REL20'], True)
@@ -81,12 +87,15 @@ def get_target_sectors():
         r20 = get_fuzzy_col(['R20', '20日'], True)
         rel5 = get_fuzzy_col(['REL5', '5日'], True)
         
+        # 找出板块名称列 (Name)
         name_col = df.columns[0]
         for col in df.columns:
-            if '名' in col or 'Name' in col: name_col = col
+            if '名' in col or 'Name' in str(col): 
+                name_col = col
+                break
             
-        print(f"\n🔍 [上帝视角] [{sheet_name}] 第一行数据解析展示:")
-        print(f"板块: {df[name_col].iloc[0]} | R120:{r120.iloc[0]}%, Rank:{rank.iloc[0]}, REL20:{rel20.iloc[0]}%, REL5:{rel5.iloc[0]}%")
+        print(f"\n🔍 [上帝视角] 数据清洗结果展示 (第一行板块):")
+        print(f"板块名称: {df[name_col].iloc[0]} | R120:{r120.iloc[0]}%, Rank:{rank.iloc[0]}, REL20:{rel20.iloc[0]}%, REL5:{rel5.iloc[0]}%")
         
         # 👑【强势热门板块 (主战场)】
         cond_main = (r120 > 20.0) & (rank >= 80.0) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
@@ -98,10 +107,10 @@ def get_target_sectors():
         dip_sectors = df[cond_dip][name_col].tolist()
         
         all_target_sectors = list(set(hot_sectors + dip_sectors))
-        print(f"✅ 宏观模型运算完毕：锁定 {len(hot_sectors)} 个主战场，{len(dip_sectors)} 个黄金坑。")
+        print(f"✅ 宏观模型运算完毕：成功锁定 {len(hot_sectors)} 个主线热点板块，{len(dip_sectors)} 个黄金坑板块。")
         
         if all_target_sectors:
-            print(f"🎯 最终核心攻击板块: {', '.join(all_target_sectors[:10])} ...")
+            print(f"🎯 提取到的核心板块名单: {', '.join(all_target_sectors)} ...")
             
         return all_target_sectors
     except Exception as e:
@@ -113,14 +122,17 @@ def get_target_sectors():
 # ==========================================
 def get_stocks_from_sectors(sector_names):
     if not sector_names: return set()
-    print("\n🧬 [STEP 2] 正在提取核心板块的所有成分股代码...")
+    print("\n🧬 [STEP 2] 正在向东方财富请求这些板块的成分股代码...")
     target_tickers = set()
     try:
         em_boards = ak.stock_board_industry_name_em()
         valid_board_names = em_boards['板块名称'].tolist()
         
         for name in sector_names:
-            clean_name = name.replace('ETF', '').replace('指数', '').replace('行业', '')
+            # 清洗名字，把 ETF 等字眼去掉，以匹配东财的行业板块名
+            clean_name = str(name).replace('ETF', '').replace('指数', '').replace('行业', '').strip()
+            if not clean_name: continue
+            
             matched_name = None
             for b_name in valid_board_names:
                 if clean_name in b_name or b_name in clean_name:
@@ -134,7 +146,7 @@ def get_stocks_from_sectors(sector_names):
                     target_tickers.update(tickers)
                 except: continue
         
-        print(f"✅ 成功提取！共锁定 {len(target_tickers)} 只具备板块效应的个股。")
+        print(f"✅ 成分股提取完毕！共锁定 {len(target_tickers)} 只具备板块主升浪效应的个股。")
         return target_tickers
     except Exception as e:
         print(f"⚠️ 提取成分股失败: {e}")
@@ -211,7 +223,7 @@ def process_single_stock(row, session):
             "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), "Turnover(亿)": round(row['amount'] / 100000000, 2),
             "Trend": "Hold MA50"
         }
-        return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
+        return {"status": "success", "data": data, "log": f"✅ 捕获主线龙头: {pure_code} {name}"}
     except Exception as e: 
         return {"status": "fail", "reason": "接口报错"}
 
@@ -219,17 +231,17 @@ def process_single_stock(row, session):
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (AI 智能寻表 + 降维打击) ==========")
+    print("\n========== 开始处理 A股 (雷达自动避坑降维打击版) ==========")
     
     target_sectors = get_target_sectors()
     if not target_sectors:
         print("\n🛑 [强制熔断] 宏观模型未发现符合要求的强庄板块。")
-        print("💡 欧奈尔纪律：倾巢之下无完卵。强制执行空仓纪律！")
+        print("💡 欧奈尔纪律：大盘无主线，绝不盲目买票。强制执行空仓纪律！")
         return [], "[系统保护] 宏观大盘无符合条件的热门板块，严格执行空仓纪律！"
         
     core_tickers = get_stocks_from_sectors(target_sectors)
     if not core_tickers:
-        return [], "❌ 提取板块成分股失败，请检查网络。"
+        return [], "❌ 虽然有符合条件的板块，但在提取成分股时失败，请稍后重试。"
     
     print("\n📊 [STEP 3] 扫描全市场流动性...")
     spot_df = get_sina_market_snapshot()
@@ -240,10 +252,10 @@ def screen_a_shares():
     
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
-    print(f"🎯 板块降维完成：全市场 5000 只股票 -> 目标池骤降至 {len(f_df)} 只板块核心股。")
+    print(f"🎯 板块降维完成：全市场 5000 只股票 -> 目标池瞬间骤降至 {len(f_df)} 只板块内核心股。")
         
     f_df = f_df[(f_df['trade']>=10) & (f_df['mktcap']>=5000000000) & (f_df['amount']>=200000000) & (f_df['turnoverratio']>=1.5)].copy()
-    print(f"💰 流动性过滤完成：即将对剩余 {len(f_df)} 只硬核标的进行 K 线狙击！")
+    print(f"💰 流动性过滤完成：只剩最后 {len(f_df)} 只主力高换手标的！启动 K 线狙击。")
     
     if f_df.empty:
         return [], "[系统保护] 主线板块内的个股流动性严重枯竭，建议空仓！"
@@ -251,7 +263,7 @@ def screen_a_shares():
     final_stocks = []
     fail_reasons = defaultdict(int)
     
-    print("\n⚔️ [STEP 4] 启动腾讯并发引擎，进行形态测算...")
+    print("\n⚔️ [STEP 4] 启动腾讯多线程引擎，测算个股形态...")
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
@@ -293,7 +305,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
     except Exception as e: print(f"❌ 写入失败: {e}")
 
 # ==========================================
-# 7. 主程序启动 (跳过美股，专注测试 A股)
+# 7. 主程序启动
 # ==========================================
 if __name__ == "__main__":
     try:
