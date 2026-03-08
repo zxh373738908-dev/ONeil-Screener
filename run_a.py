@@ -3,23 +3,23 @@ import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime, requests, json, re, time, concurrent.futures, warnings, traceback
-from collections import defaultdict
 import akshare as ak
+from collections import defaultdict
 warnings.filterwarnings('ignore')
 
 # ==========================================
 # 1. 基础设置与双向 Google Sheets 连接
 # ==========================================
+# 读取宏观板块方向的表格 (⚠️ 记得给 credentials.json 里的邮箱开通此表的分享权限！)
+SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/1BoYIVL3lb8nZE3U1qAkuO3MTrM117x2qycN1RdrDZgo/edit?gid=0#gid=0"
 # 写入选股结果的表格
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
-# 读取宏观板块方向的表格
-SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/1BoYIVL3lb8nZE3U1qAkuO3MTrM117x2qycN1RdrDZgo/edit?gid=0#gid=0"
 
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# 辅助函数：安全转换百分比字符串为浮点数 (如 "20.5%" -> 0.205)
+# 辅助函数：安全转换
 def safe_pct(val):
     if isinstance(val, (int, float)): return float(val)
     if isinstance(val, str):
@@ -42,35 +42,41 @@ def get_target_sectors():
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # 统一解析所有需要的指标字段
-        df['R120_val'] = df['R120'].apply(safe_pct)
-        df['R60_val'] = df['R60'].apply(safe_pct)
-        df['R20_val'] = df['R20'].apply(safe_pct)
-        df['Rank_val'] = df['Rank'].apply(safe_float)
-        df['REL120_val'] = df['REL120'].apply(safe_pct) if 'REL120' in df.columns else 0.0
-        df['REL60_val'] = df['REL60'].apply(safe_pct)
-        df['REL20_val'] = df['REL20'].apply(safe_pct)
-        df['REL5_val'] = df['REL5'].apply(safe_pct)
+        # 清洗列名，防止用户表格里有多余空格
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # 安全提取列数据
+        def get_col(col_name, is_pct=True):
+            if col_name not in df.columns: return pd.Series(0.0, index=df.index)
+            return df[col_name].apply(safe_pct if is_pct else safe_float)
+
+        r120 = get_col('R120', True)
+        rank = get_col('Rank', False)
+        rel20 = get_col('REL20', True)
+        rel60 = get_col('REL60', True)
+        r60 = get_col('R60', True)
+        r20 = get_col('R20', True)
+        rel5 = get_col('REL5', True)
         
         # 👑【列表一：强势热门板块 (主战场)】
-        # R120 > 20% 且 Rank >= 80 且 REL20 > 0 且 REL60 > 0 且 R60 > 0
-        cond_main = (df['R120_val'] > 0.20) & (df['Rank_val'] >= 80) & \
-                    (df['REL20_val'] > 0) & (df['REL60_val'] > 0) & (df['R60_val'] > 0)
+        cond_main = (r120 > 0.20) & (rank >= 80) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
         
         # 🎯【列表二：加速期回踩 (真正的“黄金坑”)】
-        # R120 > 15% 且 R20 < 0 且 REL5 > 0
-        cond_dip = (df['R120_val'] > 0.15) & (df['R20_val'] < 0) & (df['REL5_val'] > 0)
+        cond_dip = (r120 > 0.15) & (r20 < 0) & (rel5 > 0)
         
-        hot_sectors = df[cond_main]['名称'].tolist() if '名称' in df.columns else df.iloc[:, 0][cond_main].tolist()
-        dip_sectors = df[cond_dip]['名称'].tolist() if '名称' in df.columns else df.iloc[:, 0][cond_dip].tolist()
+        # 提取板块名称
+        name_col = '名称' if '名称' in df.columns else df.columns[0]
+        hot_sectors = df[cond_main][name_col].tolist()
+        dip_sectors = df[cond_dip][name_col].tolist()
         
         all_target_sectors = list(set(hot_sectors + dip_sectors))
-        print(f"✅ 宏观降维成功！锁定 {len(hot_sectors)} 个主战场板块，{len(dip_sectors)} 个黄金坑板块。")
-        print(f"🎯 核心攻击方向: {', '.join(all_target_sectors[:10])} ...")
+        print(f"✅ 宏观降维成功！锁定 {len(hot_sectors)} 个主战场，{len(dip_sectors)} 个黄金坑。")
+        if all_target_sectors:
+            print(f"🎯 核心攻击方向: {', '.join(all_target_sectors[:10])} ...")
         
         return all_target_sectors
     except Exception as e:
-        print(f"⚠️ 读取板块表格失败，退回全市场扫描模式: {e}")
+        print(f"⚠️ 读取板块表格失败 (请确认是否给机器人邮箱开通了分享权限): {e}")
         return []
 
 # ==========================================
@@ -85,7 +91,6 @@ def get_stocks_from_sectors(sector_names):
         valid_board_names = em_boards['板块名称'].tolist()
         
         for name in sector_names:
-            # 清洗名字匹配东财板块 (去ETF/指数等字眼)
             clean_name = name.replace('ETF', '').replace('指数', '').replace('行业', '')
             matched_name = None
             for b_name in valid_board_names:
@@ -100,7 +105,7 @@ def get_stocks_from_sectors(sector_names):
                     target_tickers.update(tickers)
                 except: continue
         
-        print(f"✅ 成功提取核心股票池！共锁定 {len(target_tickers)} 只具备板块效应的个股。")
+        print(f"✅ 成功提取核心股票池！共锁定 {len(target_tickers)} 只板块核心个股。")
         return target_tickers
     except Exception as e:
         print(f"⚠️ 提取成分股失败: {e}")
@@ -123,7 +128,7 @@ def get_sina_market_snapshot():
     return pd.DataFrame(all_data)
 
 # ==========================================
-# 5. [第四阶] 腾讯极速 K 线引擎 (防屏蔽核武器)
+# 5. [第四阶] 腾讯WEB极速 K 线引擎 (防屏蔽换源)
 # ==========================================
 def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
@@ -131,18 +136,17 @@ def process_single_stock(row, session):
     prefix = "sh" if pure_code.startswith(('6', '5')) else "sz"
     
     try:
-        # 使用腾讯财经日K线接口，全球CDN加速，永不被墙
-        k_url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={prefix}{pure_code},day,,,300,qfq"
-        res = session.get(k_url, timeout=5).json()
+        # 换用腾讯最稳定的 WEB 端主节点
+        k_url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{pure_code},day,,,300,qfq"
+        res = session.get(k_url, timeout=4).json()
         
-        if res.get('code') != 0: return {"status": "fail", "reason": "接口无数据"}
+        if res.get('code') != 0: return {"status": "fail", "reason": "腾讯WEB接口空"}
             
         data_node = res['data'][f'{prefix}{pure_code}']
         klines = data_node.get('qfqday', data_node.get('day', []))
         
         if len(klines) < 250: return {"status": "fail", "reason": "次新/退市"}
         
-        # 腾讯格式: [date, open, close, high, low, vol]
         closes = [float(k[2]) for k in klines]
         highs = [float(k[3]) for k in klines]
         lows = [float(k[4]) for k in klines]
@@ -152,7 +156,6 @@ def process_single_stock(row, session):
         close, close_60 = cs.iloc[-1], cs.iloc[-61]
         if close == 0.0: return {"status": "fail", "reason": "停牌"}
         
-        # 还原你的长线多头判断逻辑
         ma20, ma50, ma150, ma200 = cs.rolling(20).mean().iloc[-1], cs.rolling(50).mean().iloc[-1], cs.rolling(150).mean().iloc[-1], cs.rolling(200).mean().iloc[-1]
         if not (close > ma50 and ma50 > ma150 and ma150 > ma200): 
             return {"status": "fail", "reason": "非多头排列"}
@@ -181,46 +184,49 @@ def process_single_stock(row, session):
             "Trend": "Hold MA50"
         }
         return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
-    except Exception as e: return {"status": "fail", "reason": "数据解析异常"}
+    except Exception as e: 
+        err_msg = str(e)[:10]
+        return {"status": "fail", "reason": f"接口错({err_msg})"}
 
 # ==========================================
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (降维打击 + 腾讯极速版) ==========")
+    print("\n========== 开始处理 A股 (降维打击 + 腾讯WEB极速版) ==========")
     
     # 1. 自上而下获取核心股票池
     target_sectors = get_target_sectors()
     core_tickers = get_stocks_from_sectors(target_sectors)
     
-    # 2. 获取大盘快照并进行宏观+微观双重过滤
+    # 2. 获取大盘快照并进行双重过滤
     print("\n📊 [STEP 3] 扫描全市场流动性...")
     spot_df = get_sina_market_snapshot()
-    if spot_df.empty: return[], "❌ 大盘数据为空"
+    if spot_df.empty: return [], "❌ 大盘数据为空"
     
     total = len(spot_df)
     for col in ['trade','mktcap','amount','turnoverratio']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     spot_df['mktcap'] *= 10000
     
-    # 核心过滤：如果你有板块代码，只在核心板块里找！如果没有，扫全市场
+    # 核心降维过滤
     if core_tickers:
         spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
         print(f"🎯 板块降维完成：目标池缩小至 {len(f_df)} 只板块核心股。")
     else:
         f_df = spot_df.copy()
+        print(f"⚠️ 板块降维未生效，执行全市场 {total} 只股票硬扫模式。")
         
     # 流动性过滤
     f_df = f_df[(f_df['trade']>=10) & (f_df['mktcap']>=5000000000) & (f_df['amount']>=200000000) & (f_df['turnoverratio']>=1.5)].copy()
-    print(f"💰 流动性过滤完成：即将对最后剩余的 {len(f_df)} 只硬核标的进行 K 线狙击！")
+    print(f"💰 流动性过滤完成：即将对剩余 {len(f_df)} 只硬核标的进行 K 线狙击！")
     
     final_stocks = []
     fail_reasons = defaultdict(int)
     
-    # 3. 开启腾讯多线程 K 线测算 (10 线程并发绝对安全)
+    # 3. 开启腾讯 WEB 端并发测算
     print("\n⚔️ [STEP 4] 启动腾讯并发引擎，进行形态测算...")
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0'})
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
@@ -253,8 +259,10 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             sheet.update_acell("M1", "Last Updated:")
             sheet.update_acell("N1", now)
             if diag_msg: sheet.update_acell("O1", diag_msg)
+            print(f"🎉 成功将 {len(df)} 只标的写入表格！")
         else:
             sheet.update_acell("A1", diag_msg if diag_msg else "无符合条件的股票。")
+            print("⚠️ 无符合条件的股票，已写入空仓诊断报告。")
     except Exception as e: print(f"❌ 写入失败: {e}")
 
 # ==========================================
