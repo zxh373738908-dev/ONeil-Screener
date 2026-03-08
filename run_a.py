@@ -44,12 +44,10 @@ def get_target_sectors():
         sheet_name = ""
         header_row_index = -1
         
-        # 🚀 雷达向下挖掘：不管你在上面加了多少行日期和备注，只要往下找，总能找到真正的表头
         for ws in doc.worksheets():
             data = ws.get_all_values()
             if not data: continue
             
-            # 扫描前 10 行，寻找包含 R120 / Rank / REL20 的真正表头
             for i, row in enumerate(data[:10]):
                 row_str = "".join([str(h).upper() for h in row])
                 if 'R120' in row_str or 'RANK' in row_str or 'NAME' in row_str:
@@ -62,12 +60,11 @@ def get_target_sectors():
                 break
                 
         if header_row_index == -1:
-            print("⚠️ 致命错误：找遍了所有表格的前 10 行，都没有发现包含 'R120' 或 'Name' 的表头！请检查。")
+            print("⚠️ 致命错误：未找到有效表头！")
             return []
             
         print(f"✅ 智能雷达触发：在工作表 [{sheet_name}] 的第 {header_row_index + 1} 行发现了真正的表头！")
         
-        # 将找到的那一行作为表头，它下面的所有行作为数据
         headers = [str(h).strip() for h in raw_data[header_row_index]]
         df = pd.DataFrame(raw_data[header_row_index + 1:], columns=headers)
         
@@ -87,7 +84,6 @@ def get_target_sectors():
         r20 = get_fuzzy_col(['R20', '20日'], True)
         rel5 = get_fuzzy_col(['REL5', '5日'], True)
         
-        # 找出板块名称列 (Name)
         name_col = df.columns[0]
         for col in df.columns:
             if '名' in col or 'Name' in str(col): 
@@ -118,38 +114,81 @@ def get_target_sectors():
         return []
 
 # ==========================================
-# 3. [第二阶] 锁定板块成分股
+# 3. [第二阶] 锁定板块成分股 (防封杀 + AI洗词补丁版)
 # ==========================================
 def get_stocks_from_sectors(sector_names):
     if not sector_names: return set()
-    print("\n🧬 [STEP 2] 正在向东方财富请求这些板块的成分股代码...")
+    print("\n🧬 [STEP 2] 正在向数据库请求成分股代码 (启动智能防屏蔽渗透)...")
     target_tickers = set()
+    
+    # 过滤掉非 A 股资产
+    ignore_keywords = ['日经', '纳斯达克', '纳指', '标普', '恒生', '港股', '国债', '债券', '中概']
+    
     try:
-        em_boards = ak.stock_board_industry_name_em()
-        valid_board_names = em_boards['板块名称'].tolist()
+        # 重试机制获取底层行业和概念列表
+        for _ in range(3):
+            try:
+                em_industries = ak.stock_board_industry_name_em()
+                em_concepts = ak.stock_board_concept_name_em()
+                break
+            except:
+                time.sleep(1)
+                
+        valid_industries = em_industries['板块名称'].tolist()
+        valid_concepts = em_concepts['板块名称'].tolist()
+        all_boards = valid_industries + valid_concepts
         
         for name in sector_names:
-            # 清洗名字，把 ETF 等字眼去掉，以匹配东财的行业板块名
-            clean_name = str(name).replace('ETF', '').replace('指数', '').replace('行业', '').strip()
-            if not clean_name: continue
+            name_str = str(name)
             
+            # 1. 屏蔽海外指数和固收
+            if any(ig in name_str for ig in ignore_keywords):
+                print(f"   ⏭️ 自动过滤非 A 股资产: {name_str}")
+                continue
+                
+            # 2. 暴力清洗基金后缀 (把 '通信ETF (国泰)' 洗成 '通信')
+            clean_name = re.sub(r'(ETF|LOF|指数|行业|华安|国泰|华泰|柏瑞|广发|易方达|富国|南方|博时|汇添富|嘉实|建信|华夏|银华|天弘|工银|招商|鹏华|联接|\s*\(.*?\)\s*|\s*（.*?）\s*)', '', name_str)
+            clean_name = clean_name.strip()
+            
+            if len(clean_name) < 2: clean_name = name_str[:2]
+            
+            # 3. 寻找匹配的真实板块
             matched_name = None
-            for b_name in valid_board_names:
-                if clean_name in b_name or b_name in clean_name:
+            for b_name in all_boards:
+                if clean_name == b_name: # 优先精确匹配
                     matched_name = b_name
                     break
             
+            if not matched_name:
+                for b_name in all_boards:
+                    if clean_name in b_name or b_name in clean_name:
+                        matched_name = b_name
+                        break
+            
+            # 4. 获取成分股
             if matched_name:
-                try:
-                    cons = ak.stock_board_industry_cons_em(symbol=matched_name)
-                    tickers = cons['代码'].tolist()
-                    target_tickers.update(tickers)
-                except: continue
+                print(f"   🔗 匹配成功: [{name_str}] -> 东财板块 [{matched_name}]")
+                for attempt in range(3): # 失败重试 3 次，防防火墙
+                    try:
+                        if matched_name in valid_industries:
+                            cons = ak.stock_board_industry_cons_em(symbol=matched_name)
+                        else:
+                            cons = ak.stock_board_concept_cons_em(symbol=matched_name)
+                            
+                        tickers = cons['代码'].tolist()
+                        target_tickers.update(tickers)
+                        print(f"      📥 成功提取 {len(tickers)} 只成分股")
+                        time.sleep(0.5) # 极度温柔的停顿，防止触发DDoS警报
+                        break
+                    except Exception as e:
+                        time.sleep(1.5)
+            else:
+                print(f"   ❓ 词库未命中: [{name_str}] (清洗后:[{clean_name}])")
         
         print(f"✅ 成分股提取完毕！共锁定 {len(target_tickers)} 只具备板块主升浪效应的个股。")
         return target_tickers
     except Exception as e:
-        print(f"⚠️ 提取成分股失败: {e}")
+        print(f"⚠️ 提取成分股发生毁灭性失败: {e}")
         return set()
 
 # ==========================================
@@ -223,7 +262,7 @@ def process_single_stock(row, session):
             "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), "Turnover(亿)": round(row['amount'] / 100000000, 2),
             "Trend": "Hold MA50"
         }
-        return {"status": "success", "data": data, "log": f"✅ 捕获主线龙头: {pure_code} {name}"}
+        return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
     except Exception as e: 
         return {"status": "fail", "reason": "接口报错"}
 
@@ -231,17 +270,15 @@ def process_single_stock(row, session):
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (雷达自动避坑降维打击版) ==========")
+    print("\n========== 开始处理 A股 (AI词法清洗+完美降维版) ==========")
     
     target_sectors = get_target_sectors()
     if not target_sectors:
-        print("\n🛑 [强制熔断] 宏观模型未发现符合要求的强庄板块。")
-        print("💡 欧奈尔纪律：大盘无主线，绝不盲目买票。强制执行空仓纪律！")
         return [], "[系统保护] 宏观大盘无符合条件的热门板块，严格执行空仓纪律！"
         
     core_tickers = get_stocks_from_sectors(target_sectors)
     if not core_tickers:
-        return [], "❌ 虽然有符合条件的板块，但在提取成分股时失败，请稍后重试。"
+        return [], "❌ 提取板块成分股失败，请检查网络。"
     
     print("\n📊 [STEP 3] 扫描全市场流动性...")
     spot_df = get_sina_market_snapshot()
