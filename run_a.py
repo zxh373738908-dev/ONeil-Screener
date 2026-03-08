@@ -22,7 +22,7 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 def get_sina_market_snapshot():
-    print("\n🚀 启动【新浪财经】高匿分页拉取引擎...")
+    print("\n🚀 启动【新浪财经】高匿雷达...")
     all_data =[]
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn/'}
     for page in range(1, 80):
@@ -35,14 +35,12 @@ def get_sina_market_snapshot():
             all_data.extend(json.loads(text))
         except: continue
     df = pd.DataFrame(all_data)
-    print(f"✅ 获取 A 股 {len(df)} 只股票基础数据成功！")
+    print(f"✅ 获取 A 股 {len(df)} 只股票成功！")
     return df
 
 def safe_float(val, default=0.0):
-    try:
-        return float(val)
-    except:
-        return default
+    try: return float(val)
+    except: return default
 
 # ==========================================
 # 2. 东方财富极速 K线核心逻辑
@@ -62,17 +60,14 @@ def process_single_stock(row, session):
         url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500000&lmt=300"
         
         res = session.get(url, timeout=8)
-        
-        if res.status_code != 200:
-            return {"status": "fail", "reason": f"HTTP访问拦截({res.status_code})"}
+        if res.status_code != 200: return {"status": "fail", "reason": f"HTTP访问拦截({res.status_code})"}
             
         data_json = res.json()
         if not data_json or 'data' not in data_json or not data_json['data'] or 'klines' not in data_json['data']:
             return {"status": "fail", "reason": "东财无返回数据"}
             
         klines = data_json['data']['klines']
-        if len(klines) < 250:
-            return {"status": "fail", "reason": "次新股或退市停牌"}
+        if len(klines) < 250: return {"status": "fail", "reason": "次新股或退市停牌"}
         
         closes, highs, lows, vols = [], [], [],[]
         for k in klines:
@@ -97,28 +92,23 @@ def process_single_stock(row, session):
         ma150 = close_series.rolling(150).mean().iloc[-1]
         ma200 = close_series.rolling(200).mean().iloc[-1]
         
-        if not (close > ma50 and ma50 > ma150 and ma150 > ma200): 
-            return {"status": "fail", "reason": "均线非多头排列"}
+        if not (close > ma50 and ma50 > ma150 and ma150 > ma200): return {"status": "fail", "reason": "均线非多头排列"}
             
         high_250 = high_series.rolling(250).max().iloc[-1]
         low_250 = low_series.rolling(250).min().iloc[-1]
         
-        if close < (high_250 * 0.75): 
-            return {"status": "fail", "reason": "距高点回撤超25%"}
-        if close < (low_250 * 1.25):
-            return {"status": "fail", "reason": "底部反弹不足25%"}
+        if close < (high_250 * 0.75): return {"status": "fail", "reason": "距高点回撤超25%"}
+        if close < (low_250 * 1.25): return {"status": "fail", "reason": "底部反弹不足25%"}
         
         ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
-        if ret_60 < 0.15: 
-            return {"status": "fail", "reason": "60日动量不足15%"}
+        if ret_60 < 0.15: return {"status": "fail", "reason": "60日动量不足15%"}
             
         delta = close_series.diff()
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
         rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
-        if rsi < 50: 
-            return {"status": "fail", "reason": "RSI弱势"}
+        if rsi < 50: return {"status": "fail", "reason": "RSI弱势"}
         
         avg_vol_50 = vol_series.tail(50).mean()
         vol_ratio = vol_series.iloc[-1] / avg_vol_50 if avg_vol_50 > 0 else 0
@@ -140,19 +130,15 @@ def process_single_stock(row, session):
         }
         return {"status": "success", "data": data, "log": f"✅ 捕获欧奈尔主升浪: {pure_code} {name}"}
         
-    except requests.exceptions.Timeout:
-        return {"status": "fail", "reason": "网络访问超时"}
-    except requests.exceptions.ConnectionError:
-        return {"status": "fail", "reason": "网络被强行切断"}
-    except Exception as e:
-        err_msg = str(e)[:15]
-        return {"status": "fail", "reason": f"异常报错: {err_msg}"}
+    except requests.exceptions.Timeout: return {"status": "fail", "reason": "网络访问超时"}
+    except requests.exceptions.ConnectionError: return {"status": "fail", "reason": "网络被强行切断"}
+    except Exception as e: return {"status": "fail", "reason": f"异常报错: {str(e)[:15]}"}
 
 # ==========================================
 # 3. 主干过滤与多线程执行
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 [全局防崩溃版] ==========")
+    print("\n========== 开始处理 A股[全局防崩溃版] ==========")
     spot_df = get_sina_market_snapshot()
     if spot_df.empty: return[], "❌ 接口获取失败，大盘数据为空。"
         
@@ -179,10 +165,9 @@ def screen_a_shares():
     retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retries)
     session.mount('http://', adapter)
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
     processed_count = 0
-    
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         future_to_code = {executor.submit(process_single_stock, row, session): str(row['code']) for index, row in filtered_df.iterrows()}
         for future in concurrent.futures.as_completed(future_to_code):
@@ -195,18 +180,17 @@ def screen_a_shares():
                 fail_reasons[res["reason"]] += 1
 
     now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     fail_details_str = ""
     for reason, count in sorted(fail_reasons.items(), key=lambda item: item[1], reverse=True):
         fail_details_str += f"   - 【{reason}】: {count} 只\n"
         
     diag_msg = (
-        f"[{now_time}] 欧奈尔系统诊断报告：\n"
-        f"1. 全市场扫描：获取 {total_stocks} 只股票\n"
-        f"2. 流动性初筛：剩余 {liquidity_passed} 只标的\n"
+        f"[{now_time}] 欧奈尔诊断报告：\n"
+        f"1. 全市场扫描：{total_stocks} 只\n"
+        f"2. 流动性初筛：剩余 {liquidity_passed} 只\n"
         f"3. 淘汰明细：\n"
         f"{fail_details_str}"
-        f"结论：多线程系统已极速完成最新检测。"
+        f"结论：多线程系统极速完成检测。"
     )
     return final_a_stocks, diag_msg
 
@@ -237,7 +221,6 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
 if __name__ == "__main__":
-    # 【核心防守机制】：无论发生任何宇宙级灾难错误，都会被捕捉并写入你的表格！
     try:
         a_results, a_diag_msg = screen_a_shares()
         write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
@@ -246,5 +229,4 @@ if __name__ == "__main__":
         error_trace = traceback.format_exc()
         crash_msg = f"[{now_time}] ❌ 致命错误导致程序中途崩溃:\n\n{error_trace}"
         print(crash_msg)
-        # 如果出大错，传入空列表[]，强制走输出 diag_msg 的逻辑
-        write_to_sheet("A-Share Screener",
+        write_to_sheet("A-Share Screener",[], sort_col="60D_Return%", diag_msg=crash_msg)
