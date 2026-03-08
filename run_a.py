@@ -10,75 +10,90 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 基础设置与双向 Google Sheets 连接
 # ==========================================
-# 读取宏观板块方向的表格 (已确认权限OK)
 SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/1BoYIVL3lb8nZE3U1qAkuO3MTrM117x2qycN1RdrDZgo/edit?gid=0#gid=0"
-# 写入选股结果的表格
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# 辅助函数：安全转换
-def safe_pct(val):
-    if isinstance(val, (int, float)): return float(val)
-    if isinstance(val, str):
-        val = val.replace('%', '').strip()
-        try: return float(val) / 100.0
-        except: return 0.0
-    return 0.0
+# 🚀 黑科技：绝对数值清洗器 (将 0.205, "20.5%", "20.5" 统一清洗为 20.5)
+def parse_pct(val):
+    if pd.isna(val) or str(val).strip() == '': return 0.0
+    s = str(val).replace(',', '').strip()
+    is_pct = '%' in s
+    s = s.replace('%', '')
+    try:
+        f = float(s)
+        # 如果没有 % 且数值在 -2 到 2 之间，极大概率是小数格式 (如 0.205 代表 20.5%)
+        if not is_pct and -2 <= f <= 2:
+            return f * 100.0
+        return f
+    except:
+        return 0.0
 
-def safe_float(val, default=0.0):
-    if not val or val == '': return 0.0
-    try: return float(val)
-    except: return default
+def parse_float(val):
+    if pd.isna(val) or str(val).strip() == '': return 0.0
+    try: return float(str(val).replace(',', '').strip())
+    except: return 0.0
 
 # ==========================================
-# 2. [第一阶] 读取板块大方向 (暴力抗错版)
+# 2. [第一阶] 读取板块大方向 (智能模糊匹配版)
 # ==========================================
 def get_target_sectors():
     print("\n🌍 [STEP 1] 正在连接宏观大盘，读取板块景气度模型...")
     try:
         sheet = client.open_by_url(SECTOR_SHEET_URL).sheet1
-        # 🚀 放弃强迫症方法，使用底层获取所有值，无视空白列报错
         raw_data = sheet.get_all_values()
         
-        if len(raw_data) < 2:
-            print("⚠️ 板块表格数据为空。")
-            return []
+        if len(raw_data) < 2: return []
             
-        # 第一行作为表头，其余作为数据
         headers = [str(h).strip() for h in raw_data[0]]
         df = pd.DataFrame(raw_data[1:], columns=headers)
         
-        def get_col(col_name, is_pct=True):
-            if col_name not in df.columns: return pd.Series(0.0, index=df.index)
-            return df[col_name].apply(safe_pct if is_pct else safe_float)
+        # 🚀 黑科技：模糊寻找表头 (只要包含这些关键字就能识别)
+        def get_fuzzy_col(keywords, is_pct=True):
+            for kw in keywords:
+                for col in df.columns:
+                    if kw.lower() in col.lower():
+                        return df[col].apply(parse_pct if is_pct else parse_float)
+            print(f"⚠️ 警告: 未找到包含 {keywords} 的列，已用 0.0 填充。")
+            return pd.Series(0.0, index=df.index)
 
-        r120 = get_col('R120', True)
-        rank = get_col('Rank', False)
-        rel20 = get_col('REL20', True)
-        rel60 = get_col('REL60', True)
-        r60 = get_col('R60', True)
-        r20 = get_col('R20', True)
-        rel5 = get_col('REL5', True)
+        # 智能提取列数据
+        r120 = get_fuzzy_col(['R120', '120日'], True)
+        rank = get_fuzzy_col(['Rank', '排名', '强度'], False)
+        rel20 = get_fuzzy_col(['REL20'], True)
+        rel60 = get_fuzzy_col(['REL60'], True)
+        r60 = get_fuzzy_col(['R60', '60日'], True)
+        r20 = get_fuzzy_col(['R20', '20日'], True)
+        rel5 = get_fuzzy_col(['REL5', '5日'], True)
         
-        # 👑【列表一：强势热门板块 (主战场)】
-        cond_main = (r120 > 0.20) & (rank >= 80) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
+        # 打印第一行解析后的数据，让你一眼看出系统是不是算错了！
+        name_col = df.columns[0]
+        for col in df.columns:
+            if '名' in col or 'Name' in col: name_col = col
+            
+        print(f"\n🔍 [上帝视角] 第一行数据清洗结果展示:")
+        print(f"板块名称: {df[name_col].iloc[0]}")
+        print(f"解析数值 -> R120: {r120.iloc[0]}%, Rank: {rank.iloc[0]}, REL20: {rel20.iloc[0]}%, REL60: {rel60.iloc[0]}%, R60: {r60.iloc[0]}%, R20: {r20.iloc[0]}%, REL5: {rel5.iloc[0]}%")
+        print("-" * 40)
         
-        # 🎯【列表二：加速期回踩 (真正的“黄金坑”)】
-        cond_dip = (r120 > 0.15) & (r20 < 0) & (rel5 > 0)
+        # 👑【强势热门板块】 (注意：清洗后 20% 就是 20.0，所以这里用 > 20)
+        cond_main = (r120 > 20.0) & (rank >= 80) & (rel20 > 0) & (rel60 > 0) & (r60 > 0)
         
-        # 提取板块名称
-        name_col = '名称' if '名称' in df.columns else df.columns[0]
+        # 🎯【加速期回踩】
+        cond_dip = (r120 > 15.0) & (r20 < 0) & (rel5 > 0)
+        
         hot_sectors = df[cond_main][name_col].tolist()
         dip_sectors = df[cond_dip][name_col].tolist()
         
         all_target_sectors = list(set(hot_sectors + dip_sectors))
-        print(f"✅ 宏观降维成功！锁定 {len(hot_sectors)} 个主战场，{len(dip_sectors)} 个黄金坑。")
-        if all_target_sectors:
-            print(f"🎯 核心攻击方向: {', '.join(all_target_sectors[:10])} ...")
+        print(f"✅ 宏观模型运算完毕：锁定 {len(hot_sectors)} 个主战场，{len(dip_sectors)} 个黄金坑。")
         
+        if all_target_sectors:
+            print(f"🎯 最终核心攻击板块: {', '.join(all_target_sectors[:10])} ...")
+            
         return all_target_sectors
     except Exception as e:
         print(f"⚠️ 读取板块表格发生解析错误: {e}")
@@ -110,14 +125,14 @@ def get_stocks_from_sectors(sector_names):
                     target_tickers.update(tickers)
                 except: continue
         
-        print(f"✅ 成功提取核心股票池！共锁定 {len(target_tickers)} 只板块核心个股。")
+        print(f"✅ 成功提取！共锁定 {len(target_tickers)} 只具备板块效应的个股。")
         return target_tickers
     except Exception as e:
         print(f"⚠️ 提取成分股失败: {e}")
         return set()
 
 # ==========================================
-# 4. [第三阶] 新浪基础数据 (仅用于流动性过滤)
+# 4. [第三阶] 新浪基础数据 
 # ==========================================
 def get_sina_market_snapshot():
     all_data = []
@@ -196,41 +211,41 @@ def process_single_stock(row, session):
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (完美降维打击 + 腾讯极速版) ==========")
+    print("\n========== 开始处理 A股 (严格自上而下 Top-Down) ==========")
     
-    # 1. 自上而下获取核心股票池
     target_sectors = get_target_sectors()
+    if not target_sectors:
+        print("\n🛑 [强制熔断] 宏观模型未发现符合要求的强庄板块。")
+        print("💡 欧奈尔纪律：倾巢之下无完卵。强制执行空仓纪律！")
+        return [], "[系统保护] 宏观大盘无符合条件的热门板块，严格执行空仓纪律！"
+        
     core_tickers = get_stocks_from_sectors(target_sectors)
+    if not core_tickers:
+        return [], "❌ 提取板块成分股失败，请检查网络。"
     
-    # 2. 获取大盘快照并进行双重过滤
     print("\n📊 [STEP 3] 扫描全市场流动性...")
     spot_df = get_sina_market_snapshot()
     if spot_df.empty: return [], "❌ 大盘数据为空"
     
-    total = len(spot_df)
     for col in ['trade','mktcap','amount','turnoverratio']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     spot_df['mktcap'] *= 10000
     
-    # 核心降维过滤
-    if core_tickers:
-        spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
-        f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
-        print(f"🎯 板块降维完成：全市场 {total} 只股票 -> 目标池骤降至 {len(f_df)} 只板块核心股。")
-    else:
-        f_df = spot_df.copy()
-        print(f"⚠️ 板块降维未生效，执行全市场 {total} 只股票硬扫模式。")
+    spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
+    f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
+    print(f"🎯 板块降维完成：全市场 5000 只股票 -> 目标池骤降至 {len(f_df)} 只板块核心股。")
         
-    # 流动性过滤
     f_df = f_df[(f_df['trade']>=10) & (f_df['mktcap']>=5000000000) & (f_df['amount']>=200000000) & (f_df['turnoverratio']>=1.5)].copy()
     print(f"💰 流动性过滤完成：即将对剩余 {len(f_df)} 只硬核标的进行 K 线狙击！")
+    
+    if f_df.empty:
+        return [], "[系统保护] 主线板块内的个股流动性严重枯竭，建议空仓！"
     
     final_stocks = []
     fail_reasons = defaultdict(int)
     
-    # 3. 开启腾讯 WEB 端并发测算
     print("\n⚔️ [STEP 4] 启动腾讯并发引擎，进行形态测算...")
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+    session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
@@ -266,7 +281,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             print(f"🎉 成功将 {len(df)} 只标的写入表格！")
         else:
             sheet.update_acell("A1", diag_msg if diag_msg else "无符合条件的股票。")
-            print("⚠️ 筛选极为严苛，今日无符合条件股票，已写入空仓诊断报告。")
+            print("⚠️ 筛选结束，已写入空仓诊断报告。")
     except Exception as e: print(f"❌ 写入失败: {e}")
 
 # ==========================================
