@@ -10,7 +10,7 @@ import time
 import concurrent.futures
 from collections import defaultdict
 import warnings
-import traceback  # 【新增】最高级错误追踪器
+import traceback
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -237,7 +237,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
         print(f"❌ 写入 {sheet_name} 失败: {e}")
 
 if __name__ == "__main__":
-    # 【最核心防守机制】：无论发生任何宇宙级灾难错误，都会被捕捉并写入你的表格！
+    # 【核心防守机制】：无论发生任何宇宙级灾难错误，都会被捕捉并写入你的表格！
     try:
         a_results, a_diag_msg = screen_a_shares()
         write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
@@ -246,4 +246,5 @@ if __name__ == "__main__":
         error_trace = traceback.format_exc()
         crash_msg = f"[{now_time}] ❌ 致命错误导致程序中途崩溃:\n\n{error_trace}"
         print(crash_msg)
+        # 如果出大错，传入空列表[]，强制走输出 diag_msg 的逻辑
         write_to_sheet("A-Share Screener",
