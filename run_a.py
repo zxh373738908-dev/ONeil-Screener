@@ -2,10 +2,8 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, time, concurrent.futures, warnings, traceback
+import datetime, requests, json, re, time, concurrent.futures, warnings, traceback, random
 from collections import defaultdict
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 warnings.filterwarnings('ignore')
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  
@@ -13,6 +11,7 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=["https
 client = gspread.authorize(creds)
 
 def get_sina_market_snapshot():
+    print("\n🚀 启动【新浪财经】高匿雷达...")
     all_data =[]
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn/'}
     for page in range(1, 80):
@@ -29,6 +28,22 @@ def safe_float(val, default=0.0):
     try: return float(val)
     except: return default
 
+# 【黑科技】：多节点随机拉取，打穿防火墙限流！
+def fetch_kline_data(secid, session):
+    for _ in range(3): # 最多尝试 3 个不同的节点
+        node = random.randint(1, 99)
+        url = f"http://{node}.push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500000&lmt=300"
+        try:
+            # 仅等待3秒，不回信立刻换下一个节点，绝不傻等拖延时间！
+            res = session.get(url, timeout=3)
+            if res.status_code == 200:
+                data = res.json()
+                if data and 'data' in data and data['data'] and 'klines' in data['data']:
+                    return data['data']['klines']
+        except:
+            continue
+    return None
+
 def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
     name = row['name']
@@ -36,17 +51,11 @@ def process_single_stock(row, session):
     elif pure_code.startswith(('0', '3')): prefix = "0"
     else: return {"status": "ignore"} 
     
-    time.sleep(np.random.uniform(0.1, 0.4))
     try:
-        url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={prefix}.{pure_code}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500000&lmt=300"
-        res = session.get(url, timeout=10)
-        if res.status_code != 200: return {"status": "fail", "reason": f"拦截({res.status_code})"}
+        secid = f"{prefix}.{pure_code}"
+        klines = fetch_kline_data(secid, session)
         
-        data_json = res.json()
-        if not data_json or 'data' not in data_json or not data_json['data'] or 'klines' not in data_json['data']: 
-            return {"status": "fail", "reason": "无数据"}
-            
-        klines = data_json['data']['klines']
+        if not klines: return {"status": "fail", "reason": "节点阻断"}
         if len(klines) < 250: return {"status": "fail", "reason": "次新/退市"}
         
         closes, highs, lows, vols = [], [], [],[]
@@ -88,14 +97,12 @@ def process_single_stock(row, session):
             "Trend": "Hold MA50"
         }
         return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
-    except requests.exceptions.Timeout: return {"status": "fail", "reason": "访问超时"}
-    except requests.exceptions.ConnectionError: return {"status": "fail", "reason": "网络阻断"}
     except Exception as e: return {"status": "fail", "reason": f"异常:{str(e)[:10]}"}
 
 def screen_a_shares():
-    print("\n========== 开始处理 A股 ==========")
+    print("\n========== 开始处理 A股 (CDN节点散射极速版) ==========")
     spot_df = get_sina_market_snapshot()
-    if spot_df.empty: return [], "❌ 大盘数据为空"
+    if spot_df.empty: return[], "❌ 大盘数据为空"
     
     total = len(spot_df)
     for col in['trade','mktcap','amount','turnoverratio']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
@@ -105,13 +112,12 @@ def screen_a_shares():
     final_stocks =[]
     fail_reasons = defaultdict(int)
     
+    # 彻底去掉死磕重试库，交由上面的随机节点机制来处理网络波动！
     session = requests.Session()
-    retries = Retry(total=5, connect=5, read=5, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retries)
-    session.mount('http://', adapter); session.mount('https://', adapter)
-    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'})
+    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'http://quote.eastmoney.com/'})
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # 并发提速至 8 线程！
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
