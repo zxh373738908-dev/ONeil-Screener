@@ -11,6 +11,8 @@ import concurrent.futures
 from collections import defaultdict
 import warnings
 import traceback
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -43,7 +45,7 @@ def safe_float(val, default=0.0):
     except: return default
 
 # ==========================================
-# 2. 东方财富极速 K线核心逻辑
+# 2. 东方财富极速 K线核心逻辑 (重装甲防拦截版)
 # ==========================================
 def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
@@ -53,14 +55,16 @@ def process_single_stock(row, session):
     elif pure_code.startswith(('0', '3')): prefix = "0"
     else: return {"status": "ignore"} 
 
-    time.sleep(np.random.uniform(0.1, 0.3))
+    time.sleep(np.random.uniform(0.1, 0.4))
 
     try:
         secid = f"{prefix}.{pure_code}"
-        url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500000&lmt=300"
+        # 换回标准的 https，配合强大的 Session 指纹穿透防火墙
+        url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500000&lmt=300"
         
-        res = session.get(url, timeout=8)
-        if res.status_code != 200: return {"status": "fail", "reason": f"HTTP访问拦截({res.status_code})"}
+        res = session.get(url, timeout=10)
+        if res.status_code != 200: 
+            return {"status": "fail", "reason": f"HTTP访问拦截({res.status_code})"}
             
         data_json = res.json()
         if not data_json or 'data' not in data_json or not data_json['data'] or 'klines' not in data_json['data']:
@@ -69,7 +73,7 @@ def process_single_stock(row, session):
         klines = data_json['data']['klines']
         if len(klines) < 250: return {"status": "fail", "reason": "次新股或退市停牌"}
         
-        closes, highs, lows, vols = [], [], [],[]
+        closes, highs, lows, vols =[], [], [],[]
         for k in klines:
             parts = k.split(',')
             closes.append(safe_float(parts[2]))
@@ -138,7 +142,7 @@ def process_single_stock(row, session):
 # 3. 主干过滤与多线程执行
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股[全局防崩溃版] ==========")
+    print("\n========== 开始处理 A股[重装甲防断流版] ==========")
     spot_df = get_sina_market_snapshot()
     if spot_df.empty: return[], "❌ 接口获取失败，大盘数据为空。"
         
@@ -159,13 +163,21 @@ def screen_a_shares():
     final_a_stocks =[]
     fail_reasons = defaultdict(int)
     
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
+    # 建立极强的防阻断连接池
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+    # connect=5 代表如果东财切断连接，自动重试5次，绝不报错放弃
+    retries = Retry(total=5, connect=5, read=5, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=retries)
     session.mount('http://', adapter)
-    session.headers.update({'User-Agent': 'Mozilla/5.0'})
+    session.mount('https://', adapter)
+    
+    # 注入全套真实浏览器指纹，完美骗过防火墙
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://quote.eastmoney.com/',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive'
+    })
 
     processed_count = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -195,7 +207,7 @@ def screen_a_shares():
     return final_a_stocks, diag_msg
 
 # ==========================================
-# 4. 写入 Google Sheets
+# 4. 写入 Google Sheets (修复排版)
 # ==========================================
 def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
     try:
@@ -204,53 +216,18 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             df = pd.DataFrame(final_stocks)
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            data_to_write =[df.columns.values.tolist()] + df.values.tolist()
+            data_to_write = [df.columns.values.tolist()] + df.values.tolist()
+            
+            # 清空旧数据，留出表头空间
             sheet.clear()
             sheet.update(values=data_to_write, range_name="A1")
             
-            now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("I1", "Last Updated:")
-            sheet.update_acell("J1", now_time)
-            print(f"🎉 成功将 {len(df)} 只标的写入 {sheet_name}！")
-        else:
-            sheet.clear()
-            final_msg = diag_msg if diag_msg else f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 当下无符合条件的股票。"
-            sheet.update_acell("A1", final_msg)
-            print(f"⚠️ {sheet_name}: 已输出诊断报告/空仓警告。")
-    except Exception as e:
-        print(f"❌ 写入 {sheet_name} 失败: {e}")
-
-if __name__ == "__main__":
-    try:
-        a_results, a_diag_msg = screen_a_shares()
-        write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
-    except Exception as e:
-        now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        error_trace = traceback.format_exc()
-        crash_msg = f"[{now_time}] ❌ 致命错误导致程序中途崩溃:\n\n{error_trace}"
-        print(crash_msg)
-        # ==========================================
-# 4. 写入 Google Sheets (修复排版覆盖 Bug)
-# ==========================================
-def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
-    try:
-        sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
-        if final_stocks:
-            df = pd.DataFrame(final_stocks)
-            df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
-            df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            data_to_write =[df.columns.values.tolist()] + df.values.tolist()
-            
-            # 清空并写入基础数据 (占用 A 到 K 列)
-            sheet.clear()
-            sheet.update(values=data_to_write, range_name="A1")
-            
-            # 【修复1】：将时间戳向右推移到 M 和 N 列，不再吞掉市值和成交额表头！
+            # 时间写到右边 M/N 列
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sheet.update_acell("M1", "Last Updated:")
             sheet.update_acell("N1", now_time)
             
-            # 【修复2】：有数据时，也把诊断报告自动输出在表格最右侧（O1单元格），一目了然！
+            # 报告写到最右边 O1，不盖住任何数据
             if diag_msg:
                 sheet.update_acell("O1", diag_msg)
                 
@@ -262,3 +239,17 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             print(f"⚠️ {sheet_name}: 已输出诊断报告/空仓警告。")
     except Exception as e:
         print(f"❌ 写入 {sheet_name} 失败: {e}")
+
+# ==========================================
+# 5. 主程序启动 (带异常捕获兜底)
+# ==========================================
+if __name__ == "__main__":
+    try:
+        a_results, a_diag_msg = screen_a_shares()
+        write_to_sheet("A-Share Screener", a_results, sort_col="60D_Return%", diag_msg=a_diag_msg)
+    except Exception as e:
+        now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        error_trace = traceback.format_exc()
+        crash_msg = f"[{now_time}] ❌ 致命错误导致程序中途崩溃:\n\n{error_trace}"
+        print(crash_msg)
+        write_to_sheet("A-Share Screener",
