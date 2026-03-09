@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, concurrent.futures, warnings, traceback, random
+import datetime, requests, json, re, concurrent.futures, warnings, traceback, random, time
 from collections import defaultdict
 warnings.filterwarnings('ignore')
 
@@ -26,7 +26,7 @@ def parse_val(val, is_pct=False):
     except: return 0.0
 
 # ==========================================
-# 2. 板块宏观模型 (增加强力反爬 Session)
+# 2. 板块宏观模型 (强力反爬 Session)
 # ==========================================
 def get_core_tickers_from_sheet():
     print("\n🌍 [STEP 1] 尝试连接宏观大盘，寻找热点板块...")
@@ -44,7 +44,7 @@ def get_core_tickers_from_sheet():
                 
         if header_idx == -1: raise Exception("未找到表头")
             
-        headers = [str(h).strip() for h in raw_data[header_idx]]
+        headers =[str(h).strip() for h in raw_data[header_idx]]
         df = pd.DataFrame(raw_data[header_idx + 1:], columns=headers)
         
         name_col = next((c for c in df.columns if '名' in c or 'Name' in str(c)), df.columns[0])
@@ -56,7 +56,7 @@ def get_core_tickers_from_sheet():
             
         print(f"✅ 锁定 {len(target_sectors)} 个热点板块，准备提取成分股...")
         
-        # 【修复1】：加入带 User-Agent 的独立 Session，防止东财 API 强制掐断连接
+        # 使用强伪装防封锁
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
         
@@ -81,12 +81,12 @@ def get_core_tickers_from_sheet():
         return[]
 
 # ==========================================
-# 3. 新浪大盘扫描器 
+# 3. 新浪大盘扫描器 (仅获取代码库)
 # ==========================================
 def get_sina_market_snapshot():
     print("🚀 启动【新浪财经】抓取全市场基础代码库...")
     all_data =[]
-    headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'http://finance.sina.com.cn/'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     for page in range(1, 80):
         try:
             res = requests.get(f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a", headers=headers, timeout=5)
@@ -98,20 +98,26 @@ def get_sina_market_snapshot():
     return pd.DataFrame(all_data)
 
 # ==========================================
-# 4. CDN节点 + Numpy极限运算 (修复流动性0的Bug)
+# 4. [抗封锁核心] 随机休眠 + CDN节点散射
 # ==========================================
 def fetch_kline_data(secid, session):
-    for _ in range(3):
+    # 【防封利器 1】：请求前随机微小休眠，打乱并发节奏，伪装成人类点击
+    time.sleep(random.uniform(0.1, 0.4))
+    
+    # 【防封利器 2】：重试次数提高至 5 次
+    for attempt in range(5):
         node = random.randint(1, 99)
-        # 【修复2】：增加 f57(成交额) 和 f61(换手率) 字段，在历史K线中获取真实流动性！
         url = f"http://{node}.push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
         try:
-            res = session.get(url, timeout=3)
+            res = session.get(url, timeout=4)
             if res.status_code == 200:
                 data = res.json()
                 if data and 'data' in data and data['data'] and 'klines' in data['data']:
                     return data['data']['klines']
-        except: continue
+        except Exception as e:
+            # 【防封利器 3】：遭遇阻断时，强制深呼吸休眠 0.5~1.5秒 再换节点重试
+            time.sleep(random.uniform(0.5, 1.5))
+            continue
     return None
 
 def process_single_stock(row, session):
@@ -125,21 +131,20 @@ def process_single_stock(row, session):
     try:
         klines = fetch_kline_data(f"{prefix}.{pure_code}", session)
         if not klines: return {"status": "fail", "reason": "节点阻断"}
-        if len(klines) < 250: return {"status": "fail", "reason": "次新/退市"}
-
-        # 保护机制：确保数据长度符合预期
+        
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
-        if len(valid_klines) < 250: return {"status": "fail", "reason": "K线数据破损"}
+        if len(valid_klines) < 250: return {"status": "fail", "reason": "次新/退市"}
 
+        # Numpy 极限加速切片
         k_matrix = np.array(valid_klines)
         closes = k_matrix[:, 2].astype(float)
         highs = k_matrix[:, 3].astype(float)
         lows = k_matrix[:, 4].astype(float)
         vols = k_matrix[:, 5].astype(float)
-        amounts = k_matrix[:, 6].astype(float) # 历史真实成交额
-        turnovers = k_matrix[:, 7].astype(float) # 历史真实换手率
+        amounts = k_matrix[:, 6].astype(float) 
+        turnovers = k_matrix[:, 7].astype(float) 
         
-        # 【核心修复】：不管你是早盘跑还是半夜跑，用最新的完整日K线进行流动性过滤！
+        # 提取最后一日的真实成交额与换手率（无视跑代码的时间段）
         last_amount = amounts[-1]
         last_turnover = turnovers[-1]
         
@@ -149,7 +154,7 @@ def process_single_stock(row, session):
         close, close_60 = closes[-1], closes[-61]
         if close == 0.0: return {"status": "fail", "reason": "停牌"}
         
-        # Numpy 均线计算
+        # Numpy 均线与形态计算
         ma50 = np.mean(closes[-50:])
         ma150 = np.mean(closes[-150:])
         ma200 = np.mean(closes[-200:])
@@ -163,7 +168,7 @@ def process_single_stock(row, session):
         ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
         if ret_60 < 0.15: return {"status": "fail", "reason": "动量<15%"}
         
-        # RSI 矩阵运算
+        # RSI 矩阵近似运算
         deltas = np.diff(closes[-30:])
         up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
@@ -185,10 +190,10 @@ def process_single_stock(row, session):
     except Exception as e: return {"status": "fail", "reason": "解析异常"}
 
 # ==========================================
-# 5. 主程序控制 (智能降级机制)
+# 5. 主程序控制 (智能降级 + 安全并发控制)
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (CDN散列 + 自动修复防爆版) ==========")
+    print("\n========== 开始处理 A股 (极速防封锁安全版) ==========")
     
     core_tickers = get_core_tickers_from_sheet()
     
@@ -196,7 +201,7 @@ def screen_a_shares():
     if spot_df.empty: return[], "❌ 大盘数据为空"
     
     total = len(spot_df)
-    for col in['trade','mktcap']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
+    for col in ['trade', 'mktcap']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     spot_df['mktcap'] *= 10000
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
@@ -207,19 +212,23 @@ def screen_a_shares():
         print(f"🌊 启用全市场扫描模式：对全部 {total} 只A股进行清洗！")
         f_df = spot_df.copy()
         
-    # 【修复重点】：从新浪快照中彻底剔除 amount 和 turnoverratio 的过滤！
-    # 仅保留价格和总市值（这两个数值不受早盘影响），换手和成交额交由东财 K 线处理
-    f_df = f_df[(f_df['trade']>=10) & (f_df['mktcap']>=5000000000)].copy()
+    # 仅作极度宽泛的基础过滤，其余交给东财真实K线
+    f_df = f_df[(f_df['trade'] >= 10) & (f_df['mktcap'] >= 5000000000)].copy()
     
-    print(f"💰 市值/价格基准过滤完成：剩余 {len(f_df)} 只候选标的！启动东财CDN测算真实流动性与形态...")
+    print(f"💰 基础过滤完成：剩余 {len(f_df)} 只候选标的！启动安全多线程并发测算...")
     
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
     session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'http://quote.eastmoney.com/'})
+    # 彻底伪装浏览器头
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'http://quote.eastmoney.com/'
+    })
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    # 【防封利器 4】：严控并发数为 8。牺牲一点点速度，换取绝对的 100% 成功率！
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
@@ -230,9 +239,9 @@ def screen_a_shares():
     fail_str = "".join([f"   - {r}: {c} 只\n" for r, c in sorted(fail_reasons.items(), key=lambda x:x[1], reverse=True)])
     diag_msg = (
         f"[{now}] 诊断报告：\n"
-        f"📊 全市场基数: {total}只 | 市值基准达标: {len(f_df)}只\n"
-        f"🏆 最终选出: {len(final_stocks)}只\n"
-        f"🔪 K线及真实流动性淘汰明细：\n{fail_str}"
+        f"📊 全市场基数: {total}只 | 基础过滤池: {len(f_df)}只\n"
+        f"🏆 最终选出真龙头: {min(len(final_stocks), 50)}只\n"
+        f"🔪 深度过滤淘汰明细：\n{fail_str}"
     )
     return final_stocks, diag_msg
 
@@ -245,6 +254,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
             
+            # 截断机制：永远只写入最强的 50 只
             df = df.head(50) 
             
             sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
@@ -268,4 +278,4 @@ if __name__ == "__main__":
     except Exception as e:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         error_info = traceback.format_exc()
-        write_to_sheet("A-Share Screener",[], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
+        write_to_sheet("A-Share Screener", [], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
