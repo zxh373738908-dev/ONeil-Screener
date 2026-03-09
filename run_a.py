@@ -6,6 +6,8 @@ import datetime, requests, json, re, concurrent.futures, warnings, traceback, ra
 from collections import defaultdict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import io
+
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -43,41 +45,62 @@ def get_robust_session():
     return session
 
 # ==========================================
-# 2. 板块宏观模型 (修复 Connection aborted)
+# 2. 板块宏观模型 (修复解析黑洞与ETF跨界映射)
 # ==========================================
 def get_core_tickers_from_sheet(session):
     print("\n🌍[STEP 1] 尝试连接宏观大盘，寻找热点板块...")
     try:
-        doc = client.open_by_url(SECTOR_SHEET_URL)
-        raw_data, header_idx =[], -1
-        
-        for ws in doc.worksheets():
-            data = ws.get_all_values()
-            if not data: continue
-            for i, row in enumerate(data[:10]):
-                if 'R120' in "".join([str(h).upper() for h in row]):
-                    raw_data, header_idx = data, i; break
-            if header_idx != -1: break
+        # 优化1：采用免鉴权的 CSV 直接导出协议，彻底规避 gspread 的读权限/API配额闪退
+        csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
+        try:
+            res = session.get(csv_url, timeout=10)
+            res.raise_for_status()
+            raw_df = pd.read_csv(io.StringIO(res.text), header=None)
+        except Exception as csv_e:
+            print(f"⚠️ CSV快读受阻 ({csv_e})，降级为 gspread API 读取...")
+            doc = client.open_by_url(SECTOR_SHEET_URL)
+            raw_data = doc.worksheets()[0].get_all_values()
+            raw_df = pd.DataFrame(raw_data)
+
+        # 优化2：动态寻找真正的表头行 (防篡改)
+        header_idx = -1
+        for i, row in raw_df.iterrows():
+            row_str = "".join([str(x).upper() for x in row.values])
+            if 'R120' in row_str:
+                header_idx = i; break
                 
-        if header_idx == -1: raise Exception("未找到表头")
+        if header_idx == -1: raise Exception("未在表格中找到包含 R120 的表头行")
             
-        headers = [str(h).strip() for h in raw_data[header_idx]]
-        df = pd.DataFrame(raw_data[header_idx + 1:], columns=headers)
+        # 优化3：清洗重复列名 (解决报错呈现为 `()` 的罪魁祸首)
+        headers = []
+        for h in raw_df.iloc[header_idx].values:
+            h_str = str(h).strip()
+            if not h_str or h_str in headers:
+                headers.append(f"Unnamed_{len(headers)}")
+            else:
+                headers.append(h_str)
+                
+        df = pd.DataFrame(raw_df.iloc[header_idx + 1:].values, columns=headers)
         
-        name_col = next((c for c in df.columns if '名' in c or 'Name' in str(c)), df.columns[0])
-        r120 = df[next((c for c in df.columns if 'R120' in c.upper()), df.columns[0])].apply(lambda x: parse_val(x, True))
-        r60 = df[next((c for c in df.columns if 'R60' in c.upper()), df.columns[0])].apply(lambda x: parse_val(x, True))
+        name_col = next((c for c in df.columns if '名' in c or 'Name' in str(c)), None)
+        r120_col = next((c for c in df.columns if 'R120' in c.upper()), None)
+        r60_col = next((c for c in df.columns if 'R60' in c.upper()), None)
         
-        target_sectors = df[(r120 > 20.0) & (r60 > 0)][name_col].tolist()
-        if not target_sectors: raise Exception("无符合条件的热门板块")
+        if not name_col or not r120_col or not r60_col:
+            raise Exception("缺失必要列(Name/R120/R60)，请检查表格")
             
-        print(f"✅ 锁定 {len(target_sectors)} 个热点板块，准备提取成分股...")
+        r120 = df[r120_col].apply(lambda x: parse_val(x, True))
+        r60 = df[r60_col].apply(lambda x: parse_val(x, True))
         
-        target_tickers, boards_map = set(), {}
-        # 【修复要点】：全面改用 https 协议！
+        target_etfs = df[(r120 > 20.0) & (r60 > 0)][name_col].tolist()
+        if not target_etfs: raise Exception("无符合 R120>20% 且 R60>0 的热门板块")
+            
+        print(f"✅ 锁定 {len(target_etfs)} 个热点ETF，准备智能映射A股成分股...")
+        
+        boards_map = {}
         for url in[
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14",
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14"
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14", # 行业
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14"  # 概念
         ]:
             for _ in range(3):
                 try:
@@ -86,20 +109,38 @@ def get_core_tickers_from_sheet(session):
                     break
                 except: time.sleep(1)
                 
-        for name in target_sectors:
-            clean = re.sub(r'(ETF|LOF|指数|行业|概念|\s*\(.*?\)\s*)', '', str(name)).strip()
-            b_code = next((c for n, c in boards_map.items() if clean in n), None)
-            if b_code:
-                for _ in range(3):
-                    try:
-                        cons = session.get(f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12", timeout=5).json()
-                        if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
-                            target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
-                        break
-                    except: time.sleep(1)
+        target_tickers = set()
+        # 优化4：彻底解决 ETF跨界映射失败问题 (清理基金公司和冗余后缀)
+        ignore_words =['ETF', 'LOF', '指数', '基金', '行业', '概念', '华夏', '易方达', '华安', '嘉实', '南方', '富国', '汇添富', '博时', '招商', '鹏华', '广发', '建信', '交银', '银华', '国泰', '景顺长城', '泰康', '中欧', '华宝', '华泰柏瑞', '天弘', '工银', '万家', '平安', '大成', 'AI', 'A', 'C']
+        
+        for etf_name in target_etfs:
+            clean_name = str(etf_name).upper()
+            for w in ignore_words: clean_name = clean_name.replace(w, '')
+            clean_name = clean_name.strip()
+            if not clean_name: continue
+            
+            # 模糊关联 (例: "煤炭" 自动匹配 "煤炭行业", "黄金" 自动匹配 "贵金属" / "黄金概念")
+            matched_b_codes =[code for name, code in boards_map.items() if clean_name in name or name in clean_name]
+            
+            if matched_b_codes:
+                print(f"   -> [{etf_name}] 成功映射东财板块: {matched_b_codes}")
+                for b_code in matched_b_codes:
+                    for _ in range(3):
+                        try:
+                            list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
+                            cons = session.get(list_url, timeout=5).json()
+                            if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
+                                target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
+                            break
+                        except: time.sleep(1)
+            else:
+                print(f"   -> ⚠️ [{etf_name}] (关键词:{clean_name}) 未能匹配到成分股板块")
+                
+        if not target_tickers: raise Exception("ETF名字未能匹配任何A股成分股")
         return list(target_tickers)
+        
     except Exception as e:
-        print(f"⚠️ 板块宏观筛选未能生效 ({e})。系统将自动降级为【全市场扫描】！")
+        print(f"⚠️ 板块宏观筛选未能生效 ({type(e).__name__}: {str(e)})。系统将自动降级为【全市场扫描】！")
         return[]
 
 # ==========================================
@@ -122,7 +163,6 @@ def get_sina_market_snapshot(session):
 # 4. K线运算与底层加速 (砍掉死节点黑洞)
 # ==========================================
 def fetch_kline_data(secid, session):
-    # 【核心修复】：彻底移除 random.randint 的 DNS 黑洞，直接使用 https 主力分发域名！
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
     for _ in range(3):
         try:
@@ -231,7 +271,6 @@ def screen_a_shares():
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
-    # 放心把并发开到 12 线程！脱离了死节点黑洞，速度直接起飞！
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
         futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
@@ -257,9 +296,7 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             df = pd.DataFrame(final_stocks)
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            
             df = df.head(50) 
-            
             sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
             
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
