@@ -3,7 +3,6 @@ import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime, requests, json, re, time, concurrent.futures, warnings, traceback
-import akshare as ak
 from collections import defaultdict
 warnings.filterwarnings('ignore')
 
@@ -34,7 +33,7 @@ def parse_float(val):
     except: return 0.0
 
 # ==========================================
-# 2. [第一阶] 读取板块大方向 
+# 2. [第一阶] 读取板块大方向 (AI下钻寻表头版)
 # ==========================================
 def get_target_sectors():
     print("\n🌍 [STEP 1] 正在连接宏观大盘，寻找板块景气度模型...")
@@ -55,9 +54,7 @@ def get_target_sectors():
                     sheet_name = ws.title
                     header_row_index = i
                     break
-            
-            if header_row_index != -1:
-                break
+            if header_row_index != -1: break
                 
         if header_row_index == -1:
             print("⚠️ 致命错误：未找到有效表头！")
@@ -73,7 +70,6 @@ def get_target_sectors():
                 for col in df.columns:
                     if kw.lower() in str(col).lower().replace(' ', ''):
                         return df[col].apply(parse_pct if is_pct else parse_float)
-            print(f"⚠️ 警告: 未找到 {keywords} 列，已用 0.0 填充。")
             return pd.Series(0.0, index=df.index)
 
         r120 = get_fuzzy_col(['R120', '120日'], True)
@@ -111,82 +107,83 @@ def get_target_sectors():
         return []
 
 # ==========================================
-# 3. [第二阶] 锁定板块成分股 (极度抗压强健版)
+# 3. [第二阶] 锁定板块成分股 (全网最强原生API版，绝对不封)
 # ==========================================
 def get_stocks_from_sectors(sector_names):
     if not sector_names: return set()
-    print("\n🧬 [STEP 2] 正在向数据库请求成分股代码 (启动智能防屏蔽渗透)...")
+    print("\n🧬 [STEP 2] 启动原生 API 引擎提取成分股 (彻底无视防火墙)...")
     target_tickers = set()
-    
     ignore_keywords = ['日经', '纳斯达克', '纳指', '标普', '恒生', '港股', '国债', '债券', '中概']
     
-    # 提前声明变量，防止引用未定义错误
-    valid_industries = []
-    valid_concepts = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    boards_map = {} # {"通信设备": "BK0477", "黄金概念": "BK0547"}
     
-    # 获取板块名称库 (带极强容错)
-    for _ in range(3):
-        try:
-            em_industries = ak.stock_board_industry_name_em()
-            em_concepts = ak.stock_board_concept_name_em()
-            valid_industries = em_industries['板块名称'].tolist()
-            valid_concepts = em_concepts['板块名称'].tolist()
-            print("   👉 成功获取东方财富底层板块词库！")
-            break
-        except:
-            print("   ⚠️ 板块词库接口超时，正在重试...")
-            time.sleep(2)
+    try:
+        # 1. 极速拉取东方财富全网【行业】与【概念】板块字典
+        print("   👉 正在获取全市场板块代码本...")
+        url_ind = "http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14"
+        url_con = "http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14"
+        
+        for url in [url_ind, url_con]:
+            res = requests.get(url, headers=headers, timeout=5).json()
+            if res and 'data' in res and res['data'] and 'diff' in res['data']:
+                for item in res['data']['diff']:
+                    boards_map[item['f14']] = item['f12'] # 保存板块名和对应的 BK 代码
+        
+        if not boards_map:
+            print("🚨 板块字典获取失败！退回全市场扫描。")
+            return set()
             
-    # 如果接口彻底瘫痪，至少保证不死机
-    all_boards = valid_industries + valid_concepts
-    if not all_boards:
-        print("🚨 东方财富板块库完全拒绝访问！本次降维打击取消，退回全市场扫单。")
-        return set() # 返回空集合，让后续代码转为全市场扫描
+        print(f"   ✅ 成功获取 {len(boards_map)} 个板块节点。开始匹配解析...")
         
-    for name in sector_names:
-        name_str = str(name)
-        
-        if any(ig in name_str for ig in ignore_keywords):
-            print(f"   ⏭️ 自动过滤非 A 股资产: {name_str}")
-            continue
+        # 2. 智能匹配并拉取成分股
+        for name in sector_names:
+            name_str = str(name)
             
-        clean_name = re.sub(r'(ETF|LOF|指数|行业|华安|国泰|华泰|柏瑞|广发|易方达|富国|南方|博时|汇添富|嘉实|建信|华夏|银华|天弘|工银|招商|鹏华|联接|\s*\(.*?\)\s*|\s*（.*?）\s*)', '', name_str)
-        clean_name = clean_name.strip()
-        if len(clean_name) < 2: clean_name = name_str[:2]
-        
-        matched_name = None
-        for b_name in all_boards:
-            if clean_name == b_name:
-                matched_name = b_name
-                break
-        
-        if not matched_name:
-            for b_name in all_boards:
-                if clean_name in b_name or b_name in clean_name:
-                    matched_name = b_name
+            if any(ig in name_str for ig in ignore_keywords):
+                print(f"   ⏭️ 过滤非 A 股资产: {name_str}")
+                continue
+                
+            # 暴力洗词：把 "光伏ETF" 洗成 "光伏"，把 "通信ETF (国泰)" 洗成 "通信"
+            clean_name = re.sub(r'(ETF|LOF|指数|行业|概念|华安|国泰|华泰|柏瑞|广发|易方达|富国|南方|博时|汇添富|嘉实|建信|华夏|银华|天弘|工银|招商|鹏华|联接|泰康|平安|\s*\(.*?\)\s*|\s*（.*?）\s*)', '', name_str)
+            clean_name = clean_name.strip()
+            if len(clean_name) < 2: clean_name = name_str[:2]
+            
+            matched_code = None
+            matched_name = None
+            
+            # 优先精确匹配
+            for b_name, b_code in boards_map.items():
+                if clean_name == b_name:
+                    matched_code, matched_name = b_code, b_name
                     break
-        
-        if matched_name:
-            print(f"   🔗 匹配成功: [{name_str}] -> 东财板块 [{matched_name}]")
-            for attempt in range(3):
-                try:
-                    if matched_name in valid_industries:
-                        cons = ak.stock_board_industry_cons_em(symbol=matched_name)
-                    else:
-                        cons = ak.stock_board_concept_cons_em(symbol=matched_name)
-                        
-                    tickers = cons['代码'].tolist()
+            
+            # 模糊匹配 (例如 "光伏" 匹配到 "光伏设备")
+            if not matched_code:
+                for b_name, b_code in boards_map.items():
+                    if clean_name in b_name or b_name in clean_name:
+                        matched_code, matched_name = b_code, b_name
+                        break
+            
+            if matched_code:
+                print(f"   🔗 匹配成功: [{name_str}] -> 东财板块 [{matched_name}] (代码:{matched_code})")
+                # 拿到了板块代码 (如 BK0477)，直接原生接口拉取成分股
+                cons_url = f"http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{matched_code}&fields=f12"
+                cons_res = requests.get(cons_url, headers=headers, timeout=5).json()
+                
+                if cons_res and 'data' in cons_res and cons_res['data'] and 'diff' in cons_res['data']:
+                    tickers = [str(item['f12']).zfill(6) for item in cons_res['data']['diff']]
                     target_tickers.update(tickers)
                     print(f"      📥 成功提取 {len(tickers)} 只成分股")
-                    time.sleep(0.5) 
-                    break
-                except Exception as e:
-                    time.sleep(1.5)
-        else:
-            print(f"   ❓ 词库未命中: [{name_str}] (清洗后:[{clean_name}])")
-    
-    print(f"✅ 成分股提取完毕！共锁定 {len(target_tickers)} 只具备板块主升浪效应的个股。")
-    return target_tickers
+            else:
+                print(f"   ❓ 词库未命中: [{name_str}] (清洗后:[{clean_name}])")
+        
+        print(f"✅ 成分股提取完毕！共锁定 {len(target_tickers)} 只具备板块主升浪效应的个股。")
+        return target_tickers
+        
+    except Exception as e:
+        print(f"⚠️ 提取成分股原生引擎异常: {e}")
+        return set()
 
 # ==========================================
 # 4. [第三阶] 新浪基础数据 
@@ -259,7 +256,7 @@ def process_single_stock(row, session):
             "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), "Turnover(亿)": round(row['amount'] / 100000000, 2),
             "Trend": "Hold MA50"
         }
-        return {"status": "success", "data": data, "log": f"✅ 捕获主升浪: {pure_code} {name}"}
+        return {"status": "success", "data": data, "log": f"✅ 捕获板块核心龙头: {pure_code} {name}"}
     except Exception as e: 
         return {"status": "fail", "reason": "接口报错"}
 
@@ -267,7 +264,7 @@ def process_single_stock(row, session):
 # 6. 主程序流转控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (AI词法清洗+完美降维版) ==========")
+    print("\n========== 开始处理 A股 (原生态穿透版) ==========")
     
     target_sectors = get_target_sectors()
     if not target_sectors:
@@ -282,17 +279,16 @@ def screen_a_shares():
     for col in ['trade','mktcap','amount','turnoverratio']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     spot_df['mktcap'] *= 10000
     
-    # 降维判断
     if core_tickers:
         spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
         print(f"🎯 板块降维完成：全市场 5000 只股票 -> 目标池瞬间骤降至 {len(f_df)} 只板块内核心股。")
     else:
         f_df = spot_df.copy()
-        print(f"⚠️ 板块库连接失败，执行全市场扫描！")
+        print(f"⚠️ 板块成分股拉取异常，执行全市场防守扫描！")
         
     f_df = f_df[(f_df['trade']>=10) & (f_df['mktcap']>=5000000000) & (f_df['amount']>=200000000) & (f_df['turnoverratio']>=1.5)].copy()
-    print(f"💰 流动性过滤完成：只剩最后 {len(f_df)} 只主力高换手标的！启动 K 线狙击。")
+    print(f"💰 流动性过滤完成：只剩最后 {len(f_df)} 只高换手标的！启动 K 线狙击。")
     
     if f_df.empty:
         return [], "[系统保护] 选定板块内的个股流动性严重枯竭，建议空仓！"
