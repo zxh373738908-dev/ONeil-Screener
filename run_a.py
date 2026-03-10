@@ -50,7 +50,6 @@ def get_robust_session():
 def get_core_tickers_from_sheet(session):
     print("\n🌍[STEP 1] 尝试连接宏观大盘，寻找热点板块...")
     try:
-        # 优化1：采用免鉴权的 CSV 直接导出协议，彻底规避 gspread 的读权限/API配额闪退
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
             res = session.get(csv_url, timeout=10)
@@ -62,7 +61,6 @@ def get_core_tickers_from_sheet(session):
             raw_data = doc.worksheets()[0].get_all_values()
             raw_df = pd.DataFrame(raw_data)
 
-        # 优化2：动态寻找真正的表头行 (防篡改)
         header_idx = -1
         for i, row in raw_df.iterrows():
             row_str = "".join([str(x).upper() for x in row.values])
@@ -71,8 +69,7 @@ def get_core_tickers_from_sheet(session):
                 
         if header_idx == -1: raise Exception("未在表格中找到包含 R120 的表头行")
             
-        # 优化3：清洗重复列名 (解决报错呈现为 `()` 的罪魁祸首)
-        headers = []
+        headers =[]
         for h in raw_df.iloc[header_idx].values:
             h_str = str(h).strip()
             if not h_str or h_str in headers:
@@ -99,8 +96,9 @@ def get_core_tickers_from_sheet(session):
         
         boards_map = {}
         for url in[
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14", # 行业
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14"  # 概念
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14",
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14",
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:4+f:!50&fields=f12,f14" # 补充t:4以防概念遗漏
         ]:
             for _ in range(3):
                 try:
@@ -110,7 +108,6 @@ def get_core_tickers_from_sheet(session):
                 except: time.sleep(1)
                 
         target_tickers = set()
-        # 优化4：彻底解决 ETF跨界映射失败问题 (清理基金公司和冗余后缀)
         ignore_words =['ETF', 'LOF', '指数', '基金', '行业', '概念', '华夏', '易方达', '华安', '嘉实', '南方', '富国', '汇添富', '博时', '招商', '鹏华', '广发', '建信', '交银', '银华', '国泰', '景顺长城', '泰康', '中欧', '华宝', '华泰柏瑞', '天弘', '工银', '万家', '平安', '大成', 'AI', 'A', 'C']
         
         for etf_name in target_etfs:
@@ -119,7 +116,6 @@ def get_core_tickers_from_sheet(session):
             clean_name = clean_name.strip()
             if not clean_name: continue
             
-            # 模糊关联 (例: "煤炭" 自动匹配 "煤炭行业", "黄金" 自动匹配 "贵金属" / "黄金概念")
             matched_b_codes =[code for name, code in boards_map.items() if clean_name in name or name in clean_name]
             
             if matched_b_codes:
@@ -144,23 +140,31 @@ def get_core_tickers_from_sheet(session):
         return[]
 
 # ==========================================
-# 3. 新浪大盘扫描器
+# 3. 东方财富大盘扫描器 (替代不稳定的新浪API)
 # ==========================================
-def get_sina_market_snapshot(session):
-    print("🚀 启动【新浪财经】抓取全市场基础代码库...")
-    all_data =[]
-    for page in range(1, 80):
+def get_eastmoney_market_snapshot(session):
+    print("🚀 启动【东方财富】抓取全市场基础代码库 (极速全量+盘前昨收价)...")
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "pn": "1", "pz": "6000", "po": "1", "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": "2", "invt": "2",
+        "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+        # f2=最新价, f18=昨收价(盘前兜底关键), f20=总市值
+        "fields": "f12,f14,f2,f18,f20"
+    }
+    for _ in range(3):
         try:
-            res = session.get(f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=80&sort=symbol&asc=1&node=hs_a", timeout=5)
-            text = res.text
-            if text == "[]" or text == "null" or not text: break
-            text = re.sub(r'([{,])\s*([a-zA-Z0-9_]+)\s*:', r'\1"\2":', text)
-            all_data.extend(json.loads(text))
-        except: continue
-    return pd.DataFrame(all_data)
+            res = session.get(url, params=params, timeout=10).json()
+            if res and 'data' in res and res['data'] and 'diff' in res['data']:
+                df = pd.DataFrame(res['data']['diff'])
+                df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
+                return df
+        except Exception:
+            time.sleep(1)
+    return pd.DataFrame()
 
 # ==========================================
-# 4. K线运算与底层加速 (砍掉死节点黑洞)
+# 4. K线运算与底层加速
 # ==========================================
 def fetch_kline_data(secid, session):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
@@ -179,15 +183,16 @@ def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
     name = row['name']
     
+    # 增加北交所前缀兼容处理(8,4,9)
     if pure_code.startswith(('6', '5')): prefix = "1"
-    elif pure_code.startswith(('0', '3')): prefix = "0"
+    elif pure_code.startswith(('0', '3', '8', '4', '9')): prefix = "0"
     else: return {"status": "fail", "reason": "非A股标的"}
         
     try:
         klines = fetch_kline_data(f"{prefix}.{pure_code}", session)
         if not klines: return {"status": "fail", "reason": "节点阻断"}
         
-        valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
+        valid_klines = [k.split(',') for k in klines if len(k.split(',')) >= 8]
         if len(valid_klines) < 250: return {"status": "fail", "reason": "次新/退市"}
 
         k_matrix = np.array(valid_klines)
@@ -198,6 +203,8 @@ def process_single_stock(row, session):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
         
+        if vols[-1] == 0: return {"status": "fail", "reason": "停牌"}
+
         last_amount = amounts[-1]
         last_turnover = turnovers[-1]
         
@@ -244,17 +251,25 @@ def process_single_stock(row, session):
 # 5. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== 开始处理 A股 (拔除DNS黑洞极速起飞版) ==========")
+    print("\n========== 开始处理 A股 (盘前盘后全天候防爆版) ==========")
     
     session = get_robust_session()
     core_tickers = get_core_tickers_from_sheet(session)
     
-    spot_df = get_sina_market_snapshot(session)
+    spot_df = get_eastmoney_market_snapshot(session)
     if spot_df.empty: return[], "❌ 大盘数据为空"
     
     total = len(spot_df)
-    for col in ['trade', 'mktcap']: spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
-    spot_df['mktcap'] *= 10000
+    
+    # 强制转换数值，无法转换的变为 NaN
+    for col in['trade', 'prev_close', 'mktcap']: 
+        spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
+    
+    # 🌟 盘前自适应神技：如果最新价(trade)是 NaN 或 0 (盘前/深夜无价格)，则用昨收价无缝填补！
+    spot_df['trade'] = spot_df['trade'].fillna(spot_df['prev_close'])
+    spot_df.loc[spot_df['trade'] == 0, 'trade'] = spot_df['prev_close']
+    
+    # (已剔除 spot_df['mktcap'] *= 10000 错误单位放大)
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
     if core_tickers:
