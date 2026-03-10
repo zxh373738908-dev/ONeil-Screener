@@ -254,44 +254,97 @@ def process_single_stock(row, session):
         last_amount = amounts[-1]
         last_turnover = turnovers[-1]
         
+        # 欧奈尔底线条件：流动性不能太差
         if last_amount < 200000000: return {"status": "fail", "reason": "成交额<2亿"}
         if last_turnover < 1.5: return {"status": "fail", "reason": "换手率<1.5%"}
 
-        close, close_60 = closes[-1], closes[-61]
+        close = closes[-1]
         if close == 0.0: return {"status": "fail", "reason": "停牌"}
         
+        # ==========================================
+        # 🌟 欧奈尔/米尔维尼 核心趋势模板 (Trend Template)
+        # ==========================================
+        ma20 = np.mean(closes[-20:])
         ma50 = np.mean(closes[-50:])
         ma150 = np.mean(closes[-150:])
         ma200 = np.mean(closes[-200:])
-        if not (close > ma50 and ma50 > ma150 and ma150 > ma200): 
-            return {"status": "fail", "reason": "非多头排列"}
+        ma200_20d_ago = np.mean(closes[-220:-20]) # 20天前的200日均线
+        
+        # 1. 严格的多头排列
+        if not (close > ma20 and close > ma50 and ma50 > ma150 and ma150 > ma200): 
+            return {"status": "fail", "reason": "非标准多头排列"}
             
+        # 2. 200日均线必须是向上的（过滤死猫反弹）
+        if ma200 < ma200_20d_ago:
+            return {"status": "fail", "reason": "年线未向上(长线趋势弱)"}
+            
+        # ==========================================
+        # 🌟 价格位置与动能 (Proximity & Momentum)
+        # ==========================================
         h250, l250 = np.max(highs[-250:]), np.min(lows[-250:])
-        if close < (h250 * 0.75): return {"status": "fail", "reason": "回撤>25%"}
-        if close < (l250 * 1.25): return {"status": "fail", "reason": "底部反弹<25%"}
         
-        ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
-        if ret_60 < 0.15: return {"status": "fail", "reason": "动量<15%"}
+        # 3. 欧奈尔选股精髓：离一年新高不能太远（上方无套牢盘，最容易拉升）
+        if close < (h250 * 0.85): return {"status": "fail", "reason": "距年内新高>15%"}
+        if close < (l250 * 1.30): return {"status": "fail", "reason": "底部脱离不足30%"}
         
+        # 4. 防追高机制：不能偏离50日线太远，过滤已经在天上、随时见顶回落的票
+        if close > (ma50 * 1.25): return {"status": "fail", "reason": "偏离50日线>25%(极度超买)"}
+
+        # ==========================================
+        # 🌟 VCP 波动率收缩 (爆发前的蓄力)
+        # ==========================================
+        # 检查过去15天（洗盘期）的振幅，形态必须紧凑，不能是大起大落的散户盘
+        recent_highs = highs[-16:-1]
+        recent_lows = lows[-16:-1]
+        consolidation_depth = (np.max(recent_highs) - np.min(recent_lows)) / np.max(recent_highs)
+        if consolidation_depth > 0.20: return {"status": "fail", "reason": "近期平台松散(震幅>20%)"}
+
+        # ==========================================
+        # 🌟 起爆点/加速点侦测 (Pocket Pivot & Thrust)
+        # ==========================================
+        avg_v50 = np.mean(vols[-50:])
+        
+        # 侦测近3日的极限爆发力（包含今天刚启动，或者前天启动今天正在加速的）
+        pct_change_3d = (close - closes[-4]) / closes[-4] if closes[-4] > 0 else 0
+        max_vol_3d = np.max(vols[-3:])
+        vol_ratio_3d = max_vol_3d / avg_v50 if avg_v50 > 0 else 0
+        
+        # 5. 必须有实质性的攻击动作和资金入场
+        if pct_change_3d < 0.05: return {"status": "fail", "reason": "近3日缺乏攻击爆发力(<5%)"}
+        if vol_ratio_3d < 1.5: return {"status": "fail", "reason": "近期未见爆发量能(无主力倍量)"}
+
+        # RSI 动量确认
         deltas = np.diff(closes[-30:])
         up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
         
-        if rsi < 50: return {"status": "fail", "reason": "RSI弱势"}
+        if rsi < 60: return {"status": "fail", "reason": "RSI<60(缺乏主升浪动能)"} # 欧奈尔选股RSI要求极高
         
-        avg_v50 = np.mean(vols[-50:])
-        vol_ratio = vols[-1] / avg_v50 if avg_v50 > 0 else 0
+        # 当日量比
+        vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
+        
+        # 计算60日涨幅（供表格排序使用）
+        close_60 = closes[-61]
+        ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
         
         data = {
-            "Ticker": pure_code, "Name": name, "Price": round(close, 2), "60D_Return%": f"{round(ret_60 * 100, 2)}%",
-            "RSI": round(rsi, 2), "Turnover_Rate%": f"{last_turnover}%", "Vol_Ratio": round(vol_ratio, 2),
-            "Dist_High%": f"{round(((close - h250) / h250) * 100, 2) if h250>0 else 0}%",
-            "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), "Turnover(亿)": round(last_amount / 100000000, 2),
-            "Trend": "Hold MA50"
+            "Ticker": pure_code, 
+            "Name": name, 
+            "Price": round(close, 2), 
+            "60D_Return%": f"{round(ret_60 * 100, 2)}%",
+            "RSI": round(rsi, 2), 
+            "Turnover_Rate%": f"{last_turnover}%", 
+            "Vol_Ratio": round(vol_ratio_today, 2),
+            "Dist_High%": f"{round(((close - h250) / h250) * 100, 2)}%",
+            "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), 
+            "Turnover(亿)": round(last_amount / 100000000, 2),
+            "Trend": "Breakout / Accelerating" # 状态更新为突破/加速
         }
         return {"status": "success", "data": data}
-    except Exception as e: return {"status": "fail", "reason": "解析异常"}
+        
+    except Exception as e: 
+        return {"status": "fail", "reason": "解析异常"}
 
 # ==========================================
 # 5. 主程序控制
