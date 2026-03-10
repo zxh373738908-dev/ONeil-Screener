@@ -45,7 +45,7 @@ def get_robust_session():
     return session
 
 # ==========================================
-# 2. 板块宏观模型 (修复解析黑洞与智能同义词映射)
+# 2. 板块宏观模型 (修复底层API参数陷阱 + 双重保险映射)
 # ==========================================
 def get_core_tickers_from_sheet(session):
     print("\n🌍[STEP 1] 尝试连接宏观大盘，寻找热点板块...")
@@ -94,67 +94,76 @@ def get_core_tickers_from_sheet(session):
             
         print(f"✅ 锁定 {len(target_etfs)} 个热点ETF，准备智能映射A股成分股...")
         
-        # 获取东方财富全市场板块字典
+        # 🌟【修复点1】去除了导致失败的 +f:!50 参数，确保行业板块完整下载！
         boards_map = {}
         for url in[
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14",
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f12,f14"
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14", # 行业板块
+            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"  # 概念板块
         ]:
             for _ in range(3):
                 try:
                     res = session.get(url, timeout=5).json()
-                    for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
+                    if res and 'data' in res and res['data']:
+                        for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
                     break
                 except: time.sleep(1)
                 
         target_tickers = set()
         
-        # 🌟【新增】智能同义词映射库 (解决东方财富命名与ETF命名不同的问题)
+        # 🌟 智能同义词映射库 (扩大覆盖面)
         synonyms = {
-            "航空航天": ["航天航空", "大飞机", "卫星通信", "国防军工"],
-            "有色金属": ["小金属", "工业金属", "能源金属", "贵金属", "稀缺资源"],
-            "黄金": ["贵金属", "黄金概念"],
+            "航空航天":["航天航空", "大飞机", "卫星通信", "国防军工", "军工"],
+            "有色金属":["小金属", "工业金属", "能源金属", "稀缺资源", "基本金属"],
+            "黄金":["贵金属", "黄金概念", "珠宝首饰"],
             "煤炭":["煤炭行业", "煤炭概念"],
             "光伏":["光伏设备", "光伏概念", "太阳能", "BC电池"],
             "新能源车": ["汽车整车", "汽车零部件", "新能源车概念"],
-            "新能源": ["风电设备", "光伏设备", "电池", "绿色电力"],
+            "新能源":["风电设备", "光伏设备", "电池", "绿色电力"],
             "传媒":["文化传媒", "游戏", "短剧互动游戏"],
             "芯片":["半导体", "芯片概念", "存储芯片"],
             "医药":["化学制药", "中药", "生物制品", "医药商业", "医疗器械", "创新药"],
             "军工":["航天航空", "船舶制造", "兵器装备", "军工概念"],
-            "养殖":["养殖业", "猪肉概念", "鸡肉概念", "农牧饲渔"],
             "通信":["通信设备", "通信服务", "5G概念", "6G概念", "CPO概念"],
-            "软件":["软件开发", "IT服务", "信创"],
-            "机器人":["机器人执行器", "减速器", "通用设备", "自动化设备"]
+            "软件":["软件开发", "IT服务", "信创"]
         }
         
-        # 🌟【新增】海外跨境与宽基指数黑名单 (直接过滤，不去找A股板块)
-        overseas_broad_keywords =['日经', '纳指', '标普', '恒生', '港股', '德国', '法国', '亚洲', '中概', '中证', '沪深', '上证', '深证', '科创50', '创业板50', '双创']
+        # 🌟【修复点2】核弹级兜底：直接注入东方财富底层 BK 代码，保证绝不抓空！
+        hardcoded_bk = {
+            "黄金":["BK0477", "BK0717"], 
+            "煤炭":["BK0437", "BK0532"], 
+            "有色金属":["BK0478", "BK0479", "BK0496"], 
+            "光伏":["BK1031", "BK0854"], 
+            "航空航天":["BK0480", "BK0498"]
+        }
+        
+        overseas_broad_keywords =['日经', '纳指', '标普', '恒生', '港股', '德国', '法国', '亚洲', '中概', '中证', '沪深', '上证', '深证', '科创', '创业板50', '双创', '红利低波']
 
         for etf_name in target_etfs:
-            # 1. 黑名单拦截
             if any(k in str(etf_name).upper() for k in overseas_broad_keywords):
                 print(f"   -> ⏭️ [{etf_name}] 属于跨境/宽基指数，跳过A股映射")
                 continue
 
-            # 2. 核心词提取：利用正则直接切掉 'ETF'、'LOF' 及后面的所有基金公司名称
+            # 核心词提取
             clean_name = re.sub(r'(ETF|LOF|指数|基金|增强|发起式|联接|A|C|类).*$', '', str(etf_name), flags=re.IGNORECASE).strip()
             if not clean_name: continue
             
-            # 3. 展开搜索词库 (包含原词 + 映射同义词)
+            # 1. 尝试同义词模糊匹配
             search_terms = set([clean_name])
             for key, aliases in synonyms.items():
                 if key in clean_name or clean_name in key:
                     search_terms.update(aliases)
             
-            # 4. 去东方财富板块字典中匹配
             matched_b_codes = set()
             for term in search_terms:
                 for b_name, b_code in boards_map.items():
                     if term in b_name or b_name in term:
                         matched_b_codes.add(b_code)
+                        
+            # 2. 触发核弹兜底机制 (针对老是匹配失败的顽固分子)
+            for key, bks in hardcoded_bk.items():
+                if key in clean_name or clean_name in key:
+                    matched_b_codes.update(bks)
             
-            # 5. 抓取板块成分股
             if matched_b_codes:
                 print(f"   -> ✅ [{etf_name}] (关键词:{clean_name}) 映射成功: {list(matched_b_codes)}")
                 for b_code in matched_b_codes:
@@ -174,7 +183,7 @@ def get_core_tickers_from_sheet(session):
         
     except Exception as e:
         print(f"⚠️ 板块宏观筛选未能生效 ({type(e).__name__}: {str(e)})。系统将自动降级为【全市场扫描】！")
-        return[]
+        return
         
 # ==========================================
 # 3. 东方财富大盘扫描器 (替代不稳定的新浪API)
