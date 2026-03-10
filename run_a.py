@@ -115,30 +115,36 @@ def get_core_tickers_from_sheet(session):
                 
         target_tickers = set()
         
-        # 🌟 智能同义词映射库 (扩大覆盖面)
+# 🌟 智能同义词映射库 (扩大覆盖面，新增信创、通用航空、钢铁等)
         synonyms = {
             "航空航天":["航天航空", "大飞机", "卫星通信", "国防军工", "军工"],
+            "通用航空": ["通用航空", "低空经济", "飞行汽车", "大飞机", "航天航空"],
             "有色金属":["小金属", "工业金属", "能源金属", "稀缺资源", "基本金属"],
             "黄金": ["贵金属", "黄金概念", "珠宝首饰"],
             "煤炭": ["煤炭行业", "煤炭概念"],
+            "钢铁":["钢铁行业", "特钢概念"],
             "光伏":["光伏设备", "光伏概念", "太阳能", "BC电池"],
-            "新能源车":["汽车整车", "汽车零部件", "新能源车概念"],
-            "新能源":["风电设备", "光伏设备", "电池", "绿色电力"],
-            "传媒":["文化传媒", "游戏", "短剧互动游戏"],
-            "芯片": ["半导体", "芯片概念", "存储芯片"],
+            "新能源车": ["汽车整车", "汽车零部件", "新能源车概念"],
+            "新能源": ["风电设备", "光伏设备", "电池", "绿色电力"],
+            "传媒": ["文化传媒", "游戏", "短剧互动游戏"],
+            "芯片":["半导体", "芯片概念", "存储芯片"],
             "医药":["化学制药", "中药", "生物制品", "医药商业", "医疗器械", "创新药"],
             "军工":["航天航空", "船舶制造", "兵器装备", "军工概念"],
             "通信":["通信设备", "通信服务", "5G概念", "6G概念", "CPO概念"],
-            "软件": ["软件开发", "IT服务", "信创"]
+            "软件": ["软件开发", "IT服务", "信创"],
+            "信创":["信创产业", "国产软件", "数字经济", "数据安全", "软件开发"]
         }
         
         # 🌟【修复点2】核弹级兜底：直接注入东方财富底层 BK 代码，保证绝不抓空！
         hardcoded_bk = {
-            "黄金": ["BK0477", "BK0717"], 
+            "黄金":["BK0477", "BK0717"], 
             "煤炭":["BK0437", "BK0532"], 
             "有色金属":["BK0478", "BK0479", "BK0496"], 
             "光伏":["BK1031", "BK0854"], 
-            "航空航天":["BK0480", "BK0498"]
+            "航空航天":["BK0480", "BK0498"],
+            "通用航空": ["BK0902", "BK1166"],  # 涵盖通用航空与低空经济
+            "钢铁":["BK0470", "BK0539"],     # 涵盖钢铁行业与特钢
+            "信创":["BK1104", "BK0737"]      # 涵盖信创概念与国产软件
         }
         
         # 过滤宽基指数与跨境品种
@@ -153,10 +159,12 @@ def get_core_tickers_from_sheet(session):
             clean_name = re.sub(r'(ETF|LOF|指数|基金|增强|发起式|联接|A|C|类).*$', '', str(etf_name), flags=re.IGNORECASE).strip()
             if not clean_name: continue
             
-            # 1. 尝试同义词模糊匹配
+            # 1. 尝试同义词模糊匹配 (🔥双向雷达升级版🔥)
             search_terms = set([clean_name])
             for key, aliases in synonyms.items():
-                if key in clean_name or clean_name in key:
+                # 判断：核心词=主键，或 核心词=主键一部分，或 核心词和任意一个别名重合，全族关联！
+                if key in clean_name or clean_name in key or any(clean_name in a or a in clean_name for a in aliases):
+                    search_terms.add(key)
                     search_terms.update(aliases)
             
             matched_b_codes = set()
@@ -165,7 +173,7 @@ def get_core_tickers_from_sheet(session):
                     if term in b_name or b_name in term:
                         matched_b_codes.add(b_code)
                         
-            # 2. 触发核弹兜底机制 (针对老是匹配失败的顽固分子)
+            # 2. 触发核弹兜底机制 (底层BK代码强注)
             for key, bks in hardcoded_bk.items():
                 if key in clean_name or clean_name in key:
                     matched_b_codes.update(bks)
@@ -183,8 +191,7 @@ def get_core_tickers_from_sheet(session):
                             break
                         except: time.sleep(1)
             else:
-                print(f"   -> ⚠️ [{etf_name}] (关键词:{clean_name}) 未能匹配到任何A股板块")
-                
+                print(f"   -> ⚠️[{etf_name}] (关键词:{clean_name}) 未能匹配到任何A股板块")                
         if not target_tickers: raise Exception("所有热点ETF均未能匹配到A股成分股")
         return list(target_tickers)
         
