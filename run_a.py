@@ -50,6 +50,7 @@ def get_robust_session():
 def get_core_tickers_from_sheet(session):
     print("\n🌍[STEP 1] 尝试连接宏观大盘，寻找热点板块...")
     try:
+        # 1. 尝试快速读取 CSV 格式 (比 gspread API 块 10 倍)
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
             res = session.get(csv_url, timeout=10)
@@ -61,6 +62,7 @@ def get_core_tickers_from_sheet(session):
             raw_data = doc.worksheets()[0].get_all_values()
             raw_df = pd.DataFrame(raw_data)
 
+        # 2. 动态寻找包含 R120 的表头行，解决空行干扰
         header_idx = -1
         for i, row in raw_df.iterrows():
             row_str = "".join([str(x).upper() for x in row.values])
@@ -69,7 +71,7 @@ def get_core_tickers_from_sheet(session):
                 
         if header_idx == -1: raise Exception("未在表格中找到包含 R120 的表头行")
             
-        headers =[]
+        headers = []
         for h in raw_df.iloc[header_idx].values:
             h_str = str(h).strip()
             if not h_str or h_str in headers:
@@ -79,6 +81,7 @@ def get_core_tickers_from_sheet(session):
                 
         df = pd.DataFrame(raw_df.iloc[header_idx + 1:].values, columns=headers)
         
+        # 3. 提取必要列位置
         name_col = next((c for c in df.columns if '名' in c or 'Name' in str(c)), None)
         r120_col = next((c for c in df.columns if 'R120' in c.upper()), None)
         r60_col = next((c for c in df.columns if 'R60' in c.upper()), None)
@@ -86,9 +89,11 @@ def get_core_tickers_from_sheet(session):
         if not name_col or not r120_col or not r60_col:
             raise Exception("缺失必要列(Name/R120/R60)，请检查表格")
             
+        # 4. 数值化并清洗数据
         r120 = df[r120_col].apply(lambda x: parse_val(x, True))
         r60 = df[r60_col].apply(lambda x: parse_val(x, True))
         
+        # 锁定长线强势牛市板块
         target_etfs = df[(r120 > 20.0) & (r60 > 0)][name_col].tolist()
         if not target_etfs: raise Exception("无符合 R120>20% 且 R60>0 的热门板块")
             
@@ -114,28 +119,29 @@ def get_core_tickers_from_sheet(session):
         synonyms = {
             "航空航天":["航天航空", "大飞机", "卫星通信", "国防军工", "军工"],
             "有色金属":["小金属", "工业金属", "能源金属", "稀缺资源", "基本金属"],
-            "黄金":["贵金属", "黄金概念", "珠宝首饰"],
-            "煤炭":["煤炭行业", "煤炭概念"],
+            "黄金": ["贵金属", "黄金概念", "珠宝首饰"],
+            "煤炭": ["煤炭行业", "煤炭概念"],
             "光伏":["光伏设备", "光伏概念", "太阳能", "BC电池"],
-            "新能源车": ["汽车整车", "汽车零部件", "新能源车概念"],
+            "新能源车":["汽车整车", "汽车零部件", "新能源车概念"],
             "新能源":["风电设备", "光伏设备", "电池", "绿色电力"],
             "传媒":["文化传媒", "游戏", "短剧互动游戏"],
-            "芯片":["半导体", "芯片概念", "存储芯片"],
+            "芯片": ["半导体", "芯片概念", "存储芯片"],
             "医药":["化学制药", "中药", "生物制品", "医药商业", "医疗器械", "创新药"],
             "军工":["航天航空", "船舶制造", "兵器装备", "军工概念"],
             "通信":["通信设备", "通信服务", "5G概念", "6G概念", "CPO概念"],
-            "软件":["软件开发", "IT服务", "信创"]
+            "软件": ["软件开发", "IT服务", "信创"]
         }
         
         # 🌟【修复点2】核弹级兜底：直接注入东方财富底层 BK 代码，保证绝不抓空！
         hardcoded_bk = {
-            "黄金":["BK0477", "BK0717"], 
+            "黄金": ["BK0477", "BK0717"], 
             "煤炭":["BK0437", "BK0532"], 
             "有色金属":["BK0478", "BK0479", "BK0496"], 
             "光伏":["BK1031", "BK0854"], 
             "航空航天":["BK0480", "BK0498"]
         }
         
+        # 过滤宽基指数与跨境品种
         overseas_broad_keywords =['日经', '纳指', '标普', '恒生', '港股', '德国', '法国', '亚洲', '中概', '中证', '沪深', '上证', '深证', '科创', '创业板50', '双创', '红利低波']
 
         for etf_name in target_etfs:
@@ -143,7 +149,7 @@ def get_core_tickers_from_sheet(session):
                 print(f"   -> ⏭️ [{etf_name}] 属于跨境/宽基指数，跳过A股映射")
                 continue
 
-            # 核心词提取
+            # 核心词提取: 去除基金公司的名字与ETF后缀
             clean_name = re.sub(r'(ETF|LOF|指数|基金|增强|发起式|联接|A|C|类).*$', '', str(etf_name), flags=re.IGNORECASE).strip()
             if not clean_name: continue
             
@@ -164,6 +170,7 @@ def get_core_tickers_from_sheet(session):
                 if key in clean_name or clean_name in key:
                     matched_b_codes.update(bks)
             
+            # 3. 提取成分股存入集合
             if matched_b_codes:
                 print(f"   -> ✅ [{etf_name}] (关键词:{clean_name}) 映射成功: {list(matched_b_codes)}")
                 for b_code in matched_b_codes:
