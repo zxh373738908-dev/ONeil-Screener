@@ -85,7 +85,7 @@ def get_core_tickers_from_sheet(session):
             except: pass
                 
         target_tickers = set()
-        synonyms = {"化工":["化工行业", "磷化工", "煤化工", "基础化工", "化肥行业"]} # 添加化工防丢
+        synonyms = {"化工":["化工行业", "磷化工", "煤化工", "基础化工", "化肥行业"]} 
         hardcoded_bk = {"化工":["BK0456", "BK0438"]}
         
         for etf_name in target_etfs:
@@ -134,7 +134,31 @@ def get_eastmoney_market_snapshot(session):
     return pd.DataFrame()
 
 # ==========================================
-# 4. K线运算与底层加速 (新增“缩量伏击”逻辑)
+# 4. 战术分析：神奇九转 TD9 底层引擎
+# ==========================================
+def check_td9_or_oversold(closes):
+    """
+    侦测底部结构：神奇九转买入结构 (连续9天收盘价低于4天前的收盘价)
+    或近期 RSI 极度超卖（代表 T.U.A.W 的 "B" 信号前兆）
+    """
+    # 1. 查近5天内是否有TD9成型
+    for offset in range(5):
+        idx = len(closes) - 1 - offset
+        if idx >= 13:
+            if all(closes[idx-i] < closes[idx-i-4] for i in range(9)):
+                return True
+                
+    # 2. 查近3天是否形成 RSI < 35 的黄金坑超卖区
+    deltas = np.diff(closes[-30:])
+    up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
+    if rsi < 35: return True
+    
+    return False
+
+# ==========================================
+# 5. K线运算与【三大主力战法】逻辑
 # ==========================================
 def fetch_kline_data(secid, session):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
@@ -172,70 +196,85 @@ def process_single_stock(row, session):
         last_turnover = turnovers[-1]
         close = closes[-1]
         
-        # ⚠️ 修改点1：放宽大盘股的换手率要求。000830 这种大票回调时换手率可能极低。
-        # 只要成交额>1.5亿，即使换手率不到1%也允许通过。
+        # 基础防坑过滤
         if last_amount < 150000000: return {"status": "fail", "reason": "成交额<1.5亿"}
         if last_turnover < 0.6 and last_amount < 300000000: return {"status": "fail", "reason": "流动性不足"}
 
         ma20 = np.mean(closes[-20:])
         ma50 = np.mean(closes[-50:])
+        ma60 = np.mean(closes[-60:])  # 新增 60日生命线
         ma150 = np.mean(closes[-150:])
         ma200 = np.mean(closes[-200:])
         
-        # 中长线趋势必须向好 (过滤下跌趋势)
-        if not (ma50 > ma150 and ma150 > ma200): return {"status": "fail", "reason": "长线趋势未走好"}
-        if ma200 < np.mean(closes[-220:-20]): return {"status": "fail", "reason": "年线未向上"}
-
         h250 = np.max(highs[-250:])
-        if close < (h250 * 0.82): return {"status": "fail", "reason": "距新高太远"}
-        if close > (ma50 * 1.25): return {"status": "fail", "reason": "偏离50日线极度超买"}
+        h60 = np.max(highs[-60:])
 
         avg_v50 = np.mean(vols[-50:])
+        pct_change_today = (close - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
         pct_change_3d = (close - closes[-4]) / closes[-4] if closes[-4] > 0 else 0
         vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
 
+        # 计算 RSI
         deltas = np.diff(closes[-30:])
         up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
 
         # ==========================================
-        # 🌟 核心修改点：双引擎判定 (突破 或 伏击)
+        # 🌟 三大主力战法引擎 (The Three Engines)
         # ==========================================
         
-        # 引擎A：右侧突破 (原逻辑，抓今天正在狂飙的)
+        # 【Engine A：右侧突破 (极速起飞)】
         is_breakout = (
             close > ma20 and close > ma50 and 
             pct_change_3d >= 0.045 and 
             np.max(vols[-3:]) / avg_v50 >= 1.5 and 
-            rsi >= 60
+            rsi >= 60 and 
+            (ma50 > ma150 and ma150 > ma200) # 长线不能崩
         )
         
-        # 引擎B：左侧缩量伏击 (抓 000830 昨天那种情况)
-        # 1. 价格贴近20日或50日均线 (上下 4% 以内)
-        near_ma = (abs(close - ma20)/ma20 < 0.04) or (abs(close - ma50)/ma50 < 0.04)
-        # 2. 缩量洗盘：今天的量不能太大，最好低于 50日均量 (或者没爆量)
-        shrinking_vol = vol_ratio_today < 1.1
-        # 3. 近期没有暴跌破位，而是温和震荡 (-5% 到 +4% 之间)
-        mild_consolidation = -0.05 < pct_change_3d < 0.04
-        # 4. 必须守住 50日生命线
-        hold_trend = close >= ma50 * 0.98
+        # 【Engine B：左侧伏击 (缩量踩均线)】
+        is_ambush = (
+            ((abs(close - ma20)/ma20 < 0.04) or (abs(close - ma50)/ma50 < 0.04)) and 
+            vol_ratio_today < 1.1 and 
+            -0.05 < pct_change_3d < 0.04 and 
+            close >= ma50 * 0.98 and
+            (ma50 > ma150 and ma150 > ma200)
+        )
 
-        is_ambush = near_ma and shrinking_vol and mild_consolidation and hold_trend
-        
-        # 两个都不符合，则淘汰
-        if not (is_breakout or is_ambush):
-            return {"status": "fail", "reason": "未达突破标准，亦非标准缩量回踩"}
+        # 🎯【Engine C：黄金坑 / 午后定音】(专抓"鲁西化工"这类大牛股回头)
+        # 1. 大盘底蕴：市值 > 100亿 (过滤庄股)
+        c_large_cap = row['mktcap'] >= 10000000000
+        # 2. 长线王者：120日收益率 > 15% (必须证明有长线大资金驻扎)
+        c_ret_120 = (close - closes[-121]) / closes[-121] > 0.15
+        # 3. 完美洗盘：距离近期高点 -10% 到 -25% 之间 (跌破吓人，但不破位)
+        c_dist_h60 = (close - h60) / h60
+        c_golden_pit = -0.25 <= c_dist_h60 <= -0.05 
+        # 4. 生命线支撑：近期跌破过 MA20，但死死踩在 MA60 生命线之上
+        c_support = close >= ma60 * 0.98 and (closes[-2] < ma20 or close < ma20 * 1.03)
+        # 5. 点火探明拐点：今日涨幅 > 3% 且 量比 > 1.5，或者出现底部九转/B点信号
+        c_ignite = (pct_change_today > 0.03 and vol_ratio_today > 1.5) or check_td9_or_oversold(closes)
 
-        # 打上标签，告诉你这是属于哪种机会
-        trend_status = "🔥 右侧突破起飞" if is_breakout else "🧘‍♂️ 左侧缩量伏击(踩均线)"
+        is_golden_pit_dragon = c_large_cap and c_ret_120 and c_golden_pit and c_support and c_ignite
+
+        # ------------------- 终极裁决 -------------------
+        if not (is_breakout or is_ambush or is_golden_pit_dragon):
+            return {"status": "fail", "reason": "未达三大战法标准"}
+
+        # 优先打上最高优先级的标签
+        if is_golden_pit_dragon:
+            trend_status = "🐉 黄金坑反转(午后定音)"
+        elif is_breakout:
+            trend_status = "🔥 右侧突破起飞"
+        else:
+            trend_status = "🧘‍♂️ 左侧缩量伏击(踩均线)"
 
         ret_60 = (close - closes[-61]) / closes[-61] if closes[-61] > 0 else 0
         data = {
             "Ticker": pure_code, 
             "Name": name, 
             "Price": round(close, 2), 
-            "Type": trend_status,  # 新增列：买点类型
+            "Type": trend_status,  
             "60D_Return%": f"{round(ret_60 * 100, 2)}%",
             "RSI": round(rsi, 2), 
             "Turnover_Rate%": f"{last_turnover}%", 
@@ -250,10 +289,10 @@ def process_single_stock(row, session):
         return {"status": "fail", "reason": "解析异常"}
 
 # ==========================================
-# 5. 主程序控制
+# 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手双引擎版 (包含右侧突破+左侧伏击) ==========")
+    print("\n========== A股 猎手三引擎版 (新增: 🐉黄金坑午后定音池) ==========")
     session = get_robust_session()
     core_tickers = get_core_tickers_from_sheet(session)
     spot_df = get_eastmoney_market_snapshot(session)
@@ -305,7 +344,6 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             df['Sort_Num'] = df[sort_col].str.replace('%', '').astype(float)
             df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
             df = df.head(50) 
-            # 重新排列列顺序，让 Type 标签靠前显眼
             cols =['Ticker', 'Name', 'Price', 'Type', '60D_Return%', 'RSI', 'Turnover_Rate%', 'Vol_Ratio', 'Dist_High%', 'Mkt_Cap(亿)', 'Turnover(亿)']
             df = df[cols]
             sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
