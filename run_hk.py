@@ -13,7 +13,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 基础设置与双向 Google Sheets 连接
 # ==========================================
-SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hqqKmkJ6i5qCyqKK6l0__us1WmisK6cNTkDqh8yZSac/edit?gid=0#gid=0"
+SECTOR_SHEET_URL = "https://docs.google.com/spreadsheets/d/17avi7qslnc_bCVhxvAYLRdwbFFAcAsqi45x2Gd4bQZc/edit?gid=0#gid=0"
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
 scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
