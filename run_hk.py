@@ -167,65 +167,89 @@ def apply_oneil_logic(code, name, klines, mktcap, market_type="HK"):
     close = closes[-1]
     if close == 0.0: return {"status": "fail", "reason": "停牌"}
     
-    # 港股流动性防爆墙：卡绝对成交额（>5000万港币），因腾讯等巨头换手率可能很低
+    # 港股流动性防爆墙
     if market_type == "HK":
         if last_amount < 50000000: return {"status": "fail", "reason": "成交极度萎靡(<5000万)"}
 
-    # === 欧奈尔/米尔维尼 核心趋势模板 ===
+    # 基础均线计算
     ma20 = np.mean(closes[-20:])
     ma50 = np.mean(closes[-50:])
     ma150 = np.mean(closes[-150:])
     ma200 = np.mean(closes[-200:])
     ma200_20d_ago = np.mean(closes[-220:-20]) 
     
-    if not (close > ma20 and close > ma50 and ma50 > ma150 and ma150 > ma200): 
-        return {"status": "fail", "reason": "非标准多头排列"}
-    if ma200 < ma200_20d_ago:
-        return {"status": "fail", "reason": "年线未向上(长线趋势弱)"}
+    # ==================================================
+    # 💡 核心升级：近3日量价爆发特征抓取 (捕捉昨天或今天的起爆点)
+    # ==================================================
+    avg_v50 = np.mean(vols[-50:])
+    # 近3日最大单日成交量倍数
+    vol_ratio_3d = np.max(vols[-3:]) / avg_v50 if avg_v50 > 0 else 0
+    # 近3日最大单日涨幅 (闭市价相比前一日)
+    daily_returns_3d = [(closes[-i] - closes[-i-1])/closes[-i-1] for i in range(1, 4)] if closes[-4] > 0 else[0,0,0]
+    max_daily_ret_3d = max(daily_returns_3d)
+
+    # 🚀 轨道 1：经典欧奈尔多头排列 (原版逻辑，抓主升浪)
+    is_standard_uptrend = (
+        close > ma20 and close > ma50 and 
+        ma50 > ma150 and ma150 > ma200 and 
+        ma200 >= ma200_20d_ago * 0.99  # 允许年线极轻微走平
+    )
+
+    # 🚀 轨道 2：底部/平台放量起爆 (专抓腾讯这类突然大阳线反转/跳空突破)
+    # 触发条件: 近3日内出现单日暴涨(>4.5%), 且放出2倍以上巨量, 且目前股价已强势站上MA20和MA50
+    is_explosive_breakout = (
+        vol_ratio_3d >= 2.0 and
+        max_daily_ret_3d >= 0.045 and
+        close > ma50 and close > ma20
+    )
+
+    # 如果两条标准都不满足，则淘汰
+    if not is_standard_uptrend and not is_explosive_breakout: 
+        return {"status": "fail", "reason": "未达标(非多头排列 且 无放量起爆)"}
         
     h250, l250 = np.max(highs[-250:]), np.min(lows[-250:])
     
-    # 🌟 港股波动容忍度调优：放宽到距新高 20% 以内（原15%），底部脱离 25%（原30%）
-    dist_high_limit = 0.80 if market_type == "HK" else 0.85
-    dist_low_limit = 1.25 if market_type == "HK" else 1.30
-    if close < (h250 * dist_high_limit): return {"status": "fail", "reason": f"距年内新高>{int((1-dist_high_limit)*100)}%"}
-    if close < (l250 * dist_low_limit): return {"status": "fail", "reason": f"底部脱离不足{int((dist_low_limit-1)*100)}%"}
-    
-    # 防追高
+    # === 针对不同策略应用不同的过滤强度 ===
+    if is_standard_uptrend and not is_explosive_breakout:
+        # 走经典趋势的：严格要求距离新高和底部脱离
+        dist_high_limit = 0.80 if market_type == "HK" else 0.85
+        dist_low_limit = 1.25 if market_type == "HK" else 1.30
+        if close < (h250 * dist_high_limit): return {"status": "fail", "reason": f"距年内新高>{int((1-dist_high_limit)*100)}%"}
+        if close < (l250 * dist_low_limit): return {"status": "fail", "reason": f"底部脱离不足{int((dist_low_limit-1)*100)}%"}
+        
+        # VCP 平台震荡幅度检查
+        recent_highs = highs[-16:-1]
+        recent_lows = lows[-16:-1]
+        consolidation_depth = (np.max(recent_highs) - np.min(recent_lows)) / np.max(recent_highs)
+        max_depth = 0.25 if market_type == "HK" else 0.20
+        if consolidation_depth > max_depth: return {"status": "fail", "reason": f"近期平台松散(震幅>{int(max_depth*100)}%)"}
+    else:
+        # 走放量起爆的：豁免VCP深度和极度接近新高的要求（因为它可能刚从底部暴起），但防止暴跌中的死猫跳
+        if close < (h250 * 0.50): return {"status": "fail", "reason": "超跌反弹过深(腰斩股，非有效起爆)"}
+
+    # 防追高极限 (无论哪种模式，起爆后偏离50日线太远则放弃)
     max_ma50_dev = 1.30 if market_type == "HK" else 1.25
-    if close > (ma50 * max_ma50_dev): return {"status": "fail", "reason": f"偏离50日线>{int((max_ma50_dev-1)*100)}%(极度超买)"}
+    if close > (ma50 * max_ma50_dev): return {"status": "fail", "reason": f"偏离50日线>{int((max_ma50_dev-1)*100)}%(短期超买过重)"}
 
-    # === VCP 波动率收缩 ===
-    recent_highs = highs[-16:-1]
-    recent_lows = lows[-16:-1]
-    consolidation_depth = (np.max(recent_highs) - np.min(recent_lows)) / np.max(recent_highs)
-    
-    max_depth = 0.25 if market_type == "HK" else 0.20
-    if consolidation_depth > max_depth: return {"status": "fail", "reason": f"近期平台松散(震幅>{int(max_depth*100)}%)"}
-
-    # === 起爆点侦测 (Pocket Pivot & Thrust) ===
-    avg_v50 = np.mean(vols[-50:])
-    pct_change_3d = (close - closes[-4]) / closes[-4] if closes[-4] > 0 else 0
-    max_vol_3d = np.max(vols[-3:])
-    vol_ratio_3d = max_vol_3d / avg_v50 if avg_v50 > 0 else 0
-    
-    # 🌟 港股爆发力调优：3日涨幅放宽至 >4%，给大盘股空间
-    min_3d_pct = 0.04 if market_type == "HK" else 0.05
-    if pct_change_3d < min_3d_pct: return {"status": "fail", "reason": f"近3日缺乏攻击爆发力(<{int(min_3d_pct*100)}%)"}
-    if vol_ratio_3d < 1.5: return {"status": "fail", "reason": "近期未见爆发量能(无主力倍量)"}
-
-    # RSI 动量
+    # RSI 动量计算
     deltas = np.diff(closes[-30:])
     up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
     
-    if rsi < 60: return {"status": "fail", "reason": "RSI<60(缺乏主升浪动能)"} 
+    # 动量强度：起爆点模式允许RSI稍微低一点(刚反转)，经典模式要求更高
+    min_rsi = 55 if is_explosive_breakout else 60
+    if rsi < min_rsi: return {"status": "fail", "reason": f"RSI<{min_rsi}(缺乏主升动能)"} 
     
     vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
     close_60 = closes[-61]
     ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
     
+    # 🌟 动态标签生成：在输出表中明确告诉你它是通过哪个逻辑被选中的
+    trend_tag = "🚀 底部放量起爆" if is_explosive_breakout else "📈 经典多头排列"
+    if is_standard_uptrend and is_explosive_breakout:
+        trend_tag = "🔥 完美共振(多头+今日起爆)"
+
     data = {
         "Ticker": code, 
         "Name": name, 
@@ -237,10 +261,9 @@ def apply_oneil_logic(code, name, klines, mktcap, market_type="HK"):
         "Dist_High%": f"{round(((close - h250) / h250) * 100, 2)}%",
         "Mkt_Cap(亿)": round(mktcap / 100000000, 2), 
         "Turnover(亿)": round(last_amount / 100000000, 2),
-        "Trend": "HK Tech/Dividend Breakout"
+        "Trend": trend_tag
     }
     return {"status": "success", "data": data}
-
 
 def process_single_hk_stock(row, session):
     pure_code = str(row['code']).zfill(5)
