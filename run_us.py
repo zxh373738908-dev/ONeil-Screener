@@ -41,15 +41,18 @@ def screen_us_stocks():
     if not tickers: return []
     
     print("\n========== [2/3] 启动华尔街并发下载引擎 (防封锁) ==========")
-    # 批量并发下载，速度提升 20 倍，且大大降低被雅虎封锁的概率
-    data = yf.download(tickers, period="1y", group_by='ticker', threads=True, show_errors=False)
+    # 修复点：移除了报错的 show_errors=False，新增 progress=False 保持云端日志干净
+    data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
     print("✅ 历史数据下载完成，进入量化雷达扫描...")
 
     final_stocks = []
     
     for ticker in tickers:
         try:
-            # 提取单只股票数据并清理 NaN
+            # 兼容新老版本 yfinance 的 MultiIndex 结构提取
+            if ticker not in data.columns.levels[0]:
+                continue
+                
             df = data[ticker].dropna()
             if len(df) < 200: continue
             
@@ -57,7 +60,7 @@ def screen_us_stocks():
             volume = df['Volume'].iloc[-1]
             high = df['High'].iloc[-1]
             
-            # 流动性过滤：股价 < 15 或 成交额 < 5000万美金，直接跳过
+            # 流动性过滤：股价 < 15 或 成交额 < 5000万美金
             if close < 15 or (close * volume) < 50000000: continue
             
             # --- 基础指标计算 ---
@@ -81,10 +84,10 @@ def screen_us_stocks():
             delta = df['Close'].diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
-            ema_up = up.ewm(com=13, adjust=False).mean().iloc[-1]
-            ema_down = down.ewm(com=13, adjust=False).mean().iloc[-1]
-            rs = ema_up / ema_down if ema_down > 0 else 100
-            rsi = 100 - (100 / (1 + rs))
+            ema_up = up.ewm(com=13, adjust=False).mean()
+            ema_down = down.ewm(com=13, adjust=False).mean()
+            rs = ema_up / ema_down
+            rsi = 100 - (100 / (1 + rs)).iloc[-1]
 
             # ====================================================
             # ⚔️ 战术 1：欧奈尔主升突破 (Breakout) - 蓝天无阻力区
@@ -133,7 +136,7 @@ def screen_us_stocks():
             print(f"🎯 捕获战术标的: {ticker} [{struct_label}]")
             
         except Exception as e:
-            # 批量下载出错率极低，即使报错单只股票也可安全忽略
+            # 忽略单只股票提取报错，继续下一只
             continue
             
     return final_stocks
