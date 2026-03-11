@@ -324,5 +324,6 @@ if __name__ == "__main__":
         res, msg = screen_a_shares()
         write_to_sheet("A-Share Screener", res, "60D_Return%", diag_msg=msg)
     except Exception as e:
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         error_info = traceback.format_exc()
-        write_to_sheet("A-Share Screener",
+        write_to_sheet("A-Share Screener", [], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
