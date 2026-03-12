@@ -2,23 +2,28 @@ name: A-Share Screener
 
 on:
   schedule:
+    # 每天 UTC 时间 08:30 运行 (北京时间下午 4:30)
     - cron: '30 8 * * 1-5'
   workflow_dispatch: 
 
 jobs:
-  run-screener:
+  run-a-screener:
     runs-on: ubuntu-latest
     steps:
+      # 🚀 升级到 v4，消除 Node.js 老化警告
       - name: Checkout code
-        uses: actions/checkout@v4   # 👈 升级为 v4
+        uses: actions/checkout@v4
 
+      # 🚀 升级到 v5，消除 Node.js 老化警告
       - name: Set up Python
-        uses: actions/setup-python@v5  # 👈 升级为 v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Create credentials.json
         run: |
