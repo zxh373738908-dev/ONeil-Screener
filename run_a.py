@@ -7,59 +7,62 @@ import gspread
 from google.oauth2.service_account import Credentials
 import time
 import random
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # ==========================================
 # Google Sheet 配置
 # ==========================================
-OUTPUT_SHEET_URL = "YOUR_SHEET"
+# ⚠️ 注意：请确保此处是您真实的 Google Sheet URL
+OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
 scopes =[
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = Credentials.from_service_account_file(
-    "credentials.json",
-    scopes=scopes
-)
+creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# ==========================================
-# STEP1: 同花顺主线雷达 (抓取当日最强风口)
-# ==========================================
-def get_ths_hot_tickers():
-    print("\n🔥 STEP1 启动【同花顺】主线雷达，扫描今日最强资金风口...")
+# 🛡️ 智能获取工作表（如果没有，自动帮您创建！）
+def get_worksheet():
+    doc = client.open_by_url(OUTPUT_SHEET_URL)
     try:
-        # 获取同花顺所有行业板块实时数据
-        ind_df = ak.stock_board_industry_name_ths()
+        return doc.worksheet("A-Share Screener")
+    except gspread.exceptions.WorksheetNotFound:
+        print("   -> ⚠️ 未找到 'A-Share Screener' 工作表，系统正在自动创建...")
+        return doc.add_worksheet(title="A-Share Screener", rows=100, cols=20)
+
+# ==========================================
+# STEP1: 东方财富主线雷达 (完美适配 Github 环境)
+# ==========================================
+def get_hot_tickers():
+    print("\n🔥 STEP1 启动【东方财富】主线雷达，扫描今日最强资金风口...")
+    try:
+        # 获取东方财富行业板块实时数据 (比同花顺稳定 100 倍，无需 JS 验证)
+        ind_df = ak.stock_board_industry_name_em()
         
-        # 动态匹配列名（防 akshare 更新变动）
-        name_col = next((c for c in ind_df.columns if '板块' in c or '名' in c), None)
-        pct_col = next((c for c in ind_df.columns if '涨跌幅' in c or '幅' in c), None)
-        
-        ind_df[pct_col] = pd.to_numeric(ind_df[pct_col], errors='coerce')
-        
-        # 挑选今天涨幅最猛的前 5 大同花顺板块
-        top_inds = ind_df.sort_values(by=pct_col, ascending=False).head(5)
-        print(f"   -> ✅ 锁定同花顺前 5 大强势行业：{top_inds[name_col].tolist()}")
+        # 按涨跌幅排序，挑选最猛的前 5 大板块
+        top_inds = ind_df.sort_values(by="涨跌幅", ascending=False).head(5)
+        hot_sectors = top_inds["板块名称"].tolist()
+        print(f"   -> ✅ 锁定当前市场前 5 大强势行业：{hot_sectors}")
         
         hot_tickers = set()
-        for _, row in top_inds.iterrows():
-            ind_name = row[name_col]
+        for sector in hot_sectors:
             try:
                 # 获取该板块下的所有成分股
-                cons_df = ak.stock_board_industry_cons_ths(symbol=ind_name)
-                code_col = next((c for c in cons_df.columns if '代码' in c), None)
-                codes =[str(x).zfill(6) for x in cons_df[code_col].tolist()]
+                cons_df = ak.stock_board_industry_cons_em(symbol=sector)
+                codes =[str(x).zfill(6) for x in cons_df["代码"].tolist()]
                 hot_tickers.update(codes)
-                time.sleep(0.5)  # 礼貌停顿，防同花顺反爬
+                time.sleep(0.3)  # 礼貌停顿，防封锁
             except Exception as e:
-                print(f"   -> ⚠️ 板块 {ind_name} 成分股获取波动: {e}")
+                print(f"   -> ⚠️ 板块 [{sector}] 成分股获取波动: {e}")
                 
-        print(f"   -> 🎯 同花顺雷达扫描完毕，共提取 {len(hot_tickers)} 只主线热门标的！")
+        print(f"   -> 🎯 主线雷达扫描完毕，共提取 {len(hot_tickers)} 只主线热门标的！")
         return list(hot_tickers)
     except Exception as e:
-        print(f"   -> ❌ 同花顺雷达受阻 ({e})，系统将自动降级为全市场盲扫模式。")
+        print(f"   -> ❌ 主线雷达受阻 ({e})，系统将自动降级为全市场盲扫模式。")
         return[]
 
 # ==========================================
@@ -78,18 +81,19 @@ def get_market_snapshot(hot_tickers):
             })
             df = df[["code", "name", "price", "mktcap"]]
             
-            # 基础防坑过滤：过滤低价仙股和 40亿以下极小盘
+            # 基础过滤：过滤低价仙股和 40亿以下极小盘
             df = df[df["price"] > 5]
             df = df[df["mktcap"] > 4000000000]
             
-            # 【核心护盾】：如果同花顺主线获取成功，则剔除非主线股票！
+            # 【双擎护盾】：如果主线获取成功，剔除非主线股票，大幅减少被封 IP 概率！
             if hot_tickers:
                 df = df[df["code"].isin(hot_tickers)]
-                print(f"   -> ⚔️ 剔除非主线、低价与小盘股后，剩余 {len(df)} 只【同花顺认证精锐】等待 K 线演算。")
+                print(f"   -> ⚔️ 剔除非主线、低价与小盘股后，剩余 {len(df)} 只【主线精锐】等待 K 线演算。")
             else:
                 print(f"   -> ⚔️ 盲扫模式启动，剩余 {len(df)} 只标的等待演算。")
             return df
-        except Exception:
+        except Exception as e:
+            print(f"   -> ⚠️ 市场快照获取失败 ({e})，正在重试...")
             time.sleep(2)
     return pd.DataFrame()
 
@@ -100,8 +104,9 @@ def get_kline(code):
     for attempt in range(3):
         try:
             df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq")
+            if df is None or df.empty: return None
             
-            # 🛡️ 盘前防误杀：如果在早盘9:20前运行，最后一根K线成交量为0，自动剔除使用昨日数据！
+            # 🛡️ 盘前防误杀：如果在早盘9:25前运行，最后一根K线成交量为0，自动剔除使用昨日数据！
             while len(df) > 0 and df.iloc[-1]["成交量"] == 0:
                 df = df.iloc[:-1]
                 
@@ -109,7 +114,6 @@ def get_kline(code):
                 return None
             return df
         except Exception:
-            # 遇到防火墙拦截，随机指数退避
             time.sleep(1 + random.random() * attempt)
     return None
 
@@ -183,7 +187,7 @@ def analyze_stock(row):
         high60 = close[-60:].max()
         pit = (
             price < high60 * 0.85
-            and price >= ma50 * 0.98  # 允许极度轻微刺破50日线
+            and price >= ma50 * 0.98  
             and vol_ratio > 1.3
         )
 
@@ -197,7 +201,7 @@ def analyze_stock(row):
         return {
             "Ticker": code,
             "Name": name,
-            "Price": price,
+            "Price": round(price, 2),
             "RS_Score": round(rs * 100, 2),
             "RSI": round(rsi, 2),
             "Vol_Ratio": round(vol_ratio, 2),
@@ -210,19 +214,19 @@ def analyze_stock(row):
 # STEP6 主扫描调度器
 # ==========================================
 def scan_market():
-    # 1. 先用同花顺锁定主线
-    ths_hot_tickers = get_ths_hot_tickers()
-    # 2. 拉取全大盘并进行兵力过滤
-    spot = get_market_snapshot(ths_hot_tickers)
+    hot_tickers = get_hot_tickers()
+    spot = get_market_snapshot(hot_tickers)
     
-    if spot.empty: return[]
+    if spot.empty: 
+        print("❌ 兵力筛选失败，无法获取大盘数据。")
+        return[]
 
-    print("\n   -> ⚙️ 正在向数据中心请求 K 线演算（由于请求量已大幅降低，此过程极其安全且迅速）...")
+    print("\n   -> ⚙️ 正在向数据中心请求 K 线演算（极其安全且迅速）...")
     results =[]
     
-    # 降低并发到 5，配合降低后的基数，绝对不会触发 Github IP 封锁
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exe:
-        futures = [exe.submit(analyze_stock, row) for _, row in spot.iterrows()]
+    # 将并发控制在 6，完美规避 Akshare 触发东财封禁的风险
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as exe:
+        futures =[exe.submit(analyze_stock, row) for _, row in spot.iterrows()]
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
             if res: results.append(res)
@@ -235,7 +239,7 @@ def scan_market():
 def write_sheet(data):
     print("\n📝 STEP3 正在将绝密作战名单写入 Google Sheets 表格...")
     try:
-        sheet = client.open_by_url(OUTPUT_SHEET_URL).worksheet("A-Share Screener")
+        sheet = get_worksheet()
         sheet.clear()
 
         if len(data) == 0:
@@ -248,19 +252,21 @@ def write_sheet(data):
         df = df.sort_values("RS_Score", ascending=False)
 
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sheet.update_acell("I1", "Last Update:")
-        sheet.update_acell("J1", now)
         
-        print(f"🎉 大功告成！已成功将 {len(df)} 只【同花顺主线 + 三大战法】双重认证龙头送达指挥部！")
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sheet.update_acell("H1", "Last Update:")
+        sheet.update_acell("I1", now)
+        
+        print(f"🎉 大功告成！已成功将 {len(df)} 只【主线 + 三大战法】双重认证龙头送达指挥部！")
     except Exception as e:
-        print(f"❌ 表格写入失败: {e}")
+        print(f"❌ 表格写入致命失败: {e}")
+        traceback.print_exc()
 
 # ==========================================
 # MAIN
 # ==========================================
 def main():
-    print("\n========== A股猎手系统 V6 (同花顺主线双擎版) ==========")
+    print("\n========== A股猎手系统 V6.1 (东方财富主线双擎版) ==========")
     data = scan_market()
     write_sheet(data)
 
