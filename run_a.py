@@ -31,8 +31,9 @@ def get_worksheet():
 # 🛡️ STEP 1: 获取 A 股名册 (四重高弹容错机制)
 # ==========================================
 def clean_stock_list(df):
-    """提取清洗函数：统一格式化为 6 位代码，并剔除 ST 股"""
-    df['code'] = df['code'].astype(str).str.zfill(6)
+    """提取清洗函数：强行剥离字母前缀，统一格式化为 6 位纯数字代码，并剔除 ST 股"""
+    # 核心修复：使用正则 \D 剔除所有非数字字符（完美解决新浪接口 sh、sz 前缀问题）
+    df['code'] = df['code'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(6)
     df = df[~df['name'].astype(str).str.contains('ST', case=False)]
     print(f"   -> ✅ 脱壳成功！拉取到全市场 {len(df)} 只正常交易标的。")
     return df[['code', 'name']]
@@ -119,6 +120,7 @@ def scan_market_via_yfinance(df_list):
     for _, row in df_list.iterrows():
         c = row['code']
         n = row['name']
+        # 根据纯数字前缀分配 Yahoo 后缀
         if c.startswith(('6', '5')): t = f"{c}.SS"
         elif c.startswith(('0', '3')): t = f"{c}.SZ"
         else: continue
@@ -239,7 +241,7 @@ def write_sheet(data):
 # MAIN
 # ==========================================
 def main():
-    print("\n========== A股猎手系统 V7.3 (全链路防弹自愈版) ==========")
+    print("\n========== A股猎手系统 V7.4 (终极正则修复版) ==========")
     df_list = get_a_share_list()
     if df_list.empty: 
         print("\n❌ 严重错误：四重链路均被服务器拦截，未能获取股票列表。请稍后再试，或考虑在本地运行。")
