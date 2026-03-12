@@ -7,11 +7,7 @@ from collections import defaultdict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import io
-import urllib.parse
-import urllib3
 
-# 🛡️ 屏蔽海外节点经常误报的 SSL 证书不安全警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -33,61 +29,26 @@ def parse_val(val, is_pct=False):
         return f
     except: return 0.0
 
+# 🌟【完美还原】：使用您原版最平顺、最隐蔽的网络请求头，去除了会触发拦截的底层修改
 def get_robust_session():
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
-    # 🛡️ 强化伪装，防止 Github Actions 被识别为爬虫
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Referer': 'http://quote.eastmoney.com/',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://quote.eastmoney.com/',
+        'Accept': '*/*',
         'Connection': 'keep-alive'
     })
     return session
 
 # ==========================================
-# 🌟 [核心武器] 东方财富 CDN 节点跃迁护盾
-# ==========================================
-def fetch_eastmoney_json(session, url, params=None):
-    """防封锁底层请求器：自动轮换节点、强制放行SSL、异常穿透"""
-    parsed = urllib.parse.urlparse(url)
-    original_host = parsed.netloc
-    
-    # 智能分配备用 CDN 节点
-    if 'push2his' in original_host:
-        nodes =[original_host, "1.push2his.eastmoney.com", "2.push2his.eastmoney.com", "82.push2his.eastmoney.com"]
-    else:
-        nodes =[original_host, "1.push2.eastmoney.com", "82.push2.eastmoney.com", "99.push2.eastmoney.com", "53.push2.eastmoney.com"]
-        
-    last_err = ""
-    for node in nodes:
-        try_url = url.replace(original_host, node)
-        for _ in range(2):
-            try:
-                # 关键修复：verify=False 强制绕过 GitHub SSL 拦截
-                res = session.get(try_url, params=params, timeout=8, verify=False)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data is not None:
-                        return data
-                else:
-                    last_err = f"HTTP {res.status_code}"
-            except Exception as e:
-                last_err = str(e)
-                time.sleep(0.3)
-    
-    # 如果所有节点全部阵亡，把报错打印出来便于排查
-    print(f"   -> ❌ [底层通信中断] API: {original_host} 拒绝访问。最后报错: {last_err}")
-    return None
-
-# ==========================================
 # 2. 板块宏观模型
 # ==========================================
 def get_core_tickers_from_sheet(session):
-    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
+    print("\n🌍[STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
@@ -95,7 +56,7 @@ def get_core_tickers_from_sheet(session):
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
         except Exception as e:
-            print(f"   -> ⚠️ CSV 快读受阻 (非公开表单)，已自动降级使用安全 API 读取...")
+            print(f"   -> ⚠️ CSV 快读受阻，自动降级使用安全 API 读取...")
             doc = client.open_by_url(SECTOR_SHEET_URL)
             raw_data = doc.worksheets()[0].get_all_values()
             raw_df = pd.DataFrame(raw_data)
@@ -121,15 +82,19 @@ def get_core_tickers_from_sheet(session):
             print("   -> ⚠️ 当前市场无符合条件的长线热点板块。")
             return[]
 
-        print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，正在穿透映射 A 股成分股...")
+        print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，正在映射 A 股成分股...")
         boards_map = {}
         for url in[
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
         ]:
-            res = fetch_eastmoney_json(session, url)
-            if res and 'data' in res and res['data'] and 'diff' in res['data']:
-                for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
+            for _ in range(3):
+                try:
+                    res = session.get(url, timeout=5).json()
+                    if res and 'data' in res and res['data']:
+                        for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
+                    break
+                except: time.sleep(1)
                 
         target_tickers = set()
         synonyms = {"化工":["化工行业", "磷化工", "煤化工", "基础化工", "化肥行业"]} 
@@ -152,10 +117,14 @@ def get_core_tickers_from_sheet(session):
                 if key in clean_name: matched_b_codes.update(bks)
             
             for b_code in matched_b_codes:
-                list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
-                cons = fetch_eastmoney_json(session, list_url)
-                if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
-                    target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
+                for _ in range(3):
+                    try:
+                        list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
+                        cons = session.get(list_url, timeout=5).json()
+                        if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
+                            target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
+                        break
+                    except: time.sleep(1)
         
         print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的池！")
         return list(target_tickers)
@@ -164,7 +133,7 @@ def get_core_tickers_from_sheet(session):
         return[]
 
 # ==========================================
-# 3. 大盘扫描器
+# 3. 大盘扫描器 (恢复您原代码的 URL パラメーター)
 # ==========================================
 def get_eastmoney_market_snapshot(session):
     print("\n🚀 [STEP 2] 启动【东方财富】引擎：抓取全市场 A 股快照...")
@@ -172,18 +141,21 @@ def get_eastmoney_market_snapshot(session):
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
         "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": "2", "invt": "2",
-        "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+        "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "fields": "f12,f14,f2,f18,f20"
     }
-    
-    res = fetch_eastmoney_json(session, url, params=params)
-    if res and 'data' in res and res['data'] and 'diff' in res['data']:
-        df = pd.DataFrame(res['data']['diff'])
-        df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-        print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的基础数据！")
-        return df
-        
-    print("   -> ❌ 致命错误：大盘基础数据被拦截，无法获取！")
+    for attempt in range(3):
+        try:
+            res = session.get(url, params=params, timeout=10).json()
+            if res and 'data' in res and res['data'] and 'diff' in res['data']:
+                df = pd.DataFrame(res['data']['diff'])
+                df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
+                print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的盘前/盘中基础数据！")
+                return df
+        except Exception as e: 
+            print(f"   -> ⚠️ 第 {attempt+1} 次获取大盘失败，重试中...")
+            time.sleep(1)
+    print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
     return pd.DataFrame()
 
 # ==========================================
@@ -201,7 +173,6 @@ def check_td9_or_oversold(closes):
     down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
     if rsi < 35: return True
-    
     return False
 
 # ==========================================
@@ -209,9 +180,15 @@ def check_td9_or_oversold(closes):
 # ==========================================
 def fetch_kline_data(secid, session):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
-    res = fetch_eastmoney_json(session, url)
-    if res and 'data' in res and res['data'] and 'klines' in res['data']:
-        return res['data']['klines']
+    for _ in range(3):
+        try:
+            res = session.get(url, timeout=4)
+            if res.status_code == 200:
+                data = res.json()
+                if data and 'data' in data and data['data'] and 'klines' in data['data']:
+                    return data['data']['klines']
+        except Exception:
+            time.sleep(random.uniform(0.1, 0.3))
     return None
 
 def process_single_stock(row, session):
@@ -224,10 +201,11 @@ def process_single_stock(row, session):
         
     try:
         klines = fetch_kline_data(f"{prefix}.{pure_code}", session)
-        if not klines: return {"status": "fail", "reason": "节点阻断/无K线"}
+        if not klines: return {"status": "fail", "reason": "无K线"}
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
+        # 🛡️ 盘前 0 交易量自动回退修正
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -245,6 +223,7 @@ def process_single_stock(row, session):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
+        # 五日均量防止早盘错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -334,14 +313,14 @@ def process_single_stock(row, session):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (搭载 Anti-Ban 节点防封护盾) ==========")
+    print("\n========== A股 猎手三引擎版 (纯净稳定网络版) ==========")
     session = get_robust_session()
     
     core_tickers = get_core_tickers_from_sheet(session)
     spot_df = get_eastmoney_market_snapshot(session)
     
     if spot_df.empty: 
-        return[], "❌ 战略终止：由于网络封锁，大盘数据为空"
+        return[], "❌ 战略终止：大盘数据为空"
     
     total = len(spot_df)
     for col in['trade', 'prev_close', 'mktcap']: 
@@ -354,10 +333,10 @@ def screen_a_shares():
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
     if core_tickers:
-        print(f"\n🎯 [STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
+        print(f"\n🎯[STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
     else:
-        print(f"\n🌊[STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
+        print(f"\n🌊 [STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
