@@ -2,19 +2,18 @@ name: A-Share Screener
 
 on:
   schedule:
-    # 每天 UTC 时间 08:00 运行 (北京时间下午 4:00, A股收盘后跑)
-    - cron: '0 8 * * 1-5'
+    - cron: '30 8 * * 1-5'
   workflow_dispatch: 
 
 jobs:
-  run-a-screener:
+  run-screener:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4   # 👈 这里升级为 v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # 👈 这里升级为 v5
         with:
           python-version: '3.10'
 
