@@ -29,17 +29,11 @@ def parse_val(val, is_pct=False):
     except: return 0.0
 
 # ==========================================
-# 🛡️ 核心武器：全球公共代理中转站 (彻底绕过被封锁的 Github IP)
+# 🛡️ 核心武器：智能代理中转网络 (彻底无视 IP 封锁)
 # ==========================================
 class SmartSession:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://quote.eastmoney.com/',
-            'Connection': 'keep-alive'
-        })
-        self.use_proxy = False # 全局封锁标记
+        self.use_proxy = False # 全局封锁降级标记
 
     def get_json(self, url, params=None):
         if params:
@@ -48,35 +42,54 @@ class SmartSession:
         else:
             full_url = url
 
-        # 🚀 缓存击穿：强制加入随机时间戳，防止代理服务器返回旧数据
-        rnd = str(int(time.time() * 1000))
+        # 🚀 缓存击穿：强制加入随机毫秒级时间戳，防止代理服务器返回旧数据
+        rnd = str(int(time.time() * 1000) + random.randint(1, 10000))
         full_url += f"&_rnd={rnd}" if "?" in full_url else f"?_rnd={rnd}"
-
-        # 1. 优先尝试直连 (只要 Github IP 没被封，就全速直通)
-        if not self.use_proxy:
-            try:
-                res = self.session.get(full_url, timeout=4)
-                if res.status_code == 200:
-                    return res.json()
-            except Exception:
-                print("\n⚠️ 警报：检测到 Github IP 被东方财富拉黑！正在全面切换至【全球代理中转引擎】...")
-                self.use_proxy = True  # 一旦被阻断，全局自动切换为代理模式
-
-        # 2. 直连失败，启动全球公共代理池进行伪装中转
         encoded_url = urllib.parse.quote(full_url, safe='')
-        proxies =[
-            f"https://api.allorigins.win/raw?url={encoded_url}",
-            f"https://api.codetabs.com/v1/proxy?quest={full_url}",
-            f"https://corsproxy.io/?{encoded_url}"
+
+        # 代理服务列表 (全球顶级免费中转站)
+        proxy_list =[
+            {"url": f"https://api.codetabs.com/v1/proxy?quest={full_url}", "type": "raw"},
+            {"url": f"https://api.allorigins.win/get?url={encoded_url}", "type": "json_contents"},
+            {"url": f"https://corsproxy.io/?{encoded_url}", "type": "raw"},
+            {"url": f"https://api.allorigins.win/raw?url={encoded_url}", "type": "raw"}
         ]
         
-        for p_url in proxies:
+        # 如果已经被判定为封锁状态，自动将代理列表打乱，实现【负载均衡】，防止单一代理被挤爆
+        if self.use_proxy:
+            random.shuffle(proxy_list)
+            proxies = proxy_list
+        else:
+            proxies = [{"url": full_url, "type": "direct"}] + proxy_list
+
+        for p in proxies:
             try:
-                res = requests.get(p_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+                # 伪装普通人，不带任何刺眼的爬虫特征
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+                if p["type"] == "direct":
+                    headers['Referer'] = 'https://quote.eastmoney.com/'
+                    
+                # 不使用会产生冲突的全局连接池，独立短连接，绝对安全
+                res = requests.get(p["url"], headers=headers, timeout=8)
+                
                 if res.status_code == 200:
-                    data = res.json()
-                    if data: return data
+                    if p["type"] == "json_contents":
+                        raw_data = res.json().get('contents')
+                        if not raw_data: continue
+                        data = json.loads(raw_data)
+                    else:
+                        data = res.json()
+                        
+                    if data and 'data' in data:
+                        # 💥 战术通报：如果直连被封后首次由代理抢通，全网广播！
+                        if p["type"] != "direct" and not self.use_proxy:
+                            self.use_proxy = True
+                            print(f"\n   -> 🌐 警报：检测到 Github IP 被东财墙杀！系统已自动启动【全球代理中转网络】进行火力压制！")
+                        return data
+                        
             except Exception:
+                if p["type"] == "direct":
+                    self.use_proxy = True
                 continue
                 
         return None
@@ -88,10 +101,11 @@ smart_client = SmartSession()
 # 2. 板块宏观模型
 # ==========================================
 def get_core_tickers_from_sheet():
-    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
+    print("\n🌍[STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
+            # Google Sheets 依然用普通的 requests 直连，因为它不会封 Github Actions
             res = requests.get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
@@ -168,7 +182,7 @@ def get_core_tickers_from_sheet():
 # 3. 大盘扫描器
 # ==========================================
 def get_eastmoney_market_snapshot():
-    print("\n🚀 [STEP 2] 启动【东方财富】引擎：抓取全市场 A 股快照...")
+    print("\n🚀 [STEP 2] 启动【东方财富】底层引擎：抓取全市场 A 股快照...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
@@ -184,7 +198,7 @@ def get_eastmoney_market_snapshot():
         print(f"   -> ✅ 数据通道连接成功！抓取全市场 {len(df)} 只股票基础数据！")
         return df
         
-    print("   -> ❌ 致命错误：即使使用代理，大盘基础数据抓取依然失败！")
+    print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
     return pd.DataFrame()
 
 # ==========================================
@@ -228,7 +242,7 @@ def process_single_stock(row):
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
-        # 🛡️ 完美去除早盘 0 交易量干扰
+        # 🛡️ 盘前 0 交易量自动清理，完美防早盘被错杀
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -246,7 +260,7 @@ def process_single_stock(row):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
-        # 5日均量平滑器
+        # 五日均量防止早盘错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -363,13 +377,13 @@ def screen_a_shares():
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
-    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！正在全速并发演算（约需 30 秒，请稍候）...")
+    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！正在全速并发演算...")
     
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
-    # 🛡️ 降速防拥堵：如果走了代理中转，我们将并发降到 5，防止拥堵代理服务器引发 429 报错
-    max_w = 5 if smart_client.use_proxy else 12
+    # 🛡️ 智能降速防拥堵：如果走了代理中转，我们将并发从 12 降到 4，防止拥堵免费代理服务器引发 429 报错
+    max_w = 4 if smart_client.use_proxy else 12
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as executor:
         futures = {executor.submit(process_single_stock, row): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
