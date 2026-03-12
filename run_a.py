@@ -2,12 +2,11 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, concurrent.futures, warnings, traceback, time
+import datetime, requests, json, re, concurrent.futures, warnings, traceback, random, time
 from collections import defaultdict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import io
-import threading
 
 warnings.filterwarnings('ignore')
 
@@ -30,55 +29,33 @@ def parse_val(val, is_pct=False):
         return f
     except: return 0.0
 
-# ==========================================
-# 🛡️ 核心武器：线程隔离的专属 Session (完美绕过 CC 拦截与线程冲突)
-# ==========================================
-thread_local = threading.local()
-
-def get_session():
-    """为每个线程分配独立的会话通道，保持 Keep-Alive 且互不干扰"""
-    if not hasattr(thread_local, "session"):
-        s = requests.Session()
-        retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
-        # 连接池大小适当缩小，避免占用过多句柄
-        adapter = HTTPAdapter(max_retries=retry, pool_connections=5, pool_maxsize=5)
-        s.mount('http://', adapter)
-        s.mount('https://', adapter)
-        s.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://quote.eastmoney.com/',
-            'Accept': '*/*',
-            'Connection': 'keep-alive'
-        })
-        thread_local.session = s
-    return thread_local.session
-
-def safe_fetch(url, params=None):
-    """自带退避重试的安全网络请求器"""
-    session = get_session()
-    for attempt in range(4):
-        try:
-            res = session.get(url, params=params, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if data: return data
-        except Exception as e:
-            # 遇到阻断时，强制休眠，呈指数级退避，伪装人类延迟
-            time.sleep(1 + attempt)
-    return None
+# 🌟 100% 还原您最初始、最稳定的网络请求头！绝不画蛇添足！
+def get_robust_session():
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://quote.eastmoney.com/',
+        'Accept': '*/*',
+        'Connection': 'keep-alive'
+    })
+    return session
 
 # ==========================================
-# 2. 板块宏观模型
+# 2. 板块宏观模型 (还原最稳定的抓取方式)
 # ==========================================
-def get_core_tickers_from_sheet():
+def get_core_tickers_from_sheet(session):
     print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
-            res = get_session().get(csv_url, timeout=10)
+            res = session.get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
-        except Exception as e:
+        except Exception:
             print(f"   -> ⚠️ CSV 快读受阻，自动降级使用 API 读取...")
             doc = client.open_by_url(SECTOR_SHEET_URL)
             raw_data = doc.worksheets()[0].get_all_values()
@@ -111,9 +88,14 @@ def get_core_tickers_from_sheet():
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
         ]:
-            res = safe_fetch(url)
-            if res and 'data' in res and res['data']:
-                for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
+            for _ in range(3):
+                try:
+                    res = session.get(url, timeout=5).json()
+                    if res and 'data' in res and res['data']:
+                        for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
+                    break
+                except Exception:
+                    time.sleep(1)
                 
         target_tickers = set()
         synonyms = {"化工":["化工行业", "磷化工", "煤化工", "基础化工", "化肥行业"]} 
@@ -136,10 +118,15 @@ def get_core_tickers_from_sheet():
                 if key in clean_name: matched_b_codes.update(bks)
             
             for b_code in matched_b_codes:
-                list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
-                cons = safe_fetch(list_url)
-                if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
-                    target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
+                for _ in range(3):
+                    try:
+                        list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
+                        cons = session.get(list_url, timeout=5).json()
+                        if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
+                            target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
+                        break
+                    except Exception: 
+                        time.sleep(1)
         
         print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的！")
         return list(target_tickers)
@@ -148,9 +135,9 @@ def get_core_tickers_from_sheet():
         return[]
 
 # ==========================================
-# 3. 大盘扫描器
+# 3. 大盘扫描器 (还原原版完美通过防封锁的参数)
 # ==========================================
-def get_eastmoney_market_snapshot():
+def get_eastmoney_market_snapshot(session):
     print("\n🚀 [STEP 2] 启动【东方财富】引擎：抓取全市场 A 股快照...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
@@ -159,15 +146,22 @@ def get_eastmoney_market_snapshot():
         "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
         "fields": "f12,f14,f2,f18,f20"
     }
-    
-    res = safe_fetch(url, params=params)
-    if res and 'data' in res and res['data'] and 'diff' in res['data']:
-        df = pd.DataFrame(res['data']['diff'])
-        df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-        print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的基础数据！")
-        return df
-        
-    print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
+    last_err = ""
+    for attempt in range(3):
+        try:
+            res = session.get(url, params=params, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data and 'data' in data and data['data'] and 'diff' in data['data']:
+                    df = pd.DataFrame(data['data']['diff'])
+                    df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
+                    print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的基础数据！")
+                    return df
+        except Exception as e: 
+            last_err = str(e)
+            print(f"   -> ⚠️ 第 {attempt+1} 次获取大盘失败，重试中...")
+            time.sleep(1)
+    print(f"   -> ❌ 致命错误：大盘基础数据抓取失败！({last_err})")
     return pd.DataFrame()
 
 # ==========================================
@@ -190,14 +184,20 @@ def check_td9_or_oversold(closes):
 # ==========================================
 # 5. K线运算与【三大主力战法】逻辑
 # ==========================================
-def fetch_kline_data(secid):
+def fetch_kline_data(secid, session):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
-    res = safe_fetch(url)
-    if res and 'data' in res and res['data'] and 'klines' in res['data']:
-        return res['data']['klines']
+    for _ in range(3):
+        try:
+            res = session.get(url, timeout=4)
+            if res.status_code == 200:
+                data = res.json()
+                if data and 'data' in data and data['data'] and 'klines' in data['data']:
+                    return data['data']['klines']
+        except Exception:
+            time.sleep(random.uniform(0.1, 0.3))
     return None
 
-def process_single_stock(row):
+def process_single_stock(row, session):
     pure_code = str(row['code'])[-6:] 
     name = row['name']
     
@@ -206,12 +206,12 @@ def process_single_stock(row):
     else: return {"status": "fail", "reason": "非A股"}
         
     try:
-        klines = fetch_kline_data(f"{prefix}.{pure_code}")
+        klines = fetch_kline_data(f"{prefix}.{pure_code}", session)
         if not klines: return {"status": "fail", "reason": "无K线"}
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
-        # 盘前 0 量修复
+        # 🛡️ 盘前 0 交易量自动回退修正功能 (这是昨天失败的原因，完美保留)
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -229,6 +229,7 @@ def process_single_stock(row):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
+        # 🛡️ 5日平滑机制，防止早盘假性萎缩错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -276,6 +277,7 @@ def process_single_stock(row):
 
         mktcap_val = float(row['mktcap']) if pd.notna(row['mktcap']) else 0
         
+        # 🐉 Engine C：专抓鲁西化工等百亿中军的【黄金坑/老龙回头】
         c_large_cap = mktcap_val >= 10000000000
         c_ret_120 = (close - closes[-121]) / closes[-121] > 0.15
         c_dist_h60 = (close - h60) / h60
@@ -318,10 +320,12 @@ def process_single_stock(row):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (最终无懈可击版) ==========")
+    print("\n========== A股 猎手三引擎版 (纯净网络回调版) ==========")
     
-    core_tickers = get_core_tickers_from_sheet()
-    spot_df = get_eastmoney_market_snapshot()
+    session = get_robust_session()
+    
+    core_tickers = get_core_tickers_from_sheet(session)
+    spot_df = get_eastmoney_market_snapshot(session)
     
     if spot_df.empty: 
         return[], "❌ 战略终止：大盘数据为空"
@@ -340,7 +344,7 @@ def screen_a_shares():
         print(f"\n🎯 [STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
     else:
-        print(f"\n🌊 [STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
+        print(f"\n🌊[STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
@@ -349,9 +353,9 @@ def screen_a_shares():
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
+    # 100% 还原最初稳定通过防火墙的多线程传递模式
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        # 每个线程都会自动获取属于自己的安全连接，互不冲突
-        futures = {executor.submit(process_single_stock, row): row['code'] for _, row in f_df.iterrows()}
+        futures = {executor.submit(process_single_stock, row, session): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res["status"] == "success": final_stocks.append(res["data"])
@@ -396,9 +400,4 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
 
 if __name__ == "__main__":
     try:
-        res, msg = screen_a_shares()
-        write_to_sheet("A-Share Screener", res, "60D_Return%", diag_msg=msg)
-    except Exception as e:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        error_info = traceback.format_exc()
-        write_to_sheet("A-Share Screener",[], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
+        res, ms
