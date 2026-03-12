@@ -10,11 +10,11 @@ jobs:
   run-a-screener:
     runs-on: ubuntu-latest
     steps:
-      # 🚀 升级到 v4，消除 Node.js 老化警告
+      # 🚀 升级到 v4，消除 Node.js 20 老化警告
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 🚀 升级到 v5，消除 Node.js 老化警告
+      # 🚀 升级到 v5，提供最稳固的 Python 环境
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
