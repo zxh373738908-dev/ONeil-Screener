@@ -2,23 +2,11 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, concurrent.futures, warnings, traceback, random, time
+import datetime, requests, json, re, concurrent.futures, warnings, traceback, time
 from collections import defaultdict
 import io
-import os
-import sys
-import subprocess
-
-# ==========================================
-# 🚀 终极破壁核心：自动装载 TLS/JA3 指纹伪装模块
-# ==========================================
-try:
-    from curl_cffi import requests as cffi_requests
-except ImportError:
-    print("🛡️ 检测到严格防火墙环境 (JA3 TLS Block)，正在为您自动装载【物理级指纹伪装穿透模块 curl_cffi】...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi==0.5.10"])
-    from curl_cffi import requests as cffi_requests
-    print("✅ 反侦察装甲部署完毕！开始穿透...")
+import urllib.request
+import urllib.parse
 
 warnings.filterwarnings('ignore')
 
@@ -41,21 +29,46 @@ def parse_val(val, is_pct=False):
         return f
     except: return 0.0
 
-# 🌟【完美穿透下载器】：专破东方财富 WAF 防火墙
-def get_em_data(url, params=None, timeout=8):
-    """使用 curl_cffi 强制伪装成 Chrome 116，绕过所有封锁，且不使用连接池避免冲突"""
+# ==========================================
+# 🛡️ 终极破壁引擎：原生系统级通信 (无视爬虫指纹拦截)
+# ==========================================
+def fetch_em_json(url, params=None):
+    """
+    三层递进防御穿透系统：
+    1. 尝试 requests
+    2. 如果被 TLS 拦截，降维使用 Python 原生系统网络层 urllib (无指纹)
+    3. 如果主节点被封 IP，自动跃迁到备用节点
+    """
+    if params:
+        query = urllib.parse.urlencode(params)
+        url = url + ("&" if "?" in url else "?") + query
+        
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://quote.eastmoney.com/'
     }
-    for attempt in range(3):
-        try:
-            # impersonate="chrome116" 是真正的魔法！它在底层修改了握手特征
-            res = cffi_requests.get(url, params=params, headers=headers, timeout=timeout, impersonate="chrome116")
-            if res.status_code == 200:
-                return res.json()
-        except Exception as e:
-            time.sleep(1)
+    
+    # 方案 A: 极速模式
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200: return res.json()
+    except Exception: pass
+    
+    # 方案 B: 操作系统底层穿透 (专破 Github Actions 封锁)
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except Exception: pass
+    
+    # 方案 C: 备用节点降维打击
+    alt_url = url.replace("https://", "http://").replace("push2.", "82.push2.").replace("push2his.", "82.push2his.")
+    try:
+        req = urllib.request.Request(alt_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except Exception: pass
+    
     return None
 
 # ==========================================
@@ -66,7 +79,6 @@ def get_core_tickers_from_sheet():
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
-            # 访问 Google 仍用普通 requests
             res = requests.get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
@@ -103,7 +115,7 @@ def get_core_tickers_from_sheet():
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
         ]:
-            data = get_em_data(url)
+            data = fetch_em_json(url)
             if data and 'data' in data and data['data']:
                 for item in data['data']['diff']: boards_map[item['f14']] = item['f12']
                 
@@ -129,7 +141,7 @@ def get_core_tickers_from_sheet():
             
             for b_code in matched_b_codes:
                 list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
-                cons = get_em_data(list_url)
+                cons = fetch_em_json(list_url)
                 if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
                     target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
         
@@ -143,7 +155,7 @@ def get_core_tickers_from_sheet():
 # 3. 大盘扫描器
 # ==========================================
 def get_eastmoney_market_snapshot():
-    print("\n🚀 [STEP 2] 启动【东方财富】隐形穿透引擎：抓取全市场 A 股快照...")
+    print("\n🚀 [STEP 2] 启动【东方财富】底层穿透引擎：抓取全市场 A 股快照...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
@@ -152,7 +164,7 @@ def get_eastmoney_market_snapshot():
         "fields": "f12,f14,f2,f18,f20"
     }
     
-    data = get_em_data(url, params=params, timeout=12)
+    data = fetch_em_json(url, params=params)
     if data and 'data' in data and data['data'] and 'diff' in data['data']:
         df = pd.DataFrame(data['data']['diff'])
         df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
@@ -184,7 +196,7 @@ def check_td9_or_oversold(closes):
 # ==========================================
 def fetch_kline_data(secid):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
-    data = get_em_data(url, timeout=5)
+    data = fetch_em_json(url)
     if data and 'data' in data and data['data'] and 'klines' in data['data']:
         return data['data']['klines']
     return None
@@ -203,7 +215,7 @@ def process_single_stock(row):
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
-        # 🛡️ 盘前 0 交易量自动清理，完美解决早上无量被杀的问题
+        # 盘前修正，完美防早盘0量错杀
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -221,7 +233,6 @@ def process_single_stock(row):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
-        # 五日均量防止早盘错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -279,7 +290,7 @@ def process_single_stock(row):
         is_golden_pit_dragon = c_large_cap and c_ret_120 and c_golden_pit and c_support and c_ignite
 
         if not (is_breakout or is_ambush or is_golden_pit_dragon):
-            return {"status": "fail", "reason": "未达三大战法标准"}
+            return {"status": "fail", "reason": "未达战法标准"}
 
         if is_golden_pit_dragon:
             trend_status = "🐉 黄金坑反转(午后定音)"
@@ -311,7 +322,7 @@ def process_single_stock(row):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (搭载究极防沉迷装甲) ==========")
+    print("\n========== A股 猎手三引擎版 (原生系统级破壁防封版) ==========")
     
     core_tickers = get_core_tickers_from_sheet()
     spot_df = get_eastmoney_market_snapshot()
@@ -337,12 +348,14 @@ def screen_a_shares():
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
-    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！正在全速并发演算（约需 30 秒，请稍候）...")
+    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！")
+    print(f"   -> ⚠️ 为了防范被东方财富识别为 CC 攻击，已开启智能降速并发（约需 45 秒，请稍候）...")
     
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+    # 🛡️ 降低并发数量，从 12 降低到 8，伪装成正常网速，避免触发 IP 保护
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(process_single_stock, row): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
