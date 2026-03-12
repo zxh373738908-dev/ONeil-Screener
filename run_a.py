@@ -4,8 +4,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime, requests, json, re, concurrent.futures, warnings, traceback, time
 from collections import defaultdict
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import io
-import urllib.parse
+import threading
 
 warnings.filterwarnings('ignore')
 
@@ -29,56 +31,51 @@ def parse_val(val, is_pct=False):
     except: return 0.0
 
 # ==========================================
-# 🛡️ 核心武器：独立短连接 + 自动节点跃迁引擎
+# 🛡️ 核心武器：线程隔离的专属 Session (完美绕过 CC 拦截与线程冲突)
 # ==========================================
+thread_local = threading.local()
+
+def get_session():
+    """为每个线程分配独立的会话通道，保持 Keep-Alive 且互不干扰"""
+    if not hasattr(thread_local, "session"):
+        s = requests.Session()
+        retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+        # 连接池大小适当缩小，避免占用过多句柄
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=5, pool_maxsize=5)
+        s.mount('http://', adapter)
+        s.mount('https://', adapter)
+        s.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://quote.eastmoney.com/',
+            'Accept': '*/*',
+            'Connection': 'keep-alive'
+        })
+        thread_local.session = s
+    return thread_local.session
+
 def safe_fetch(url, params=None):
-    """
-    终极防断连下载器：
-    1. 强制 HTTPS 协议
-    2. Connection: close 避免多线程复用死连接引发 RemoteDisconnected
-    3. 如果主节点卡死，自动秒切备用 CDN 节点
-    """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://quote.eastmoney.com/',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Connection': 'close'  # 核心修复点：绝不复用连接
-    }
-    
-    parsed = urllib.parse.urlparse(url)
-    base_host = parsed.netloc
-    
-    # 东方财富隐藏的备用 CDN 节点
-    if 'push2his' in base_host:
-        prefixes = ['', '1.', '82.', '99.']
-        base_domain = 'push2his.eastmoney.com'
-    else:
-        prefixes = ['', '1.', '82.', '99.']
-        base_domain = 'push2.eastmoney.com'
-        
-    for prefix in prefixes:
-        target_host = f"{prefix}{base_domain}"
-        target_url = url.replace(base_host, target_host)
+    """自带退避重试的安全网络请求器"""
+    session = get_session()
+    for attempt in range(4):
         try:
-            res = requests.get(target_url, params=params, headers=headers, timeout=6)
+            res = session.get(url, params=params, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 if data: return data
-        except Exception:
-            time.sleep(0.5)
-            continue
-            
+        except Exception as e:
+            # 遇到阻断时，强制休眠，呈指数级退避，伪装人类延迟
+            time.sleep(1 + attempt)
     return None
 
 # ==========================================
 # 2. 板块宏观模型
 # ==========================================
 def get_core_tickers_from_sheet():
-    print("\n🌍[STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
+    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
-            res = requests.get(csv_url, timeout=10)
+            res = get_session().get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
         except Exception as e:
@@ -144,7 +141,7 @@ def get_core_tickers_from_sheet():
                 if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
                     target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
         
-        print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的池！")
+        print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的！")
         return list(target_tickers)
     except Exception as e: 
         print(f"   -> ⚠️ 板块读取遇到阻碍 ({str(e)})，系统将自动切入全市场盲扫！")
@@ -321,7 +318,7 @@ def process_single_stock(row):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (彻底解除连接池封印版) ==========")
+    print("\n========== A股 猎手三引擎版 (最终无懈可击版) ==========")
     
     core_tickers = get_core_tickers_from_sheet()
     spot_df = get_eastmoney_market_snapshot()
@@ -340,7 +337,7 @@ def screen_a_shares():
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
     if core_tickers:
-        print(f"\n🎯[STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
+        print(f"\n🎯 [STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
     else:
         print(f"\n🌊 [STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
@@ -353,7 +350,7 @@ def screen_a_shares():
     fail_reasons = defaultdict(int)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        # 不再传递 session 对象，每个线程将建立自己的干净短连接
+        # 每个线程都会自动获取属于自己的安全连接，互不冲突
         futures = {executor.submit(process_single_stock, row): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
