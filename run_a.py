@@ -137,18 +137,12 @@ def get_eastmoney_market_snapshot(session):
 # 4. 战术分析：神奇九转 TD9 底层引擎
 # ==========================================
 def check_td9_or_oversold(closes):
-    """
-    侦测底部结构：神奇九转买入结构 (连续9天收盘价低于4天前的收盘价)
-    或近期 RSI 极度超卖（代表 T.U.A.W 的 "B" 信号前兆）
-    """
-    # 1. 查近5天内是否有TD9成型
     for offset in range(5):
         idx = len(closes) - 1 - offset
         if idx >= 13:
             if all(closes[idx-i] < closes[idx-i-4] for i in range(9)):
                 return True
                 
-    # 2. 查近3天是否形成 RSI < 35 的黄金坑超卖区
     deltas = np.diff(closes[-30:])
     up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
@@ -182,6 +176,12 @@ def process_single_stock(row, session):
         if not klines: return {"status": "fail", "reason": "无K线"}
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
+        
+        # 🛡️【核心修复1：盘前无数据自动清理器】
+        # 如果检测到今天是 0 成交量（盘前或停牌），将其弹出，系统自动回测昨日 K 线！
+        while len(valid_klines) > 0 and float(valid_klines[-1][5]) == 0:
+            valid_klines.pop()
+            
         if len(valid_klines) < 250: return {"status": "fail", "reason": "次新/退市"}
 
         k_matrix = np.array(valid_klines)
@@ -192,17 +192,18 @@ def process_single_stock(row, session):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
-        last_amount = amounts[-1]
-        last_turnover = turnovers[-1]
+        # 🛡️【核心修复2：全天候流动性平滑器】
+        # 使用近5日平均成交额，代替单日成交额。避免在早盘9:45时因为当日量没走完被误杀！
+        avg_amount_5 = np.mean(amounts[-5:])
+        avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
         
-        # 基础防坑过滤
-        if last_amount < 150000000: return {"status": "fail", "reason": "成交额<1.5亿"}
-        if last_turnover < 0.6 and last_amount < 300000000: return {"status": "fail", "reason": "流动性不足"}
+        if avg_amount_5 < 150000000: return {"status": "fail", "reason": "五日均成交额<1.5亿"}
+        if avg_turnover_5 < 0.6 and avg_amount_5 < 300000000: return {"status": "fail", "reason": "流动性不足"}
 
         ma20 = np.mean(closes[-20:])
         ma50 = np.mean(closes[-50:])
-        ma60 = np.mean(closes[-60:])  # 新增 60日生命线
+        ma60 = np.mean(closes[-60:])  
         ma150 = np.mean(closes[-150:])
         ma200 = np.mean(closes[-200:])
         
@@ -214,26 +215,22 @@ def process_single_stock(row, session):
         pct_change_3d = (close - closes[-4]) / closes[-4] if closes[-4] > 0 else 0
         vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
 
-        # 计算 RSI
         deltas = np.diff(closes[-30:])
         up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
         rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
 
         # ==========================================
-        # 🌟 三大主力战法引擎 (The Three Engines)
+        # 🌟 三大主力战法引擎 
         # ==========================================
-        
-        # 【Engine A：右侧突破 (极速起飞)】
         is_breakout = (
             close > ma20 and close > ma50 and 
             pct_change_3d >= 0.045 and 
             np.max(vols[-3:]) / avg_v50 >= 1.5 and 
             rsi >= 60 and 
-            (ma50 > ma150 and ma150 > ma200) # 长线不能崩
+            (ma50 > ma150 and ma150 > ma200) 
         )
         
-        # 【Engine B：左侧伏击 (缩量踩均线)】
         is_ambush = (
             ((abs(close - ma20)/ma20 < 0.04) or (abs(close - ma50)/ma50 < 0.04)) and 
             vol_ratio_today < 1.1 and 
@@ -242,26 +239,18 @@ def process_single_stock(row, session):
             (ma50 > ma150 and ma150 > ma200)
         )
 
-        # 🎯【Engine C：黄金坑 / 午后定音】(专抓"鲁西化工"这类大牛股回头)
-        # 1. 大盘底蕴：市值 > 100亿 (过滤庄股)
-        c_large_cap = row['mktcap'] >= 10000000000
-        # 2. 长线王者：120日收益率 > 15% (必须证明有长线大资金驻扎)
+        c_large_cap = float(row.get('mktcap', 0)) >= 10000000000
         c_ret_120 = (close - closes[-121]) / closes[-121] > 0.15
-        # 3. 完美洗盘：距离近期高点 -10% 到 -25% 之间 (跌破吓人，但不破位)
         c_dist_h60 = (close - h60) / h60
         c_golden_pit = -0.25 <= c_dist_h60 <= -0.05 
-        # 4. 生命线支撑：近期跌破过 MA20，但死死踩在 MA60 生命线之上
         c_support = close >= ma60 * 0.98 and (closes[-2] < ma20 or close < ma20 * 1.03)
-        # 5. 点火探明拐点：今日涨幅 > 3% 且 量比 > 1.5，或者出现底部九转/B点信号
         c_ignite = (pct_change_today > 0.03 and vol_ratio_today > 1.5) or check_td9_or_oversold(closes)
 
         is_golden_pit_dragon = c_large_cap and c_ret_120 and c_golden_pit and c_support and c_ignite
 
-        # ------------------- 终极裁决 -------------------
         if not (is_breakout or is_ambush or is_golden_pit_dragon):
             return {"status": "fail", "reason": "未达三大战法标准"}
 
-        # 优先打上最高优先级的标签
         if is_golden_pit_dragon:
             trend_status = "🐉 黄金坑反转(午后定音)"
         elif is_breakout:
@@ -277,11 +266,11 @@ def process_single_stock(row, session):
             "Type": trend_status,  
             "60D_Return%": f"{round(ret_60 * 100, 2)}%",
             "RSI": round(rsi, 2), 
-            "Turnover_Rate%": f"{last_turnover}%", 
+            "Turnover_Rate%": f"{turnovers[-1]}%", 
             "Vol_Ratio": round(vol_ratio_today, 2),
             "Dist_High%": f"{round(((close - h250) / h250) * 100, 2)}%",
-            "Mkt_Cap(亿)": round(row['mktcap'] / 100000000, 2), 
-            "Turnover(亿)": round(last_amount / 100000000, 2)
+            "Mkt_Cap(亿)": round(float(row.get('mktcap', 0)) / 100000000, 2), 
+            "Turnover(亿)": round(amounts[-1] / 100000000, 2)
         }
         return {"status": "success", "data": data}
         
@@ -292,7 +281,7 @@ def process_single_stock(row, session):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (新增: 🐉黄金坑午后定音池) ==========")
+    print("\n========== A股 猎手三引擎版 (新增盘前护盾) ==========")
     session = get_robust_session()
     core_tickers = get_core_tickers_from_sheet(session)
     spot_df = get_eastmoney_market_snapshot(session)
@@ -302,8 +291,11 @@ def screen_a_shares():
     for col in['trade', 'prev_close', 'mktcap']: 
         spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     
+    # 🛡️【核心修复3：市值与价格的盘前填平】
     spot_df['trade'] = spot_df['trade'].fillna(spot_df['prev_close'])
     spot_df.loc[spot_df['trade'] == 0, 'trade'] = spot_df['prev_close']
+    spot_df['mktcap'] = spot_df['mktcap'].fillna(0) # 防止市值NaN导致Pandas报错
+    
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
     if core_tickers:
@@ -364,4 +356,4 @@ if __name__ == "__main__":
     except Exception as e:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         error_info = traceback.format_exc()
-        write_to_sheet("A-Share Screener", [], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
+        write_to_sheet("A-Share Screener",[], "60D_Return%", diag_msg=f"[{now}] 致命崩溃:\n{error_info}")
