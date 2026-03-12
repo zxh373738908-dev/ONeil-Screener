@@ -45,14 +45,15 @@ def get_robust_session():
 # 2. 板块宏观模型
 # ==========================================
 def get_core_tickers_from_sheet(session):
-    print("\n🌍[STEP 1] 尝试连接宏观大盘，寻找热点板块...")
+    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
             res = session.get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
-        except:
+        except Exception as e:
+            print(f"   -> ⚠️ CSV 快读失败 ({e})，降级使用 API 读取...")
             doc = client.open_by_url(SECTOR_SHEET_URL)
             raw_data = doc.worksheets()[0].get_all_values()
             raw_df = pd.DataFrame(raw_data)
@@ -74,6 +75,11 @@ def get_core_tickers_from_sheet(session):
         r60 = df[r60_col].apply(lambda x: parse_val(x, True))
         target_etfs = df[(r120 > 20.0) & (r60 > 0)][name_col].tolist()
         
+        if not target_etfs:
+            print("   -> ⚠️ 当前市场无符合条件的长线热点板块。")
+            return[]
+
+        print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，正在映射 A 股成分股...")
         boards_map = {}
         for url in[
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
@@ -110,13 +116,18 @@ def get_core_tickers_from_sheet(session):
                     cons = session.get(list_url, timeout=5).json()
                     target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
                 except: pass
+        
+        print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的池！")
         return list(target_tickers)
-    except: return[]
+    except Exception as e: 
+        print(f"   -> ⚠️ 板块读取遇到阻碍 ({str(e)})，系统将自动切入全市场盲扫！")
+        return[]
 
 # ==========================================
 # 3. 大盘扫描器
 # ==========================================
 def get_eastmoney_market_snapshot(session):
+    print("\n🚀 [STEP 2] 启动【东方财富】引擎：抓取全市场 A 股快照...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
@@ -124,13 +135,18 @@ def get_eastmoney_market_snapshot(session):
         "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": "f12,f14,f2,f18,f20"
     }
-    for _ in range(3):
+    for attempt in range(3):
         try:
             res = session.get(url, params=params, timeout=10).json()
-            df = pd.DataFrame(res['data']['diff'])
-            df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-            return df
-        except: time.sleep(1)
+            if res and 'data' in res and res['data'] and 'diff' in res['data']:
+                df = pd.DataFrame(res['data']['diff'])
+                df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
+                print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的盘前/盘中基础数据！")
+                return df
+        except Exception as e: 
+            print(f"   -> ⚠️ 第 {attempt+1} 次获取大盘失败，重试中...")
+            time.sleep(1)
+    print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
     return pd.DataFrame()
 
 # ==========================================
@@ -178,9 +194,13 @@ def process_single_stock(row, session):
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
         # 🛡️【核心修复1：盘前无数据自动清理器】
-        # 如果检测到今天是 0 成交量（盘前或停牌），将其弹出，系统自动回测昨日 K 线！
-        while len(valid_klines) > 0 and float(valid_klines[-1][5]) == 0:
-            valid_klines.pop()
+        # 早盘(8:30-9:29)抓取的最后一根K线成交量是0，系统直接弹出它，无缝启用“昨日逻辑”计算！
+        while len(valid_klines) > 0:
+            try:
+                vol = float(valid_klines[-1][5])
+                if vol == 0: valid_klines.pop()
+                else: break
+            except: valid_klines.pop()
             
         if len(valid_klines) < 250: return {"status": "fail", "reason": "次新/退市"}
 
@@ -192,8 +212,7 @@ def process_single_stock(row, session):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
-        # 🛡️【核心修复2：全天候流动性平滑器】
-        # 使用近5日平均成交额，代替单日成交额。避免在早盘9:45时因为当日量没走完被误杀！
+        # 🛡️【核心修复2：全天候流动性平滑器】(解决盘初成交额未达标被错杀)
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -239,7 +258,10 @@ def process_single_stock(row, session):
             (ma50 > ma150 and ma150 > ma200)
         )
 
-        c_large_cap = float(row.get('mktcap', 0)) >= 10000000000
+        # 防护措施：防止 mktcap 出现 NaN
+        mktcap_val = float(row['mktcap']) if pd.notna(row['mktcap']) else 0
+        
+        c_large_cap = mktcap_val >= 10000000000
         c_ret_120 = (close - closes[-121]) / closes[-121] > 0.15
         c_dist_h60 = (close - h60) / h60
         c_golden_pit = -0.25 <= c_dist_h60 <= -0.05 
@@ -269,7 +291,7 @@ def process_single_stock(row, session):
             "Turnover_Rate%": f"{turnovers[-1]}%", 
             "Vol_Ratio": round(vol_ratio_today, 2),
             "Dist_High%": f"{round(((close - h250) / h250) * 100, 2)}%",
-            "Mkt_Cap(亿)": round(float(row.get('mktcap', 0)) / 100000000, 2), 
+            "Mkt_Cap(亿)": round(mktcap_val / 100000000, 2), 
             "Turnover(亿)": round(amounts[-1] / 100000000, 2)
         }
         return {"status": "success", "data": data}
@@ -281,31 +303,35 @@ def process_single_stock(row, session):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (新增盘前护盾) ==========")
+    print("\n========== A股 猎手三引擎版 (修复盘前隐身问题) ==========")
     session = get_robust_session()
+    
     core_tickers = get_core_tickers_from_sheet(session)
     spot_df = get_eastmoney_market_snapshot(session)
-    if spot_df.empty: return[], "❌ 大盘数据为空"
+    
+    if spot_df.empty: 
+        return[], "❌ 大盘数据为空"
     
     total = len(spot_df)
     for col in['trade', 'prev_close', 'mktcap']: 
         spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
     
-    # 🛡️【核心修复3：市值与价格的盘前填平】
+    # 🛡️【核心修复3：盘前价格与市值的神级填平】
     spot_df['trade'] = spot_df['trade'].fillna(spot_df['prev_close'])
     spot_df.loc[spot_df['trade'] == 0, 'trade'] = spot_df['prev_close']
-    spot_df['mktcap'] = spot_df['mktcap'].fillna(0) # 防止市值NaN导致Pandas报错
+    spot_df['mktcap'] = spot_df['mktcap'].fillna(0)
     
     spot_df['pure_code'] = spot_df['code'].apply(lambda x: str(x)[-6:])
     
     if core_tickers:
-        print(f"🎯 启用主线模式：将仅扫描板块提取出的 {len(core_tickers)} 只标的。")
+        print(f"\n🎯 [STEP 3] 启用【主线狙击】模式：专注扫描 {len(core_tickers)} 只标的！")
         f_df = spot_df[spot_df['pure_code'].isin(core_tickers)].copy()
     else:
+        print(f"\n🌊 [STEP 3] 启用【全景扫雷】模式：对全市场 {total} 只股票进行清洗！")
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
-    print(f"💰 基础过滤完成：剩余 {len(f_df)} 只候选标的！启动并发引擎...")
+    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！正在全速并发演算（约需 30 秒，请稍候）...")
     
     final_stocks =[]
     fail_reasons = defaultdict(int)
@@ -328,6 +354,7 @@ def screen_a_shares():
     return final_stocks, diag_msg
 
 def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
+    print("\n📝 [STEP 4] 正在将绝密作战名单写入 Google Sheets 表格...")
     try:
         sheet = client.open_by_url(OUTPUT_SHEET_URL).worksheet(sheet_name)
         sheet.clear()
@@ -344,10 +371,14 @@ def write_to_sheet(sheet_name, final_stocks, sort_col, diag_msg=None):
             sheet.update_acell("M1", "Last Updated:")
             sheet.update_acell("N1", now)
             if diag_msg: sheet.update_acell("O1", diag_msg)
-            print(f"🎉 成功将前 {len(df)} 只最强龙头写入表格！")
+            print(f"🎉 大功告成！已成功将 {len(df)} 只最强龙头送达指挥部！")
+            print(f"\n{diag_msg}")
         else:
             sheet.update_acell("A1", diag_msg if diag_msg else "无符合条件的股票。")
-    except Exception as e: print(f"❌ 写入失败: {e}")
+            print("⚠️ 筛选完毕：当前战局恶劣，未发现任何符合狙击条件的标的。已写入空仓诊断报告！")
+            print(f"\n{diag_msg}")
+    except Exception as e: 
+        print(f"❌ 写入失败，原因: {e}")
 
 if __name__ == "__main__":
     try:
