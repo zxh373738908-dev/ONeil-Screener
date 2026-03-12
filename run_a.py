@@ -2,11 +2,13 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, concurrent.futures, warnings, traceback, time
+import datetime, requests, json, re, concurrent.futures, warnings, traceback, random, time
 from collections import defaultdict
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import io
-import urllib.request
 import urllib.parse
+import threading
 
 warnings.filterwarnings('ignore')
 
@@ -30,56 +32,65 @@ def parse_val(val, is_pct=False):
     except: return 0.0
 
 # ==========================================
-# 🛡️ 终极破壁引擎：原生系统级通信 (无视爬虫指纹拦截)
+# 🛡️ 核心武器 1：线程隔离的专属通道 (防冲突)
 # ==========================================
-def fetch_em_json(url, params=None):
-    """
-    三层递进防御穿透系统：
-    1. 尝试 requests
-    2. 如果被 TLS 拦截，降维使用 Python 原生系统网络层 urllib (无指纹)
-    3. 如果主节点被封 IP，自动跃迁到备用节点
-    """
-    if params:
-        query = urllib.parse.urlencode(params)
-        url = url + ("&" if "?" in url else "?") + query
-        
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://quote.eastmoney.com/'
-    }
+thread_local = threading.local()
+
+def get_session():
+    if not hasattr(thread_local, "session"):
+        s = requests.Session()
+        retry = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        s.mount('http://', adapter)
+        s.mount('https://', adapter)
+        # 伪装国内真实用户 IP，降低被 WAF 关注的概率
+        ip = f"114.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}"
+        s.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Referer': 'https://quote.eastmoney.com/',
+            'X-Forwarded-For': ip,
+            'Client-IP': ip,
+            'Connection': 'keep-alive'
+        })
+        thread_local.session = s
+    return thread_local.session
+
+# ==========================================
+# 🛡️ 核心武器 2：星链 CDN 节点跃迁 (防 IP 封锁)
+# ==========================================
+def safe_em_request(session, url, params=None):
+    """如果主节点被封锁，自动在全国 99 个底层节点中跃迁，直到成功"""
+    parsed = urllib.parse.urlparse(url)
+    original_domain = parsed.netloc
+    is_his = 'push2his' in original_domain
+    prefix = 'push2his' if is_his else 'push2'
     
-    # 方案 A: 极速模式
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200: return res.json()
-    except Exception: pass
+    # 构建跃迁节点池 (主节点 + 8 个随机隐藏节点)
+    nodes = [original_domain] +[f"{random.randint(1, 99)}.{prefix}.eastmoney.com" for _ in range(8)]
     
-    # 方案 B: 操作系统底层穿透 (专破 Github Actions 封锁)
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception: pass
-    
-    # 方案 C: 备用节点降维打击
-    alt_url = url.replace("https://", "http://").replace("push2.", "82.push2.").replace("push2his.", "82.push2his.")
-    try:
-        req = urllib.request.Request(alt_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception: pass
-    
+    for node in nodes:
+        target_url = url.replace(original_domain, node)
+        try:
+            res = session.get(target_url, params=params, timeout=6)
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                    if data: return data
+                except Exception: pass
+        except Exception:
+            time.sleep(0.2)
+            continue
     return None
 
 # ==========================================
 # 2. 板块宏观模型
 # ==========================================
 def get_core_tickers_from_sheet():
-    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
+    print("\n🌍[STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
-            res = requests.get(csv_url, timeout=10)
+            res = get_session().get(csv_url, timeout=10)
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
         except Exception:
@@ -109,13 +120,13 @@ def get_core_tickers_from_sheet():
             print("   -> ⚠️ 当前市场无符合条件的长线热点板块。")
             return[]
 
-        print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，正在映射 A 股成分股...")
+        print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，启动星链穿透...")
         boards_map = {}
         for url in[
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
         ]:
-            data = fetch_em_json(url)
+            data = safe_em_request(get_session(), url)
             if data and 'data' in data and data['data']:
                 for item in data['data']['diff']: boards_map[item['f14']] = item['f12']
                 
@@ -141,11 +152,11 @@ def get_core_tickers_from_sheet():
             
             for b_code in matched_b_codes:
                 list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
-                cons = fetch_em_json(list_url)
+                cons = safe_em_request(get_session(), list_url)
                 if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
                     target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
         
-        print(f"   -> 🎯 板块映射完成，共提取 {len(target_tickers)} 只主线标的！")
+        print(f"   -> 🎯 板块穿透映射完成，共提取 {len(target_tickers)} 只主线标的！")
         return list(target_tickers)
     except Exception as e: 
         print(f"   -> ⚠️ 板块读取遇到阻碍 ({str(e)})，系统将自动切入全市场盲扫！")
@@ -155,7 +166,7 @@ def get_core_tickers_from_sheet():
 # 3. 大盘扫描器
 # ==========================================
 def get_eastmoney_market_snapshot():
-    print("\n🚀 [STEP 2] 启动【东方财富】底层穿透引擎：抓取全市场 A 股快照...")
+    print("\n🚀 [STEP 2] 启动【东方财富】星链引擎：抓取全市场 A 股快照...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
@@ -164,11 +175,11 @@ def get_eastmoney_market_snapshot():
         "fields": "f12,f14,f2,f18,f20"
     }
     
-    data = fetch_em_json(url, params=params)
+    data = safe_em_request(get_session(), url, params=params)
     if data and 'data' in data and data['data'] and 'diff' in data['data']:
         df = pd.DataFrame(data['data']['diff'])
         df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-        print(f"   -> ✅ 成功突破防火墙！抓取全市场 {len(df)} 只股票的基础数据！")
+        print(f"   -> ✅ 成功突破封锁！抓取全市场 {len(df)} 只股票的基础数据！")
         return df
         
     print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
@@ -196,7 +207,7 @@ def check_td9_or_oversold(closes):
 # ==========================================
 def fetch_kline_data(secid):
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
-    data = fetch_em_json(url)
+    data = safe_em_request(get_session(), url)
     if data and 'data' in data and data['data'] and 'klines' in data['data']:
         return data['data']['klines']
     return None
@@ -215,7 +226,7 @@ def process_single_stock(row):
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
-        # 盘前修正，完美防早盘0量错杀
+        # 🛡️ 盘前 0 交易量自动清理，防早盘被错杀
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -233,6 +244,7 @@ def process_single_stock(row):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
+        # 五日均量防止早盘错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -287,6 +299,7 @@ def process_single_stock(row):
         c_support = close >= ma60 * 0.98 and (closes[-2] < ma20 or close < ma20 * 1.03)
         c_ignite = (pct_change_today > 0.03 and vol_ratio_today > 1.5) or check_td9_or_oversold(closes)
 
+        # 🐉 Engine C：专抓鲁西化工黄金坑
         is_golden_pit_dragon = c_large_cap and c_ret_120 and c_golden_pit and c_support and c_ignite
 
         if not (is_breakout or is_ambush or is_golden_pit_dragon):
@@ -322,7 +335,7 @@ def process_single_stock(row):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (原生系统级破壁防封版) ==========")
+    print("\n========== A股 猎手三引擎版 (星链边缘跃迁版) ==========")
     
     core_tickers = get_core_tickers_from_sheet()
     spot_df = get_eastmoney_market_snapshot()
@@ -348,14 +361,12 @@ def screen_a_shares():
         f_df = spot_df.copy()
         
     f_df = f_df[(f_df['trade'] >= 5) & (f_df['mktcap'] >= 4000000000)].copy()
-    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！")
-    print(f"   -> ⚠️ 为了防范被东方财富识别为 CC 攻击，已开启智能降速并发（约需 45 秒，请稍候）...")
+    print(f"   -> 💰 剔除极小盘和仙股后，剩余 {len(f_df)} 只候选标的！正在全速并发演算（约需 30 秒，请稍候）...")
     
     final_stocks =[]
     fail_reasons = defaultdict(int)
 
-    # 🛡️ 降低并发数量，从 12 降低到 8，伪装成正常网速，避免触发 IP 保护
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
         futures = {executor.submit(process_single_stock, row): row['code'] for _, row in f_df.iterrows()}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
