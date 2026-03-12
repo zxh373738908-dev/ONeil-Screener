@@ -2,9 +2,9 @@ name: A-Share Screener
 
 on:
   schedule:
-    # 每天 UTC 时间 08:30 运行 (北京时间下午 4:30)
+    # 每天 UTC 时间 08:30 运行 (北京时间下午 4:30，完美避开数据延迟期)
     - cron: '30 8 * * 1-5'
-  workflow_dispatch:
+  workflow_dispatch: # 允许在 GitHub 网页上手动点击运行按钮
 
 # 消除 Node.js 20 老化警告的关键配置！👇
 env:
