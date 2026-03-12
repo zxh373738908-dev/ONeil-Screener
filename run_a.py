@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, time, warnings, traceback
+import datetime, time, warnings
 import yfinance as yf
 import akshare as ak
 import logging
@@ -28,58 +28,83 @@ def get_worksheet():
         return doc.add_worksheet(title="A-Share Screener", rows=100, cols=20)
 
 # ==========================================
-# 🛡️ STEP 1: 获取 A 股名册 (三重容错脱壳机制)
+# 🛡️ STEP 1: 获取 A 股名册 (四重高弹容错机制)
 # ==========================================
+def clean_stock_list(df):
+    """提取清洗函数：统一格式化为 6 位代码，并剔除 ST 股"""
+    df['code'] = df['code'].astype(str).str.zfill(6)
+    df = df[~df['name'].astype(str).str.contains('ST', case=False)]
+    print(f"   -> ✅ 脱壳成功！拉取到全市场 {len(df)} 只正常交易标的。")
+    return df[['code', 'name']]
+
 def get_a_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：从云端获取全市场名册...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：尝试多重链路获取全市场名册...")
     
-    # 【首选】方案 1: 东方财富接口 (速度极快，防封锁能力极强)
-    try:
-        print("   -> 尝试获取东方财富全市场 A 股...")
-        df = ak.stock_zh_a_spot_em()
-        if not df.empty and "代码" in df.columns and "名称" in df.columns:
-            df = df.rename(columns={"代码": "code", "名称": "name"})
-            df['code'] = df['code'].astype(str).str.zfill(6) # 安全补齐6位数
-            df = df[~df['name'].astype(str).str.contains('ST')]
-            print(f"   -> ✅ 成功通过东方财富接口拉取 {len(df)} 只标的！")
-            return df[['code', 'name']]
-    except Exception as e:
-        print(f"   -> ⚠️ 东方财富接口受阻: {e}")
-
-    # 【备选】方案 2: 官方 A 股名册
-    try:
-        print("   -> 尝试获取官方 A 股名册...")
-        df = ak.stock_info_a_code_name()
-        if not df.empty:
-            if "代码" in df.columns and "名称" in df.columns:
+    # 链路 1: 东方财富 (带重试机制，应对海外 IP 间歇性断连)
+    for attempt in range(2):
+        try:
+            print(f"   -> 尝试【链路1: 东方财富】(第 {attempt+1} 次尝试)...")
+            df = ak.stock_zh_a_spot_em()
+            if not df.empty and "代码" in df.columns:
                 df = df.rename(columns={"代码": "code", "名称": "name"})
-            df['code'] = df['code'].astype(str).str.zfill(6)
-            df = df[~df['name'].astype(str).str.contains('ST')]
-            print(f"   -> ✅ 成功拉取到全市场 {len(df)} 只正常交易标的。")
-            return df[['code', 'name']]
-    except Exception as e:
-        print(f"   -> ⚠️ 官方名册接口受阻: {e}")
+                return clean_stock_list(df)
+        except Exception as e:
+            print(f"   -> ⚠️ 链路1受阻: {e}")
+            time.sleep(2) # 避开瞬时封锁，停顿后重试
 
-    # 【底牌】方案 3: 交易所直连
+    # 链路 2: 新浪备用
     try:
-        print("   -> 尝试组合上交所/深交所列表...")
-        sh_df = ak.stock_info_sh_name_code(indicator="主板A股")
-        sz_df = ak.stock_info_sz_name_code(indicator="A股列表")
-        
-        sh = sh_df.iloc[:, [0, 1]].copy()
-        sh.columns = ['code', 'name']
-        sz = sz_df.iloc[:, [0, 1]].copy()
-        sz.columns = ['code', 'name']
-        
-        df = pd.concat([sh, sz], ignore_index=True)
-        df['code'] = df['code'].astype(str).str.zfill(6)
-        df = df[~df['name'].astype(str).str.contains('ST')]
-        print(f"   -> ✅ 成功绕过封锁！拉取到全市场 {len(df)} 只正常交易标的。")
-        return df[['code', 'name']]
+        print("   -> 尝试【链路2: 新浪财经】...")
+        df = ak.stock_zh_a_spot()
+        if not df.empty and "代码" in df.columns:
+            df = df.rename(columns={"代码": "code", "名称": "name"})
+            return clean_stock_list(df)
     except Exception as e:
-        print(f"   -> ⚠️ 交易所直连受阻: {e}")
+        print(f"   -> ⚠️ 链路2受阻: {e}")
 
-    print("   -> ❌ 所有获取接口均失败！请检查网络状态或稍后再试。")
+    # 链路 3: 官方综合名册
+    try:
+        print("   -> 尝试【链路3: 官方全名册】...")
+        df = ak.stock_info_a_code_name()
+        if not df.empty and "代码" in df.columns:
+            df = df.rename(columns={"代码": "code", "名称": "name"})
+            return clean_stock_list(df)
+    except Exception as e:
+        print(f"   -> ⚠️ 链路3受阻: {e}")
+
+    # 链路 4: 交易所直连 (终极保底，已修复 akshare 新老版本参数变更漏洞)
+    try:
+        print("   -> 尝试【链路4: 沪深交易所直连】绕过通用代理...")
+        
+        # 兼容不同版本 akshare 的参数自适应捕获
+        try:
+            sh_df = ak.stock_info_sh_name_code(symbol="主板A股")
+        except TypeError:
+            try:
+                sh_df = ak.stock_info_sh_name_code(indicator="主板A股")
+            except TypeError:
+                sh_df = ak.stock_info_sh_name_code()
+                
+        try:
+            sz_df = ak.stock_info_sz_name_code(symbol="A股列表")
+        except TypeError:
+            try:
+                sz_df = ak.stock_info_sz_name_code(indicator="A股列表")
+            except TypeError:
+                sz_df = ak.stock_info_sz_name_code()
+
+        sh_df = sh_df.iloc[:, [0, 1]].copy()
+        sh_df.columns = ['code', 'name']
+        
+        sz_df = sz_df.iloc[:, [0, 1]].copy()
+        sz_df.columns = ['code', 'name']
+        
+        df = pd.concat([sh_df, sz_df], ignore_index=True)
+        return clean_stock_list(df)
+        
+    except Exception as e:
+        print(f"   -> ⚠️ 链路4受阻: {e}")
+
     return pd.DataFrame()
 
 # ==========================================
@@ -214,10 +239,10 @@ def write_sheet(data):
 # MAIN
 # ==========================================
 def main():
-    print("\n========== A股猎手系统 V7.2 (天基武器防壁破甲版) ==========")
+    print("\n========== A股猎手系统 V7.3 (全链路防弹自愈版) ==========")
     df_list = get_a_share_list()
     if df_list.empty: 
-        print("程序终止：未能获取股票列表。")
+        print("\n❌ 严重错误：四重链路均被服务器拦截，未能获取股票列表。请稍后再试，或考虑在本地运行。")
         return
     
     data = scan_market_via_yfinance(df_list)
