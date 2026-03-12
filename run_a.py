@@ -29,7 +29,6 @@ def parse_val(val, is_pct=False):
         return f
     except: return 0.0
 
-# 🌟【完美还原】：使用您原版最平顺、最隐蔽的网络请求头，去除了会触发拦截的底层修改
 def get_robust_session():
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
@@ -38,17 +37,17 @@ def get_robust_session():
     session.mount('https://', adapter)
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://quote.eastmoney.com/',
+        'Referer': 'http://quote.eastmoney.com/',
         'Accept': '*/*',
         'Connection': 'keep-alive'
     })
     return session
 
 # ==========================================
-# 2. 板块宏观模型
+# 2. 板块宏观模型 (全面切换至 HTTP 协议绕过防火墙)
 # ==========================================
 def get_core_tickers_from_sheet(session):
-    print("\n🌍[STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
+    print("\n🌍 [STEP 1] 正在同步 Google Sheets 宏观大盘，寻找热点板块...")
     try:
         csv_url = SECTOR_SHEET_URL.replace("/edit?", "/export?format=csv&").replace("#gid=", "&gid=")
         try:
@@ -56,7 +55,7 @@ def get_core_tickers_from_sheet(session):
             res.raise_for_status()
             raw_df = pd.read_csv(io.StringIO(res.text), header=None)
         except Exception as e:
-            print(f"   -> ⚠️ CSV 快读受阻，自动降级使用安全 API 读取...")
+            print(f"   -> ⚠️ CSV 快读受阻，自动降级使用 API 读取...")
             doc = client.open_by_url(SECTOR_SHEET_URL)
             raw_data = doc.worksheets()[0].get_all_values()
             raw_df = pd.DataFrame(raw_data)
@@ -84,17 +83,19 @@ def get_core_tickers_from_sheet(session):
 
         print(f"   -> ✅ 成功锁定 {len(target_etfs)} 个热点ETF，正在映射 A 股成分股...")
         boards_map = {}
+        # 🛡️ 降维打击：改用 http://
         for url in[
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
-            "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
+            "http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14",
+            "http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f12,f14"
         ]:
-            for _ in range(3):
+            for attempt in range(3):
                 try:
                     res = session.get(url, timeout=5).json()
                     if res and 'data' in res and res['data']:
                         for item in res['data']['diff']: boards_map[item['f14']] = item['f12']
                     break
-                except: time.sleep(1)
+                except Exception as e: 
+                    time.sleep(1)
                 
         target_tickers = set()
         synonyms = {"化工":["化工行业", "磷化工", "煤化工", "基础化工", "化肥行业"]} 
@@ -119,7 +120,8 @@ def get_core_tickers_from_sheet(session):
             for b_code in matched_b_codes:
                 for _ in range(3):
                     try:
-                        list_url = f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
+                        # 🛡️ 降维打击：改用 http://
+                        list_url = f"http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b:{b_code}&fields=f12"
                         cons = session.get(list_url, timeout=5).json()
                         if cons and 'data' in cons and cons['data'] and 'diff' in cons['data']:
                             target_tickers.update([str(i['f12']).zfill(6) for i in cons['data']['diff']])
@@ -133,11 +135,13 @@ def get_core_tickers_from_sheet(session):
         return[]
 
 # ==========================================
-# 3. 大盘扫描器 (恢复您原代码的 URL パラメーター)
+# 3. 大盘扫描器
 # ==========================================
 def get_eastmoney_market_snapshot(session):
     print("\n🚀 [STEP 2] 启动【东方财富】引擎：抓取全市场 A 股快照...")
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    # 🛡️ 降维打击：改用 http://
+    url = "http://push2.eastmoney.com/api/qt/clist/get"
+    # 恢复您最初的参数配置
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
         "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": "2", "invt": "2",
@@ -150,11 +154,11 @@ def get_eastmoney_market_snapshot(session):
             if res and 'data' in res and res['data'] and 'diff' in res['data']:
                 df = pd.DataFrame(res['data']['diff'])
                 df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-                print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的盘前/盘中基础数据！")
+                print(f"   -> ✅ 成功抓取全市场 {len(df)} 只股票的基础数据！")
                 return df
         except Exception as e: 
-            print(f"   -> ⚠️ 第 {attempt+1} 次获取大盘失败，重试中...")
-            time.sleep(1)
+            print(f"   -> ⚠️ 第 {attempt+1} 次获取大盘失败 ({e})，重试中...")
+            time.sleep(1.5)
     print("   -> ❌ 致命错误：大盘基础数据抓取失败！")
     return pd.DataFrame()
 
@@ -179,7 +183,8 @@ def check_td9_or_oversold(closes):
 # 5. K线运算与【三大主力战法】逻辑
 # ==========================================
 def fetch_kline_data(secid, session):
-    url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
+    # 🛡️ 降维打击：改用 http://
+    url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
     for _ in range(3):
         try:
             res = session.get(url, timeout=4)
@@ -205,7 +210,7 @@ def process_single_stock(row, session):
         
         valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
         
-        # 🛡️ 盘前 0 交易量自动回退修正
+        # 盘前修正
         while len(valid_klines) > 0:
             try:
                 vol = float(valid_klines[-1][5])
@@ -223,7 +228,6 @@ def process_single_stock(row, session):
         amounts = k_matrix[:, 6].astype(float) 
         turnovers = k_matrix[:, 7].astype(float) 
 
-        # 五日均量防止早盘错杀
         avg_amount_5 = np.mean(amounts[-5:])
         avg_turnover_5 = np.mean(turnovers[-5:])
         close = closes[-1]
@@ -313,7 +317,7 @@ def process_single_stock(row, session):
 # 6. 主程序控制
 # ==========================================
 def screen_a_shares():
-    print("\n========== A股 猎手三引擎版 (纯净稳定网络版) ==========")
+    print("\n========== A股 猎手三引擎版 (HTTP 降维破壁版) ==========")
     session = get_robust_session()
     
     core_tickers = get_core_tickers_from_sheet(session)
