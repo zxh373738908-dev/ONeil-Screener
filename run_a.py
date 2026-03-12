@@ -6,6 +6,7 @@ import datetime, time, warnings, traceback
 import yfinance as yf
 import akshare as ak
 import logging
+import re
 
 warnings.filterwarnings('ignore')
 # 屏蔽 yfinance 内部烦人的警告输出
@@ -16,7 +17,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # ==========================================
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
-scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
@@ -28,40 +29,39 @@ def get_worksheet():
         return doc.add_worksheet(title="A-Share Screener", rows=100, cols=20)
 
 # ==========================================
-# 🛡️ STEP 1: 获取 A 股名册 (无视东方财富防火墙)
+# 🛡️ STEP 1: 获取 A 股名册 (带智能代码清洗机制)
 # ==========================================
 def get_a_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：从沪深交易所/新浪直连获取全市场名册...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：获取全市场名册...")
+    df = pd.DataFrame()
     try:
-        # 优先使用上交所/深交所的官方直连接口，绝对不会被拦截
-        sh_df = ak.stock_info_sh_name_code(indicator="主板A股")
-        sz_df = ak.stock_info_sz_name_code(indicator="A股列表")
-        
-        # 兼容列名提取
-        sh = sh_df.iloc[:, [0, 1]].copy()
-        sh.columns = ['code', 'name']
-        sz = sz_df.iloc[:,[0, 1]].copy()
-        sz.columns = ['code', 'name']
-        
-        df = pd.concat([sh, sz], ignore_index=True)
-        df['code'] = df['code'].astype(str).str.zfill(6)
-        
-        # 剔除 ST 垃圾股
-        df = df[~df['name'].str.contains('ST')]
-        print(f"   -> ✅ 成功绕过封锁！拉取到全市场 {len(df)} 只正常交易标的。")
-        return df
+        # 首选东方财富全市场快照 (最全)
+        df = ak.stock_zh_a_spot_em()
+        df = df.rename(columns={"代码": "code", "名称": "name"})
     except Exception as e:
-        print(f"   -> ⚠️ 交易所直连受阻，启动备用【新浪大盘】接口: {e}")
+        print(f"   -> ⚠️ 首选接口受阻: {e}，启动备用【新浪大盘】接口...")
         try:
-            # 备用方案：新浪财经接口 (对海外 IP 极其友好)
+            # 备用方案：新浪财经接口 (极其稳定)
             df = ak.stock_zh_a_spot()
-            df = df.rename(columns={"代码": "code", "名称": "name"})
-            df = df[~df['name'].str.contains('ST')]
-            print(f"   -> ✅ 成功通过新浪接口拉取 {len(df)} 只标的！")
-            return df[['code', 'name']]
+            df = df.rename(columns={"symbol": "code", "name": "name"})
         except Exception as e2:
             print(f"   -> ❌ 所有清单获取均失败: {e2}")
             return pd.DataFrame()
+
+    # -----------------------------------------
+    # 🔧 核心修复：强制清洗代码，兼容带有 sh/sz 前缀的数据
+    # -----------------------------------------
+    df['code'] = df['code'].astype(str).str.extract(r'(\d{6})') # 只提取连续的 6 位数字
+    df = df.dropna(subset=['code']) # 删掉提取不到数字的行
+    
+    # 剔除 ST 垃圾股
+    df = df[~df['name'].astype(str).str.contains('ST')]
+    
+    # 过滤掉退市股或无效名称
+    df = df[df['name'].astype(str).str.strip() != '']
+    
+    print(f"   -> ✅ 成功绕过封锁并清洗！提取到全市场 {len(df)} 只纯净标的。")
+    return df[['code', 'name']]
 
 # ==========================================
 # 🚀 STEP 2: Yahoo Finance 全球数据中心并发盲扫
@@ -69,34 +69,42 @@ def get_a_share_list():
 def scan_market_via_yfinance(df_list):
     print("\n🚀[STEP 2] 启动【Yahoo Finance】天基武器，无视国内 WAF，执行高速大盘演算...")
     
-    tickers =[]
+    tickers = []
     ticker_to_name = {}
     
     # 转换 A 股代码为 Yahoo Finance 专属后缀 (.SS 为上海, .SZ 为深圳)
     for _, row in df_list.iterrows():
-        c = row['code']
-        n = row['name']
-        if c.startswith(('6', '5')): t = f"{c}.SS"
-        elif c.startswith(('0', '3')): t = f"{c}.SZ"
-        else: continue
+        c = str(row['code'])
+        n = str(row['name'])
+        
+        # 严格分类：6开头的去上海，0或3开头的去深圳。忽略北交所(8/4)
+        if c.startswith('6'): 
+            t = f"{c}.SS"
+        elif c.startswith(('0', '3')): 
+            t = f"{c}.SZ"
+        else: 
+            continue
+            
         tickers.append(t)
         ticker_to_name[t] = n
         
     print(f"   -> 📡 构建完成 {len(tickers)} 条数据通道，开始高维批量下载 (网速极快，请稍候)...")
+    if not tickers:
+        print("   -> ❌ 致命错误：转换后的 Yahoo Tickers 列表为空！")
+        return []
     
-    all_results =[]
-    chunk_size = 1000 # 每次并发下载 1000 只股票，极致压榨服务器带宽
+    all_results = []
+    chunk_size = 800 # 每次并发下载 800 只股票
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
         print(f"   -> 📥 正在下载演算第 {i+1} ~ {min(i+chunk_size, len(tickers))} 只核心标的...")
         
-        # 核心：利用 Yahoo Finance 并发下载 1 年期前复权历史数据
+        # 利用 Yahoo Finance 并发下载 1 年期前复权历史数据
         data = yf.download(chunk, period="1y", auto_adjust=True, threads=True, progress=False)
         
         for ticker in chunk:
             try:
-                # 兼容 yfinance DataFrame 的多层索引结构
                 if len(chunk) > 1:
                     closes = data['Close'][ticker].dropna().values
                     highs = data['High'][ticker].dropna().values
@@ -106,21 +114,15 @@ def scan_market_via_yfinance(df_list):
                     highs = data['High'].dropna().values
                     vols = data['Volume'].dropna().values
                     
-                # 过滤次新股与停牌股
                 if len(closes) < 200: continue
                 
-                # 过滤低价股
                 price = closes[-1]
                 if price < 5: continue
                 
-                # 🛡️ 核心护盾：用【5日平均成交额】代替市值过滤，精准剔除小盘死水股
                 # yfinance 的 Volume 是股数，乘以价格即为成交额 (RMB)
                 turnover_5 = np.mean(closes[-5:] * vols[-5:])
                 if turnover_5 < 150000000: continue # 5日均额必须大于 1.5亿
                 
-                # --------------------
-                # 数据指标精算
-                # --------------------
                 ma20 = np.mean(closes[-20:])
                 ma50 = np.mean(closes[-50:])
                 ma150 = np.mean(closes[-150:])
@@ -133,7 +135,6 @@ def scan_market_via_yfinance(df_list):
                 if avg_v50 == 0: continue
                 vol_ratio = vols[-1] / avg_v50
                 
-                # RSI 动量计算
                 deltas = np.diff(closes[-30:])
                 gain = np.where(deltas > 0, deltas, 0)
                 loss = np.where(deltas < 0, -deltas, 0)
@@ -141,15 +142,11 @@ def scan_market_via_yfinance(df_list):
                 avg_loss = pd.Series(loss).ewm(com=13, adjust=False).mean().iloc[-1]
                 rsi = 100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))
                 
-                # RS 评分模型 (20日/60日/120日 动态加权)
                 r20 = (closes[-1] - closes[-21]) / closes[-21]
                 r60 = (closes[-1] - closes[-61]) / closes[-61]
                 r120 = (closes[-1] - closes[-121]) / closes[-121]
                 rs = r20*0.4 + r60*0.3 + r120*0.3
                 
-                # --------------------
-                # 🎯 三大主线战法判定
-                # --------------------
                 breakout = (price > ma20 and price > ma50 and ma50 > ma150 and ma150 > ma200 and vol_ratio > 1.5 and rsi > 60)
                 ambush = (abs(price - ma20) / ma20 < 0.03 and vol_ratio < 1.1 and ma50 > ma150 and ma150 > ma200)
                 pit = (price < high60 * 0.85 and price >= ma50 * 0.98 and vol_ratio > 1.3)
@@ -159,7 +156,7 @@ def scan_market_via_yfinance(df_list):
                 type_label = "🐉 黄金坑" if pit else ("🔥 突破起飞" if breakout else "🧘 缩量伏击")
                 
                 all_results.append({
-                    "Ticker": ticker.split('.')[0], # 去除后缀
+                    "Ticker": ticker.split('.')[0],
                     "Name": ticker_to_name[ticker],
                     "Price": round(price, 2),
                     "Type": type_label,
@@ -189,11 +186,7 @@ def write_sheet(data):
             return
 
         df = pd.DataFrame(data)
-        # 按 RS 动量评分从高到低排序，直击核心龙头
-        df = df.sort_values("RS_Score", ascending=False)
-        
-        # 只取前 50 名最精锐的标的
-        df = df.head(50)
+        df = df.sort_values("RS_Score", ascending=False).head(50)
 
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -208,7 +201,7 @@ def write_sheet(data):
 # MAIN
 # ==========================================
 def main():
-    print("\n========== A股猎手系统 V7 (YF 天基武器破壁版) ==========")
+    print("\n========== A股猎手系统 V7.1 (YF 天基武器修复版) ==========")
     df_list = get_a_share_list()
     if df_list.empty: return
     
