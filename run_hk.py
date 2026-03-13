@@ -7,8 +7,9 @@ import time
 import warnings
 import traceback
 import yfinance as yf
-import akshare as ak
 import logging
+import requests
+import re
 from collections import defaultdict
 
 warnings.filterwarnings('ignore')
@@ -20,7 +21,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # ==========================================
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
-scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
@@ -34,67 +35,82 @@ def get_worksheet(sheet_name="HK-Share Screener"):
     except gspread.exceptions.WorksheetNotFound:
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
-import re
-import requests
-
 # ==========================================
-# ⚡ STEP 1: 获取港股名册 (新浪直连破防版)
+# ⚡ STEP 1: 获取港股名册 (雪球 Xueqiu 直连版 - 彻底告别东方财富)
 # ==========================================
 def get_hk_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：东方财富云端 IP 遭封锁，切换【新浪财经直连链路】...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：彻底抛弃东方财富，切换至【雪球 (Xueqiu) 数据中枢】...")
+    
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Connection": "keep-alive"
+    }
     
     try:
-        url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+        # 1. 模拟浏览器访问雪球首页，获取鉴权 Cookie (必备步骤，否则接口会报错)
+        print("   -> 🔄 正在获取身份鉴权 Token...")
+        session.get("https://xueqiu.com/", headers=headers, timeout=10)
+        
+        # 2. 调用雪球原生的筛选器 API 拉取全量港股
+        print("   -> 📥 正在全网扫描港股名册...")
+        url = "https://stock.xueqiu.com/v5/stock/screener/quote/list.json"
         params = {
             "page": 1,
-            "num": 3500,  # 覆盖全部约2600只港股
-            "sort": "symbol",
-            "asc": 1,
-            "node": "hkdjg",
-            "symbol": ""
+            "size": 4000,          # 港股一共 2600 只左右，4000 足以一次性全部拉完
+            "order": "desc",
+            "order_by": "amount",  # 按成交额排序，保证活跃的股票排在前面
+            "exchange": "HK",
+            "market": "HK",
+            "type": "hk"
         }
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-
-        data_list = []
-        # 使用正则暴力解析新浪非标准 JSON，极度稳定无视报错
-        blocks = re.findall(r'\{(.*?)\}', resp.text)
-        for b in blocks:
-            sym_m = re.search(r'symbol:"([^"]+)"', b)
-            name_m = re.search(r'name:"([^"]+)"', b)
-            price_m = re.search(r'(?:trade|lasttrade):"([^"]+)"', b)
+        
+        resp = session.get(url, params=params, headers=headers, timeout=15)
+        data = resp.json()
+        
+        if data.get("error_code") != 0:
+            raise ValueError(f"接口拒绝请求: {data.get('error_description')}")
             
-            if sym_m and name_m:
-                data_list.append({
-                    "代码": sym_m.group(1),
-                    "名称": name_m.group(1),
-                    "最新价": price_m.group(1) if price_m else "0"
-                })
-
-        df = pd.DataFrame(data_list)
-        if df.empty: raise ValueError("新浪接口返回为空或解析失败")
-        print(f"   -> ✅ 新浪主节点直连突围成功！提取全市场 {len(df)} 只基础名册！")
+        stocks = data.get("data", {}).get("list", [])
+        if not stocks:
+            raise ValueError("获取到的股票列表为空")
+            
+        # 3. 解析字段
+        stock_list = []
+        for s in stocks:
+            sym = str(s.get("symbol", ""))
+            # 过滤掉非纯股票的杂项 (如指数等)，提取纯数字部分
+            clean_sym = re.sub(r'[^0-9]', '', sym)
+            if not clean_sym: continue
+            
+            stock_list.append({
+                "代码": clean_sym,
+                "名称": s.get("name", ""),
+                "最新价": s.get("current", 0),
+                "总市值": s.get("market_capital", 0) # 雪球直接提供真实市值
+            })
+            
+        df = pd.DataFrame(stock_list)
+        print(f"   -> ✅ 雪球链路突围成功！提取到全市场 {len(df)} 只基础名册。")
         
     except Exception as e:
-        print(f"   -> ❌ 致命错误：新浪链路受阻: {e}")
+        print(f"   -> ❌ 致命错误：雪球数据中枢连接失败: {e}")
         return pd.DataFrame()
 
-    # 数据清洗
-    df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce')
+    # 4. 数据清洗与百亿过滤
+    df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce').fillna(0)
+    df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce').fillna(0)
     
-    # 核心过滤 1：过滤掉 < 1 港币的仙股
-    df = df[df['最新价'] >= 1.0].copy()
-    
-    # 核心过滤 2：因为新浪接口没有市值字段，我们先赋予【千亿伪市值】强行放行！
-    # 真正的【百亿市值拦截】将转移到最后一步进行精准击杀。
-    df['总市值'] = 100000000000
+    # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿港币（过滤老千股和小盘股）
+    df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
     
     # 过滤掉空名称
     df = df[df['名称'].astype(str).str.strip() != '']
     
-    print(f"   -> ✅ 基础洗盘完毕！提取到 {len(df)} 只【非仙股】候选标的，准备进入大盘演算。")
-    print("   -> 💡 突破封锁策略：【百亿市值校验】将由 Yahoo 引擎在最后一环进行动态抽查！")
+    print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，准备进入 Yahoo 高速演算通道。")
     return df[['代码', '名称', '最新价', '总市值']]
+
 
 # ==========================================
 # 🧠 STEP 2: 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
@@ -165,7 +181,7 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
         close >= h250 * 0.75  
     )
 
-# ================= 裁决逻辑 =================
+    # ================= 裁决逻辑 =================
     if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend): 
         return {"status": "fail", "reason": "未触发任何策略体系"}
         
@@ -180,26 +196,12 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
     
     if rsi < 50: return {"status": "fail", "reason": "RSI<50(反转动能未确认)"} 
 
-    # ----------------------------------------------------
-    # 🚨 动态市值取证机制 (专治 IP 封锁后的伪市值)
-    # 对于触发了所有战法、闯关到最后一步的优质标的，调用雅虎查水表
-    # ----------------------------------------------------
-    try:
-        real_mkt_cap = yf.Ticker(ticker).fast_info.get("marketCap", 0)
-        if real_mkt_cap > 0:
-            mktcap = real_mkt_cap
-            # 真实市值不足100亿港币，无情击杀
-            if mktcap < 10000000000:
-                return {"status": "fail", "reason": "动态校验: 市值不足百亿(避险)"}
-    except Exception:
-        pass # 若雅虎接口抽风，则保留伪市值暂不封杀
-
     # 动态生成专属战法标签
-    trend_tag =[]
+    trend_tag = []
     if is_old_dragon: trend_tag.append("🐉 老龙回头(黄金坑)")
     if is_explosive_breakout: trend_tag.append("🚀 底部放量起爆")
     if is_standard_uptrend: trend_tag.append("📈 经典多头排列")
-    if is_standard_uptrend and is_explosive_breakout: trend_tag =["🔥 完美共振(多头+起爆)"]
+    if is_standard_uptrend and is_explosive_breakout: trend_tag = ["🔥 完美共振(多头+起爆)"]
 
     close_60 = closes[-61]
     ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
@@ -226,7 +228,7 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
 def scan_hk_market_via_yfinance(df_list):
     print("\n🚀[STEP 2] 启动【Yahoo Finance】天基武器，执行高速大盘演算...")
     
-    tickers =[]
+    tickers = []
     ticker_to_info = {}
     
     for _, row in df_list.iterrows():
@@ -244,7 +246,7 @@ def scan_hk_market_via_yfinance(df_list):
         print("   -> ❌ 致命错误：转换后的 Yahoo Tickers 列表为空！")
         return [], {}
     
-    all_results =[]
+    all_results = []
     fail_reasons = defaultdict(int)
     chunk_size = 500  # Yahoo接口最佳并发分块
     
@@ -342,12 +344,12 @@ def main():
     print(f"\n========== 港股猎手系统 V9.0 (YFinance天基演算版) ==========")
     print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
     
-    # 1. 获取名单
+    # 1. 获取名单 (雪球源)
     df_list = get_hk_share_list()
     if df_list.empty: 
         return
     
-    # 2. 批量扫描
+    # 2. 批量扫描 (Yahoo 源)
     final_stocks, fail_reasons = scan_hk_market_via_yfinance(df_list)
     
     # 3. 构建诊断报告
