@@ -3,7 +3,6 @@ import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime
-import time
 import warnings
 import traceback
 import yfinance as yf
@@ -36,79 +35,77 @@ def get_worksheet(sheet_name="HK-Share Screener"):
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
 # ==========================================
-# ⚡ STEP 1: 获取港股名册 (雪球 Xueqiu 直连版 - 彻底告别东方财富)
+# ⚡ STEP 1: 获取港股名册 (TradingView 国际接口无视封锁版)
 # ==========================================
 def get_hk_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：彻底抛弃东方财富，切换至【雪球 (Xueqiu) 数据中枢】...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：侦测到国内源联合封锁，切换至国际级【TradingView 量化中枢】...")
     
-    session = requests.Session()
+    # 彻底使用 TradingView 全球筛选器 API (免验证，无视机房 IP 封锁)
+    url = "https://scanner.tradingview.com/hongkong/scan"
+    
+    payload = {
+        "columns": ["name", "description", "close", "market_cap_basic"],
+        "range": [0, 4000],  # 一次性拉取全部港股
+        "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+        "filter": [
+            # 仅筛选纯正股票，排除权证、牛熊证等杂项
+            {"left": "type", "operation": "equal", "right": "stock"}
+        ]
+    }
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Connection": "keep-alive"
+        "Content-Type": "application/json",
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/"
     }
     
     try:
-        # 1. 模拟浏览器访问雪球首页，获取鉴权 Cookie (必备步骤，否则接口会报错)
-        print("   -> 🔄 正在获取身份鉴权 Token...")
-        session.get("https://xueqiu.com/", headers=headers, timeout=10)
+        print("   -> 🔄 正在跨域连接 TradingView 主节点建立通讯...")
+        resp = requests.post(url, json=payload, headers=headers, timeout=20)
         
-        # 2. 调用雪球原生的筛选器 API 拉取全量港股
-        print("   -> 📥 正在全网扫描港股名册...")
-        url = "https://stock.xueqiu.com/v5/stock/screener/quote/list.json"
-        params = {
-            "page": 1,
-            "size": 4000,          # 港股一共 2600 只左右，4000 足以一次性全部拉完
-            "order": "desc",
-            "order_by": "amount",  # 按成交额排序，保证活跃的股票排在前面
-            "exchange": "HK",
-            "market": "HK",
-            "type": "hk"
-        }
-        
-        resp = session.get(url, params=params, headers=headers, timeout=15)
-        data = resp.json()
-        
-        if data.get("error_code") != 0:
-            raise ValueError(f"接口拒绝请求: {data.get('error_description')}")
+        if resp.status_code != 200:
+            raise ValueError(f"HTTP状态异常: {resp.status_code}")
             
-        stocks = data.get("data", {}).get("list", [])
-        if not stocks:
+        data = resp.json()
+        raw_list = data.get("data", [])
+        
+        if not raw_list:
             raise ValueError("获取到的股票列表为空")
             
-        # 3. 解析字段
+        # 提取并清洗数据
         stock_list = []
-        for s in stocks:
-            sym = str(s.get("symbol", ""))
-            # 过滤掉非纯股票的杂项 (如指数等)，提取纯数字部分
-            clean_sym = re.sub(r'[^0-9]', '', sym)
-            if not clean_sym: continue
-            
-            stock_list.append({
-                "代码": clean_sym,
-                "名称": s.get("name", ""),
-                "最新价": s.get("current", 0),
-                "总市值": s.get("market_capital", 0) # 雪球直接提供真实市值
-            })
-            
+        for item in raw_list:
+            fields = item.get("d", [])
+            if len(fields) >= 4:
+                raw_code, name, price, mktcap = fields[0], fields[1], fields[2], fields[3]
+                
+                # TradingView 港股代码格式一般为数字，提取纯数字部分
+                clean_sym = re.sub(r'[^0-9]', '', str(raw_code))
+                if not clean_sym: 
+                    continue
+                
+                stock_list.append({
+                    "代码": clean_sym,
+                    "名称": name,
+                    "最新价": float(price) if price is not None else 0.0,
+                    "总市值": float(mktcap) if mktcap is not None else 0.0
+                })
+                
         df = pd.DataFrame(stock_list)
-        print(f"   -> ✅ 雪球链路突围成功！提取到全市场 {len(df)} 只基础名册。")
+        print(f"   -> ✅ TradingView 国际专线接入成功！提取全市场 {len(df)} 只基础名册。")
         
     except Exception as e:
-        print(f"   -> ❌ 致命错误：雪球数据中枢连接失败: {e}")
+        print(f"   -> ❌ 致命错误：TradingView 数据流被阻断: {e}")
         return pd.DataFrame()
 
-    # 4. 数据清洗与百亿过滤
-    df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce').fillna(0)
-    df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce').fillna(0)
-    
-    # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿港币（过滤老千股和小盘股）
+    # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿港币
     df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
     
-    # 过滤掉空名称
+    # 过滤掉无名称的数据
     df = df[df['名称'].astype(str).str.strip() != '']
     
-    print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，准备进入 Yahoo 高速演算通道。")
+    print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，送往 Yahoo 天基演算。")
     return df[['代码', '名称', '最新价', '总市值']]
 
 
@@ -233,7 +230,7 @@ def scan_hk_market_via_yfinance(df_list):
     
     for _, row in df_list.iterrows():
         code = str(row['代码'])
-        # 补齐格式: 00700 -> 0700.HK, 09988 -> 9988.HK
+        # TradingView 提取的代码可能是类似 "700"，补齐格式为 "0700.HK"
         yf_code = code.lstrip('0').zfill(4) + '.HK'
         tickers.append(yf_code)
         ticker_to_info[yf_code] = {
@@ -341,10 +338,10 @@ def write_sheet(final_stocks, diag_msg=None):
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n========== 港股猎手系统 V9.0 (YFinance天基演算版) ==========")
+    print(f"\n========== 港股猎手系统 V9.1 (TradingView全球直连版) ==========")
     print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
     
-    # 1. 获取名单 (雪球源)
+    # 1. 获取名单 (TradingView 源)
     df_list = get_hk_share_list()
     if df_list.empty: 
         return
