@@ -34,55 +34,66 @@ def get_worksheet(sheet_name="HK-Share Screener"):
     except gspread.exceptions.WorksheetNotFound:
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
+import re
+import requests
+
 # ==========================================
-# ⚡ STEP 1: 获取港股名册 (AKShare 底层脱壳 - 增强防断流版)
+# ⚡ STEP 1: 获取港股名册 (新浪直连破防版)
 # ==========================================
 def get_hk_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：尝试获取港股纯净大盘名册...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：东方财富云端 IP 遭封锁，切换【新浪财经直连链路】...")
     
-    max_retries = 5
-    df = pd.DataFrame()
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"   -> 🔄 正在建立加密信道拉取数据 (尝试 {attempt}/{max_retries})...")
-            # 尝试拉取东方财富全市场港股数据
-            df = ak.stock_hk_spot_em()
-            
-            # 校验数据完整性
-            if not df.empty and '代码' in df.columns and '名称' in df.columns:
-                print("   -> ✅ 港股极速名册拉取成功！")
-                break
-            else:
-                print("   -> ⚠️ 获取到了数据，但结构不完整，准备重试...")
-                
-        except Exception as e:
-            print(f"   -> ⚠️ 第 {attempt} 次连接被阻断: {str(e)}")
-            if attempt < max_retries:
-                # 随机休眠 2~4 秒，绕过防刷机制
-                sleep_time = np.random.uniform(2, 4)
-                print(f"   -> ⏳ 冷却 {sleep_time:.1f} 秒后重新突围...")
-                time.sleep(sleep_time)
-            else:
-                print("   -> ❌ 多次突围均失败，目标服务器已关闭大门。")
+    try:
+        url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+        params = {
+            "page": 1,
+            "num": 3500,  # 覆盖全部约2600只港股
+            "sort": "symbol",
+            "asc": 1,
+            "node": "hkdjg",
+            "symbol": ""
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
 
-    # 如果重试 5 次依然失败，返回空
-    if df.empty or '代码' not in df.columns:
-        print("\n💥 致命错误：无法获取港股名册。")
-        print("💡 诊断建议：如果您运行在 GitHub Actions 或境外云服务器，您的 IP 可能已被东方财富屏蔽。建议在本地电脑运行，或配置代理。")
+        data_list = []
+        # 使用正则暴力解析新浪非标准 JSON，极度稳定无视报错
+        blocks = re.findall(r'\{(.*?)\}', resp.text)
+        for b in blocks:
+            sym_m = re.search(r'symbol:"([^"]+)"', b)
+            name_m = re.search(r'name:"([^"]+)"', b)
+            price_m = re.search(r'(?:trade|lasttrade):"([^"]+)"', b)
+            
+            if sym_m and name_m:
+                data_list.append({
+                    "代码": sym_m.group(1),
+                    "名称": name_m.group(1),
+                    "最新价": price_m.group(1) if price_m else "0"
+                })
+
+        df = pd.DataFrame(data_list)
+        if df.empty: raise ValueError("新浪接口返回为空或解析失败")
+        print(f"   -> ✅ 新浪主节点直连突围成功！提取全市场 {len(df)} 只基础名册！")
+        
+    except Exception as e:
+        print(f"   -> ❌ 致命错误：新浪链路受阻: {e}")
         return pd.DataFrame()
 
-    # 清洗数据类型
+    # 数据清洗
     df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce')
-    df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce')
     
-    # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿（过滤老千股和小盘股）
-    df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
+    # 核心过滤 1：过滤掉 < 1 港币的仙股
+    df = df[df['最新价'] >= 1.0].copy()
+    
+    # 核心过滤 2：因为新浪接口没有市值字段，我们先赋予【千亿伪市值】强行放行！
+    # 真正的【百亿市值拦截】将转移到最后一步进行精准击杀。
+    df['总市值'] = 100000000000
     
     # 过滤掉空名称
     df = df[df['名称'].astype(str).str.strip() != '']
     
-    print(f"   -> ✅ 基础洗盘完毕！提取到全市场 {len(df)} 只【百亿级】候选标的，准备进入高速演算通道。")
+    print(f"   -> ✅ 基础洗盘完毕！提取到 {len(df)} 只【非仙股】候选标的，准备进入大盘演算。")
+    print("   -> 💡 突破封锁策略：【百亿市值校验】将由 Yahoo 引擎在最后一环进行动态抽查！")
     return df[['代码', '名称', '最新价', '总市值']]
 
 # ==========================================
@@ -154,7 +165,7 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
         close >= h250 * 0.75  
     )
 
-    # ================= 裁决逻辑 =================
+# ================= 裁决逻辑 =================
     if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend): 
         return {"status": "fail", "reason": "未触发任何策略体系"}
         
@@ -168,6 +179,20 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
     rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
     
     if rsi < 50: return {"status": "fail", "reason": "RSI<50(反转动能未确认)"} 
+
+    # ----------------------------------------------------
+    # 🚨 动态市值取证机制 (专治 IP 封锁后的伪市值)
+    # 对于触发了所有战法、闯关到最后一步的优质标的，调用雅虎查水表
+    # ----------------------------------------------------
+    try:
+        real_mkt_cap = yf.Ticker(ticker).fast_info.get("marketCap", 0)
+        if real_mkt_cap > 0:
+            mktcap = real_mkt_cap
+            # 真实市值不足100亿港币，无情击杀
+            if mktcap < 10000000000:
+                return {"status": "fail", "reason": "动态校验: 市值不足百亿(避险)"}
+    except Exception:
+        pass # 若雅虎接口抽风，则保留伪市值暂不封杀
 
     # 动态生成专属战法标签
     trend_tag =[]
