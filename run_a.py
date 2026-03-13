@@ -206,11 +206,17 @@ def write_sheet(data):
         df = df.sort_values("RS_Score", ascending=False).head(50)
 
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sheet.update_acell("K1", "Last Update:")
+        
+        # -----------------------------------------
+        # ⏰ 核心修复：强制转换为北京时间 (UTC+8)
+        # -----------------------------------------
+        tz_bj = datetime.timezone(datetime.timedelta(hours=8))
+        now = datetime.datetime.now(tz=tz_bj).strftime("%Y-%m-%d %H:%M:%S")
+        
+        sheet.update_acell("K1", "Last Update (BJ Time):")
         sheet.update_acell("L1", now)
         
-        print(f"🎉 大功告成！已成功将 {len(df)} 只战法认证龙头送达指挥部！")
+        print(f"🎉 大功告成！已成功将 {len(df)} 只战法认证龙头送达指挥部！(更新时间: {now})")
     except Exception as e:
         print(f"❌ 表格写入失败: {e}")
 
