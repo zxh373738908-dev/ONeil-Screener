@@ -2,15 +2,21 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, requests, json, re, concurrent.futures, warnings, traceback, random, time
+import datetime
+import time
+import warnings
+import traceback
+import yfinance as yf
+import akshare as ak
+import logging
 from collections import defaultdict
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 warnings.filterwarnings('ignore')
+# 屏蔽 yfinance 内部烦人的警告输出
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ==========================================
-# 1. 基础设置与双向 Google Sheets 连接
+# 1. 基础设置与 Google Sheets 连接
 # ==========================================
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
 
@@ -18,83 +24,55 @@ scopes =["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-def get_robust_session():
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=30, pool_maxsize=30)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://quote.eastmoney.com/'
-    })
-    return session
+# 强制绑定 UTC+8 北京/香港时间
+TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+
+def get_worksheet(sheet_name="HK-Share Screener"):
+    doc = client.open_by_url(OUTPUT_SHEET_URL)
+    try:
+        return doc.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
 # ==========================================
-# 2. 市场大盘数据获取 (港股全市场扫描)
+# ⚡ STEP 1: 获取港股名册 (AKShare 底层脱壳)
 # ==========================================
-def get_hk_market_snapshot(session):
-    print("🚀 启动【东方财富】抓取 港股(HK) 全市场基础代码库...")
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    all_data =[]
-    page = 1
-    while True:
-        params = {
-            "pn": str(page), "pz": "500", "po": "1", "np": "1",
-            "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": "2", "invt": "2",
-            "fid": "f3", "fs": "m:116+t:3,m:116+t:4",  # 港股主板核心
-            "fields": "f12,f14,f2,f18,f20"
-        }
-        try:
-            res = session.get(url, params=params, timeout=10).json()
-            if not res or 'data' not in res or not res['data'] or not res['data'].get('diff'): break
-            diff = res['data']['diff']
-            all_data.extend(diff)
-            if len(diff) < 500: break
-            page += 1
-        except Exception:
-            time.sleep(1)
-            
-    df = pd.DataFrame(all_data)
-    if not df.empty:
-        df.rename(columns={'f12': 'code', 'f14': 'name', 'f2': 'trade', 'f18': 'prev_close', 'f20': 'mktcap'}, inplace=True)
-    return df
+def get_hk_share_list():
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：尝试获取港股纯净大盘名册...")
+    try:
+        df = ak.stock_hk_spot_em()
+        print("   -> ✅ 港股极速名册拉取成功！")
+    except Exception as e:
+        print(f"   -> ❌ 名册获取受阻: {str(e)}")
+        return pd.DataFrame()
 
-# ==========================================
-# 3. K线获取
-# ==========================================
-def fetch_kline_data(secid, session):
-    url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f61&klt=101&fqt=1&end=20500000&lmt=300"
-    for _ in range(3):
-        try:
-            res = session.get(url, timeout=4)
-            if res.status_code == 200:
-                data = res.json()
-                if data and 'data' in data and data['data'] and 'klines' in data['data']:
-                    return data['data']['klines']
-        except Exception: time.sleep(0.2)
-    return None
+    if df.empty or '代码' not in df.columns or '名称' not in df.columns:
+        print("   -> ❌ 数据结构异常，获取失败")
+        return pd.DataFrame()
 
-# ==========================================
-# 4. 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
-# ==========================================
-def apply_advanced_logic(code, name, klines, mktcap):
-    valid_klines =[k.split(',') for k in klines if len(k.split(',')) >= 8]
-    if len(valid_klines) < 250: return {"status": "fail", "reason": "次新/数据不足"}
-
-    k_matrix = np.array(valid_klines)
-    opens = k_matrix[:, 1].astype(float)
-    closes = k_matrix[:, 2].astype(float)
-    highs = k_matrix[:, 3].astype(float)
-    lows = k_matrix[:, 4].astype(float)
-    vols = k_matrix[:, 5].astype(float)
-    amounts = k_matrix[:, 6].astype(float) 
+    # 清洗数据类型
+    df['最新价'] = pd.to_numeric(df['最新价'], errors='coerce')
+    df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce')
     
+    # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿（过滤老千股和小盘股）
+    df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
+    
+    # 过滤掉空名称
+    df = df[df['名称'].astype(str).str.strip() != '']
+    
+    print(f"   -> ✅ 基础洗盘完毕！提取到全市场 {len(df)} 只【百亿级】候选标的，准备进入高速演算通道。")
+    return df[['代码', '名称', '最新价', '总市值']]
+
+
+# ==========================================
+# 🧠 STEP 2: 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
+# ==========================================
+def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts, mktcap):
     close = closes[-1]
     last_amount = amounts[-1]
     
     if close == 0.0 or vols[-1] == 0: return {"status": "fail", "reason": "停牌/无数据"}
-    if last_amount < 30000000: return {"status": "fail", "reason": "成交极度萎靡(<3000万)"} # 稍微放宽以容纳起爆前奏
+    if last_amount < 30000000: return {"status": "fail", "reason": "成交极度萎靡(<3000万)"} 
 
     # --- 基础技术指标计算 ---
     ma20 = np.mean(closes[-20:])
@@ -115,23 +93,21 @@ def apply_advanced_logic(code, name, klines, mktcap):
     # -----------------------------------------------------
     # 🌟 轨线 1：老龙回头 (黄金坑 + 神奇九转 + 放量点火)
     # -----------------------------------------------------
-    # 1. 探底神针：计算近3日内是否出现过“神奇九转(TD9)”底结构买点
     td_buy = np.zeros(len(closes))
     for i in range(4, len(closes)):
         if closes[i] < closes[i-4]: td_buy[i] = td_buy[i-1] + 1
         else: td_buy[i] = 0
-    has_td9_bottom = np.any(td_buy[-3:] >= 9)  # 近3天内出现过9转买点
+    has_td9_bottom = np.any(td_buy[-3:] >= 9)  
     
-    # 替代B信号：昨日收长阴，今日强力反包 (看涨吞没)
     is_bullish_engulfing = (close > opens[-2]) and (closes[-2] < opens[-2]) and (pct_change_today > 0.02)
     bottom_signal = has_td9_bottom or is_bullish_engulfing
 
     is_old_dragon = (
-        r120_ret > 0.12 and                        # 1. 曾经是王者 (120日收益>12% 稍微放宽容纳港股)
-        (-0.25 <= dist_high_pct <= -0.05) and      # 2. 完美洗盘 (距离最高点回落 5%~25% 之间)
-        (close < ma20) and (close >= ma60 * 0.98) and # 3. 恐慌跌破20日线，但精准踩在60日生命线上！
-        bottom_signal and                          # 4. 出现9转结构 或 看涨吞没
-        (vol_ratio_today > 1.5) and (pct_change_today > 0.03) # 5. 探明拐点：今日量比>1.5 且 涨幅>3%
+        r120_ret > 0.12 and                        
+        (-0.25 <= dist_high_pct <= -0.05) and      
+        (close < ma20) and (close >= ma60 * 0.98) and 
+        bottom_signal and                          
+        (vol_ratio_today > 1.5) and (pct_change_today > 0.03) 
     )
 
     # -----------------------------------------------------
@@ -142,10 +118,10 @@ def apply_advanced_logic(code, name, klines, mktcap):
     max_daily_ret_3d = max(daily_returns_3d)
 
     is_explosive_breakout = (
-        vol_ratio_3d >= 2.0 and        # 近3天内有爆量2倍以上建仓
-        max_daily_ret_3d >= 0.04 and   # 近3天有单日大阳线(>4%)
-        close > ma50 and close > ma20 and # 强力站上短期均线
-        close >= h250 * 0.50           # 非深渊死猫跳
+        vol_ratio_3d >= 2.0 and        
+        max_daily_ret_3d >= 0.04 and   
+        close > ma50 and close > ma20 and 
+        close >= h250 * 0.50           
     )
 
     # -----------------------------------------------------
@@ -154,14 +130,13 @@ def apply_advanced_logic(code, name, klines, mktcap):
     is_standard_uptrend = (
         close > ma20 and close > ma50 and 
         ma50 > ma150 and ma150 > ma200 and 
-        close >= h250 * 0.75  # 距离新高25%以内 (港股波动大，参数比美股放宽)
+        close >= h250 * 0.75  
     )
 
     # ================= 裁决逻辑 =================
     if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend): 
         return {"status": "fail", "reason": "未触发任何策略体系"}
         
-    # 防止追高极限限制 (偏离50日线超过 30% 极为危险)
     if close > (ma50 * 1.30): 
         return {"status": "fail", "reason": "偏离50日线>30%(极度超买)"}
 
@@ -178,13 +153,13 @@ def apply_advanced_logic(code, name, klines, mktcap):
     if is_old_dragon: trend_tag.append("🐉 老龙回头(黄金坑)")
     if is_explosive_breakout: trend_tag.append("🚀 底部放量起爆")
     if is_standard_uptrend: trend_tag.append("📈 经典多头排列")
-    if is_standard_uptrend and is_explosive_breakout: trend_tag = ["🔥 完美共振(多头+起爆)"]
+    if is_standard_uptrend and is_explosive_breakout: trend_tag =["🔥 完美共振(多头+起爆)"]
 
     close_60 = closes[-61]
     ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
     
     data = {
-        "Ticker": code, 
+        "Ticker": ticker.replace(".HK", ""), 
         "Name": name, 
         "Price": round(close, 2), 
         "60D_Return%": f"{round(ret_60 * 100, 2)}%",
@@ -198,86 +173,152 @@ def apply_advanced_logic(code, name, klines, mktcap):
     }
     return {"status": "success", "data": data}
 
-def process_single_hk_stock(row, session):
-    pure_code = str(row['code']).zfill(5)
-    name = row['name']
-    try:
-        klines = fetch_kline_data(f"116.{pure_code}", session)
-        if not klines: 
-            klines = fetch_kline_data(f"128.{pure_code}", session)
-            if not klines: return {"status": "fail", "reason": "节点阻断"}
-        return apply_advanced_logic(f"{pure_code}.HK", name, klines, row['mktcap'])
-    except Exception: return {"status": "fail", "reason": "解析异常"}
 
 # ==========================================
-# 5. 主程序筛选控制
+# 🚀 STEP 3: Yahoo Finance 并发盲扫与分发
 # ==========================================
-def run_screener():
-    print(f"\n========== 开始处理 港股(HK) (三轨制全天候版) ==========")
-    session = get_robust_session()
+def scan_hk_market_via_yfinance(df_list):
+    print("\n🚀[STEP 2] 启动【Yahoo Finance】天基武器，执行高速大盘演算...")
     
-    spot_df = get_hk_market_snapshot(session)
-    if spot_df.empty: return[], "❌ 港股大盘数据为空"
+    tickers =[]
+    ticker_to_info = {}
     
-    for col in ['trade', 'prev_close', 'mktcap']: 
-        spot_df[col] = pd.to_numeric(spot_df[col], errors='coerce')
+    for _, row in df_list.iterrows():
+        code = str(row['代码'])
+        # 补齐格式: 00700 -> 0700.HK, 09988 -> 9988.HK
+        yf_code = code.lstrip('0').zfill(4) + '.HK'
+        tickers.append(yf_code)
+        ticker_to_info[yf_code] = {
+            'name': row['名称'],
+            'mktcap': row['总市值']
+        }
+        
+    print(f"   -> 📡 构建完成 {len(tickers)} 条数据通道，开始高维批量下载 (请求周期: 2年)...")
+    if not tickers:
+        print("   -> ❌ 致命错误：转换后的 Yahoo Tickers 列表为空！")
+        return [], {}
     
-    spot_df['trade'] = spot_df['trade'].fillna(spot_df['prev_close'])
-    
-    # 🌟 核心市值过滤条件：只要百亿级别中军 (过滤小盘老千股)，股价>1港币
-    f_df = spot_df[(spot_df['trade'] >= 1.0) & (spot_df['mktcap'] >= 10000000000)].copy()
-    print(f"💰 基础过滤完成：剩余 {len(f_df)} 只候选百亿级标的！启动并发引擎...")
-    
-    final_stocks =[]
+    all_results =[]
     fail_reasons = defaultdict(int)
+    chunk_size = 500  # Yahoo接口最佳并发分块
+    
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i+chunk_size]
+        print(f"   -> 📥 正在下载演算第 {i+1} ~ {min(i+chunk_size, len(tickers))} 只核心标的...")
+        
+        # 为了满足至少250个交易日计算 h250，需要拉取2年的数据
+        data = yf.download(chunk, period="2y", auto_adjust=True, threads=True, progress=False)
+        
+        for ticker in chunk:
+            try:
+                # 适配单个ticker与多个ticker并列时的层级结构
+                if len(chunk) > 1:
+                    closes = data['Close'][ticker].dropna().values
+                    opens = data['Open'][ticker].dropna().values
+                    highs = data['High'][ticker].dropna().values
+                    lows = data['Low'][ticker].dropna().values
+                    vols = data['Volume'][ticker].dropna().values
+                else:
+                    closes = data['Close'].dropna().values
+                    opens = data['Open'].dropna().values
+                    highs = data['High'].dropna().values
+                    lows = data['Low'].dropna().values
+                    vols = data['Volume'].dropna().values
+                    
+                if len(closes) < 250:
+                    fail_reasons["次新/数据不足(<250天)"] += 1
+                    continue
+                
+                # Yahoo没有提供港股每日总成交额（Amount），直接按 `收盘价 x 股数` 近似计算
+                amounts = closes * vols 
+                
+                info = ticker_to_info[ticker]
+                res = apply_advanced_logic(ticker, info['name'], opens, closes, highs, lows, vols, amounts, info['mktcap'])
+                
+                if res["status"] == "success":
+                    all_results.append(res["data"])
+                else:
+                    fail_reasons[res["reason"]] += 1
+                    
+            except KeyError:
+                fail_reasons["接口丢包/退市"] += 1
+                continue
+            except Exception:
+                fail_reasons["数据异常截断"] += 1
+                continue
+                
+    return all_results, fail_reasons
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
-        futures = {executor.submit(process_single_hk_stock, row, session): row['code'] for _, row in f_df.iterrows()}
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res["status"] == "success": final_stocks.append(res["data"])
-            elif res["status"] == "fail": fail_reasons[res["reason"]] += 1
+# ==========================================
+# 📝 STEP 4: 写入作战指令
+# ==========================================
+def write_sheet(final_stocks, diag_msg=None):
+    print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets 表格...")
+    sheet_name = "HK-Share Screener"
+    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
 
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        sheet = get_worksheet(sheet_name)
+        sheet.clear()
+
+        if len(final_stocks) == 0:
+            sheet.update_acell("A1", "No Signal: 战局恶劣或处于洗盘期，暂无极品标的。")
+            if diag_msg: sheet.update_acell("A3", diag_msg)
+            print(f"⚠️ {sheet_name} 已写入空仓报告。")
+            return
+
+        df = pd.DataFrame(final_stocks)
+        # 根据 60日收益率 降序排列
+        df['Sort_Num'] = df['60D_Return%'].str.replace('%', '').astype(float)
+        df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
+        df = df.head(50)
+
+        # 写入表头及数据
+        sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
+        
+        # 写入更新时间戳 (UTC+8)
+        sheet.update_acell("M1", "Last Updated(UTC+8):")
+        sheet.update_acell("N1", now_str)
+        
+        # 写入诊断信息
+        if diag_msg: 
+            sheet.update_acell("O1", diag_msg)
+            
+        print(f"🎉 大功告成！已成功将 {len(df)} 只战法认证龙头送达指挥部！")
+    except Exception as e:
+        print(f"❌ 表格写入失败: {e}")
+
+# ==========================================
+# MAIN 主函数
+# ==========================================
+def main():
+    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n========== 港股猎手系统 V9.0 (YFinance天基演算版) ==========")
+    print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
+    
+    # 1. 获取名单
+    df_list = get_hk_share_list()
+    if df_list.empty: 
+        return
+    
+    # 2. 批量扫描
+    final_stocks, fail_reasons = scan_hk_market_via_yfinance(df_list)
+    
+    # 3. 构建诊断报告
     fail_str = "".join([f"   - {r}: {c} 只\n" for r, c in sorted(fail_reasons.items(), key=lambda x:x[1], reverse=True)])
     diag_msg = (
-        f"[{now}] 港股(HK)诊断报告：\n"
-        f"📊 市场百亿过滤池: {len(f_df)}只\n"
+        f"[{now_str}] 港股(HK)诊断报告：\n"
+        f"📊 市场百亿过滤池: {len(df_list)}只\n"
         f"🏆 最终选出最强龙头: {min(len(final_stocks), 50)}只\n"
         f"🔪 淘汰明细：\n{fail_str}"
     )
-    return final_stocks, diag_msg
-
-def write_to_sheet(sheet_name, final_stocks, diag_msg=None):
-    try:
-        sheet = client.open_by_url(OUTPUT_SHEET_URL).worksheet(sheet_name)
-        sheet.clear()
-        if final_stocks:
-            df = pd.DataFrame(final_stocks)
-            # 根据 60日收益率 降序排列，强者恒强
-            df['Sort_Num'] = df['60D_Return%'].str.replace('%', '').astype(float)
-            df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-            df = df.head(50) 
-            sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-            
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("M1", "Last Updated:")
-            sheet.update_acell("N1", now)
-            if diag_msg: sheet.update_acell("O1", diag_msg)
-            print(f"🎉 成功将 {sheet_name} 前 {len(df)} 只最强龙头写入表格！")
-        else:
-            sheet.update_acell("A1", "今日无符合条件的股票。")
-            print(f"⚠️ {sheet_name} 已写入空仓报告。")
-    except Exception as e: 
-        print(f"❌ 写入 {sheet_name} 失败: {e}")
+    print("\n" + diag_msg)
+    
+    # 4. 写入网盘
+    write_sheet(final_stocks, diag_msg=diag_msg)
 
 if __name__ == "__main__":
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] 💻 执行港股三轨制选股器(包含老龙回头战略)...")
-    
     try:
-        res_hk, msg_hk = run_screener()
-        write_to_sheet("HK-Share Screener", res_hk, diag_msg=msg_hk)
-        print(msg_hk)
+        main()
     except Exception as e:
-        print(f"港股执行崩溃:\n{traceback.format_exc()}")
+        print(f"\n❌ 系统发生致命异常:\n{traceback.format_exc()}")
