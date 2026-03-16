@@ -17,7 +17,7 @@ creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
 # ==========================================
-# 2. [美股] 量化多核扫描器
+# 2. [美股] 动量龙头回调 专属扫描器 (全参数展示版)
 # ==========================================
 def get_us_tickers():
     print("\n========== [1/3] 开始获取美股核心目标群 ==========")
@@ -57,22 +57,32 @@ def screen_us_stocks():
             close = float(df['Close'].iloc[-1])
             volume = float(df['Volume'].iloc[-1])
             
+            # 基础流动性过滤
             if close < 15 or (close * volume) < 50000000: continue
             
             avg_vol_50 = df['Volume'].tail(50).mean()
             vol_ratio = volume / avg_vol_50 if avg_vol_50 > 0 else 0
             
-            ma20 = df['Close'].tail(20).mean()
             ma50 = df['Close'].tail(50).mean()
-            ma150 = df['Close'].tail(150).mean()
             ma200 = df['Close'].tail(200).mean()
             high_250 = df['High'].tail(250).max()
             
+            # --- 核心指标计算 ---
+            # 距离最高点回撤
             dist_high = (close - high_250) / high_250
+            # 距离 50日线距离 (寻找支撑买点用)
+            dist_50ma = (close - ma50) / ma50
             
-            ret_90d = (close - float(df['Close'].iloc[-63])) / float(df['Close'].iloc[-63])
-            ret_120d = (close - float(df['Close'].iloc[-126])) / float(df['Close'].iloc[-126]) if len(df) >= 126 else ret_90d
+            # 周期涨幅 (20天, 60天, 90天, 120天)
+            ret_20d = (close - float(df['Close'].iloc[-21])) / float(df['Close'].iloc[-21]) if len(df) >= 21 else 0
+            ret_60d = (close - float(df['Close'].iloc[-63])) / float(df['Close'].iloc[-63]) if len(df) >= 63 else 0
+            ret_90d = (close - float(df['Close'].iloc[-90])) / float(df['Close'].iloc[-90]) if len(df) >= 90 else 0
+            ret_120d = (close - float(df['Close'].iloc[-126])) / float(df['Close'].iloc[-126]) if len(df) >= 126 else 0
             
+            # 动量加权评分 (复刻文章逻辑：0.2*20天 + 0.4*60天 + 0.4*120天)
+            mom_score = (0.2 * ret_20d) + (0.4 * ret_60d) + (0.4 * ret_120d)
+            
+            # RSI 计算
             delta = df['Close'].tail(30).diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
@@ -82,61 +92,31 @@ def screen_us_stocks():
             rsi = float(100 - (100 / (1 + rs)).iloc[-1])
 
             # ====================================================
-            # ⚔️ 战术 1：欧奈尔主升突破 (Breakout) - 蓝天无阻力区
-            # ====================================================
-            is_breakout = (
-                (ma50 > ma200) and 
-                (close > ma150 and close > ma200) and
-                (dist_high >= -0.15) and       
-                (ret_90d >= 0.15) and          
-                (rsi >= 55) and                
-                (close > ma20)                 
-            )
-
-            # ====================================================
-            # 🧬 战术 2：老龙回头专属核心逻辑 (Pullback to 50-Day Line)
-            # ====================================================
-            is_pullback = (
-                (ret_90d >= 0.15 or ret_120d >= 0.15) and 
-                (-0.20 <= dist_high <= -0.10) and         
-                (ma50 * 0.97 <= close <= ma50 * 1.05) and 
-                (close < ma20)                            
-            )
-
-            # ====================================================
-            # ⚡ 战术 3 (新增)：动量龙头回调 (Momentum Dip Buy)
-            # 融合上一篇文章思想：寻找中期动量极强，但短期RSI回落的标的
+            # ⚡ 战术 3：动量龙头回调 (Momentum Dip Buy)
             # ====================================================
             is_momentum_dip = (
-                (ret_120d >= 0.25 or ret_90d >= 0.20) and  # 核心1：中期动量极强 (半年涨25%或3个月涨20%)
-                (ma20 > ma50 and ma50 > ma200) and         # 核心2：均线呈完美多头排列 (证明是市场绝对龙头)
-                (close > ma50) and                         # 核心3：死守50日生命线 (大趋势未破坏)
-                (rsi <= 50) and                            # 核心4：RSI回落到中性或超卖区 (提供绝佳盈亏比买点)
-                (dist_high >= -0.15)                       # 核心5：距最高点回撤不超15% (横盘代替下跌的强势调整)
+                (ret_120d >= 0.20 or ret_60d >= 0.15) and  # 中期动量强劲 (半年涨20%或2月涨15%)
+                (ma50 > ma200) and                         # 长线多头排列
+                (close >= ma50 * 0.95) and                 # 靠近50日线 (允许假跌破5%洗盘)
+                (rsi <= 55) and                            # RSI回落至55以下，提供绝佳买点
+                (dist_high >= -0.20)                       # 距高点回撤不超过20%，拒绝破位垃圾股
             )
 
-            # 如果均不满足，直接过滤
-            if not (is_breakout or is_pullback or is_momentum_dip): continue
+            if not is_momentum_dip: continue
 
-            # 结构标签识别 (优先级：动量回调 > 老龙回头 > 突破)
-            if is_momentum_dip:
-                struct_label = "⚡ 动量龙头回调 (RSI低位)"
-            elif is_pullback:
-                struct_label = "🐉 老龙回头 (靠近50日线)"
-            else:
-                struct_label = "🚀 强势突破"
-
-            # 暂存通过技术面筛选的标的
+            # 暂存数据，全面记录以便 Google Sheets 显示
             tech_passed_stocks.append({
                 "Ticker": ticker,
+                "Mom_Score": round(mom_score * 100, 2),    # 用作核心排序权重
                 "Price": round(close, 2),
-                "90D_Return%": round(ret_90d * 100, 2), 
-                "120D_Return%": round(ret_120d * 100, 2),
                 "RSI": round(rsi, 2),
-                "Vol_Ratio": round(vol_ratio, 2),
-                "Dist_High%": f"{round(dist_high * 100, 2)}%",
-                "Turnover(M)": round((close * volume) / 1000000, 2),
-                "Struct": struct_label
+                "Dist_50MA%": f"{round(dist_50ma * 100, 2)}%",  # 观察是否跌穿均线
+                "Dist_High%": f"{round(dist_high * 100, 2)}%",  # 观察回撤深度
+                "20D_Ret%": f"{round(ret_20d * 100, 2)}%",
+                "60D_Ret%": f"{round(ret_60d * 100, 2)}%",
+                "120D_Ret%": f"{round(ret_120d * 100, 2)}%",
+                "Vol_Ratio": round(vol_ratio, 2),          # 观察洗盘是否缩量 (<1 为佳)
+                "Turnover(M)": round((close * volume) / 1000000, 2)
             })
             
         except Exception as e:
@@ -154,10 +134,8 @@ def screen_us_stocks():
             
             if market_cap_b >= 2.0:
                 stock["Market_Cap(B)"] = round(market_cap_b, 2)
-                stock["90D_Return%"] = f"{stock['90D_Return%']}%"
-                stock["120D_Return%"] = f"{stock['120D_Return%']}%"
                 final_stocks.append(stock)
-                print(f"🎯 战术锁定: {stock['Ticker']} [{stock['Struct']}] | 市值: {round(market_cap_b,1)}B")
+                print(f"🎯 战术锁定: {stock['Ticker']} | 综合动量评分: {stock['Mom_Score']} | RSI: {stock['RSI']}")
             else:
                 pass
         except:
@@ -171,10 +149,17 @@ def write_to_sheet(sheet_name, final_stocks):
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
         if final_stocks:
             df = pd.DataFrame(final_stocks)
-            df['Sort_Num'] = df['90D_Return%'].str.replace('%', '').astype(float)
-            df = df.sort_values(by=['Struct', 'Sort_Num'], ascending=[False, False]).drop(columns=['Sort_Num'])
             
-            cols = ["Ticker", "Struct", "Market_Cap(B)", "Price", "90D_Return%", "120D_Return%", "Dist_High%", "Vol_Ratio", "RSI", "Turnover(M)"]
+            # 🔥 排序逻辑：直接按「文章提及的加权动量评分 (Mom_Score)」从高到低排序
+            df = df.sort_values(by=['Mom_Score'], ascending=[False])
+            
+            # 调整列显示顺序 (符合看盘逻辑：先看评分，再看价格/买点，最后看历史涨幅)
+            cols = [
+                "Ticker", "Mom_Score", "Market_Cap(B)", "Price", 
+                "RSI", "Dist_50MA%", "Dist_High%", 
+                "20D_Ret%", "60D_Ret%", "120D_Ret%", 
+                "Vol_Ratio", "Turnover(M)"
+            ]
             df = df[cols]
             
             data_to_write = [df.columns.values.tolist()] + df.values.tolist()
@@ -182,8 +167,8 @@ def write_to_sheet(sheet_name, final_stocks):
             sheet.update(values=data_to_write, range_name="A1")
             
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("L1", "Last Updated:")
-            sheet.update_acell("M1", now_time)
+            sheet.update_acell("N1", "Last Updated:")
+            sheet.update_acell("O1", now_time)
             print(f"🎉 成功！{len(df)} 只最强龙头已装填至 {sheet_name}！")
         else:
             sheet.clear()
