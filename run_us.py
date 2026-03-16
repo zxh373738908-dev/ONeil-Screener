@@ -9,7 +9,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. Google Sheets 连接 (保持不变)
+# 1. Google Sheets 连接
 # ==========================================
 SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"  
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -40,54 +40,52 @@ def screen_us_stocks():
     tickers = get_us_tickers()
     if not tickers: return []
     
-    print("\n========== [2/3] 启动华尔街并发下载引擎 (防封锁) ==========")
-    # 修复点：移除了报错的 show_errors=False，新增 progress=False 保持云端日志干净
+    print("\n========== [2/3] 启动华尔街并发下载引擎 (极速版) ==========")
+    # 下载历史数据用于技术面分析
     data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
     print("✅ 历史数据下载完成，进入量化雷达扫描...")
 
-    final_stocks = []
+    tech_passed_stocks = []
     
     for ticker in tickers:
         try:
-            # 兼容新老版本 yfinance 的 MultiIndex 结构提取
             if ticker not in data.columns.levels[0]:
                 continue
                 
             df = data[ticker].dropna()
             if len(df) < 200: continue
             
-            close = df['Close'].iloc[-1]
-            volume = df['Volume'].iloc[-1]
-            high = df['High'].iloc[-1]
+            close = float(df['Close'].iloc[-1])
+            volume = float(df['Volume'].iloc[-1])
             
-            # 流动性过滤：股价 < 15 或 成交额 < 5000万美金
+            # 基础流动性过滤：股价 < 15 或 基础日成交额 < 5000万美金 剔除
             if close < 15 or (close * volume) < 50000000: continue
             
-            # --- 基础指标计算 ---
+            # --- 极速算法：用 tail().mean() 替代滚动计算，速度提升数十倍 ---
             avg_vol_50 = df['Volume'].tail(50).mean()
             vol_ratio = volume / avg_vol_50 if avg_vol_50 > 0 else 0
             
-            ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            ma50 = df['Close'].rolling(50).mean().iloc[-1]
-            ma150 = df['Close'].rolling(150).mean().iloc[-1]
-            ma200 = df['Close'].rolling(200).mean().iloc[-1]
-            high_250 = df['High'].rolling(250).max().iloc[-1]
+            ma20 = df['Close'].tail(20).mean()
+            ma50 = df['Close'].tail(50).mean()
+            ma150 = df['Close'].tail(150).mean()
+            ma200 = df['Close'].tail(200).mean()
+            high_250 = df['High'].tail(250).max()
             
             # 距离 52周新高的回撤幅度 (负数)
             dist_high = (close - high_250) / high_250
             
-            # 收益率计算 (90天约 63 个交易日， 半年约 126 个交易日)
-            ret_90d = (close - df['Close'].iloc[-63]) / df['Close'].iloc[-63]
-            ret_120d = (close - df['Close'].iloc[-126]) / df['Close'].iloc[-126] if len(df) >= 126 else ret_90d
+            # 收益率计算 (证明是老龙)
+            ret_90d = (close - float(df['Close'].iloc[-63])) / float(df['Close'].iloc[-63])
+            ret_120d = (close - float(df['Close'].iloc[-126])) / float(df['Close'].iloc[-126]) if len(df) >= 126 else ret_90d
             
-            # RSI 计算
-            delta = df['Close'].diff()
+            # RSI 极速计算 (仅取最后14天计算，节省算力)
+            delta = df['Close'].tail(30).diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
             ema_up = up.ewm(com=13, adjust=False).mean()
             ema_down = down.ewm(com=13, adjust=False).mean()
             rs = ema_up / ema_down
-            rsi = 100 - (100 / (1 + rs)).iloc[-1]
+            rsi = float(100 - (100 / (1 + rs)).iloc[-1])
 
             # ====================================================
             # ⚔️ 战术 1：欧奈尔主升突破 (Breakout) - 蓝天无阻力区
@@ -95,21 +93,20 @@ def screen_us_stocks():
             is_breakout = (
                 (ma50 > ma200) and 
                 (close > ma150 and close > ma200) and
-                (close >= high_250 * 0.80) and  # 距离最高点不超 20%
+                (dist_high >= -0.15) and       # 突破形态：距离最高点不超 15%
                 (ret_90d >= 0.15) and          # 3个月涨幅 > 15%
-                (rsi >= 45) and
+                (rsi >= 55) and                # 强势区
                 (close > ma20)                 # 站在 20 日线之上 (强势)
             )
 
             # ====================================================
-            # 🧬 战术 2：老龙回头 (Pullback to 50-Day Line) - 机构护盘点
+            # 🧬 战术 2：老龙回头专属核心逻辑 (Pullback to 50-Day Line)
             # ====================================================
             is_pullback = (
-                (ret_120d >= 0.20) and         # 底蕴：半年暴涨超 20% 的真老龙
-                (-0.20 <= dist_high <= -0.10) and # 洗盘：距高点回撤 10%-20%，完美黄金坑
-                (close < ma20) and             # 破位：跌破 20 日均线，逼出散户恐慌盘
-                (ma50 <= close <= ma50 * 1.03) and # 支撑：死死踩在 50 日均线之上（误差 3% 内）
-                (vol_ratio >= 1.5)             # 点火：右侧爆出 1.5 倍以上巨量，机构护盘！
+                (ret_90d >= 0.15 or ret_120d >= 0.15) and # 核心1：前期涨幅超15%，证明是真老龙
+                (-0.20 <= dist_high <= -0.10) and         # 核心2：洗盘距高点回撤 10%-20%，完美黄金坑
+                (ma50 * 0.97 <= close <= ma50 * 1.05) and # 核心3：股价靠近50日线（允许下探诱空3%或悬空5%）
+                (close < ma20)                            # 核心4：被压在20日线下方，散户绝望阶段
             )
 
             # 如果均不满足，直接过滤
@@ -117,26 +114,51 @@ def screen_us_stocks():
 
             # 结构标签识别
             if is_pullback and is_breakout:
-                struct_label = "🔥 终极双核 (Breakout + 50D Rebound)"
+                struct_label = "🔥 终极双核"
             elif is_pullback:
-                struct_label = "🐉 老龙回头 (Pullback to SMA50)"
+                struct_label = "🐉 老龙回头 (靠近50日线)"
             else:
-                struct_label = "🚀 强势突破 (>SMA20)"
+                struct_label = "🚀 强势突破"
 
-            final_stocks.append({
+            # 暂存通过技术面筛选的标的
+            tech_passed_stocks.append({
                 "Ticker": ticker,
                 "Price": round(close, 2),
-                "90D_Return%": f"{round(ret_90d * 100, 2)}%",
+                "90D_Return%": round(ret_90d * 100, 2), # 留作数字方便排序
+                "120D_Return%": round(ret_120d * 100, 2),
                 "RSI": round(rsi, 2),
                 "Vol_Ratio": round(vol_ratio, 2),
                 "Dist_High%": f"{round(dist_high * 100, 2)}%",
                 "Turnover(M)": round((close * volume) / 1000000, 2),
                 "Struct": struct_label
             })
-            print(f"🎯 捕获战术标的: {ticker} [{struct_label}]")
             
         except Exception as e:
-            # 忽略单只股票提取报错，继续下一只
+            continue
+            
+    print(f"⚡ 技术面初筛完成，共选出 {len(tech_passed_stocks)} 只标的。")
+    print("========== 正在进行基本面深度核查 (市值 > 20亿) ==========")
+    
+    final_stocks = []
+    # 巧妙逻辑：只对通过技术面的十几只股票发起网络请求查询市值，避免500次请求导致死机
+    for stock in tech_passed_stocks:
+        try:
+            ticker_obj = yf.Ticker(stock["Ticker"])
+            # 获取市值，如果没有数据则默认为0
+            market_cap = ticker_obj.info.get('marketCap', 0)
+            market_cap_b = market_cap / 1_000_000_000 # 转换为 Billions (十亿)
+            
+            # 核心过滤：市值必须大于 20亿 (2 Billion)
+            if market_cap_b >= 2.0:
+                stock["Market_Cap(B)"] = round(market_cap_b, 2)
+                # 格式化返回值
+                stock["90D_Return%"] = f"{stock['90D_Return%']}%"
+                stock["120D_Return%"] = f"{stock['120D_Return%']}%"
+                final_stocks.append(stock)
+                print(f"🎯 战术锁定: {stock['Ticker']} [{stock['Struct']}] | 市值: {round(market_cap_b,1)}B")
+            else:
+                print(f"🗑️ 剔除 {stock['Ticker']}：市值仅 {round(market_cap_b, 2)}B，不足20亿！")
+        except:
             continue
             
     return final_stocks
@@ -147,17 +169,21 @@ def write_to_sheet(sheet_name, final_stocks):
         sheet = client.open_by_url(SHEET_URL).worksheet(sheet_name)
         if final_stocks:
             df = pd.DataFrame(final_stocks)
-            # 排序逻辑：优先按量比(Vol_Ratio)和90天涨幅排序，确保爆量老龙排在前面
+            # 排序逻辑：优先按结构分组，然后按量比和90天涨幅排序
             df['Sort_Num'] = df['90D_Return%'].str.replace('%', '').astype(float)
-            df = df.sort_values(by=['Vol_Ratio', 'Sort_Num'], ascending=[False, False]).drop(columns=['Sort_Num'])
+            df = df.sort_values(by=['Struct', 'Sort_Num'], ascending=[False, False]).drop(columns=['Sort_Num'])
+            
+            # 调整列顺序，把市值放在前面
+            cols = ["Ticker", "Struct", "Market_Cap(B)", "Price", "90D_Return%", "120D_Return%", "Dist_High%", "Vol_Ratio", "RSI", "Turnover(M)"]
+            df = df[cols]
             
             data_to_write = [df.columns.values.tolist()] + df.values.tolist()
             sheet.clear()
             sheet.update(values=data_to_write, range_name="A1")
             
             now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_acell("I1", "Last Updated:")
-            sheet.update_acell("J1", now_time)
+            sheet.update_acell("L1", "Last Updated:")
+            sheet.update_acell("M1", now_time)
             print(f"🎉 成功！{len(df)} 只最强龙头已装填至 {sheet_name}！")
         else:
             sheet.clear()
@@ -169,5 +195,4 @@ def write_to_sheet(sheet_name, final_stocks):
 
 if __name__ == "__main__":
     us_results = screen_us_stocks()
-    # 写入表格，按照新的组合逻辑输出
     write_to_sheet("Screener", us_results)
