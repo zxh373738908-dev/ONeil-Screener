@@ -88,8 +88,9 @@ def get_a_share_list():
 # ==========================================
 def scan_market_via_yfinance(df_list):
     print("\n🚀[STEP 2] 启动【Yahoo Finance】天基武器，无视国内 WAF，执行高速大盘演算...")
+    print("   -> 📡[系统补丁] 🐺 T.U.A.W 双轨引信雷达已加载！(左手伏击 / 右手突击) 双闭环启动！")
     
-    tickers = []
+    tickers =[]
     ticker_to_name = {}
     
     for _, row in df_list.iterrows():
@@ -112,7 +113,7 @@ def scan_market_via_yfinance(df_list):
         print("   -> ❌ 致命错误：转换后的 Yahoo Tickers 列表为空！")
         return []
     
-    all_results = []
+    all_results =[]
     chunk_size = 800 
     
     for i in range(0, len(tickers), chunk_size):
@@ -123,13 +124,18 @@ def scan_market_via_yfinance(df_list):
         
         for ticker in chunk:
             try:
+                # -----------------------------------------
+                # 📥 数据解包与校验 (新增 Low 维度抓取)
+                # -----------------------------------------
                 if len(chunk) > 1:
                     closes = data['Close'][ticker].dropna().values
                     highs = data['High'][ticker].dropna().values
+                    lows = data['Low'][ticker].dropna().values  # 引入最低价
                     vols = data['Volume'][ticker].dropna().values
                 else:
                     closes = data['Close'].dropna().values
                     highs = data['High'].dropna().values
+                    lows = data['Low'].dropna().values
                     vols = data['Volume'].dropna().values
                     
                 if len(closes) < 200: continue
@@ -137,21 +143,27 @@ def scan_market_via_yfinance(df_list):
                 price = closes[-1]
                 if price < 5: continue
                 
+                # 成交额容错计算 (基础门槛降至1亿，避免洗盘期极致缩量被误杀)
+                turnover_1 = price * vols[-1]
                 turnover_5 = np.mean(closes[-5:] * vols[-5:])
-                if turnover_5 < 150000000: continue 
+                if turnover_5 < 100000000: continue 
                 
+                # 均线与高点计算
                 ma20 = np.mean(closes[-20:])
                 ma50 = np.mean(closes[-50:])
                 ma150 = np.mean(closes[-150:])
                 ma200 = np.mean(closes[-200:])
-                
-                high60 = np.max(highs[-60:])
                 h250 = np.max(highs[-250:]) if len(highs) >= 250 else np.max(highs)
                 
+                # 量比计算
                 avg_v50 = np.mean(vols[-50:])
                 if avg_v50 == 0: continue
                 vol_ratio = vols[-1] / avg_v50
                 
+                # -----------------------------------------
+                # 📐 核心指标测算
+                # -----------------------------------------
+                # RSI计算
                 deltas = np.diff(closes[-30:])
                 gain = np.where(deltas > 0, deltas, 0)
                 loss = np.where(deltas < 0, -deltas, 0)
@@ -159,29 +171,79 @@ def scan_market_via_yfinance(df_list):
                 avg_loss = pd.Series(loss).ewm(com=13, adjust=False).mean().iloc[-1]
                 rsi = 100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))
                 
+                # 动量计算 (RS评分与60日涨幅)
                 r20 = (closes[-1] - closes[-21]) / closes[-21]
                 r60 = (closes[-1] - closes[-61]) / closes[-61]
                 r120 = (closes[-1] - closes[-121]) / closes[-121]
                 rs = r20*0.4 + r60*0.3 + r120*0.3
+                rs_score = rs * 100
+                r60_pct = r60 * 100
+
+                # 距离前高百分比计算 (-8% < Dist_High% < -1%)
+                dist_high_pct = ((price - h250) / h250) * 100
+
+                # 近5日平均振幅计算 (VCP 测谎仪)
+                if len(lows) >= 5 and len(highs) >= 5:
+                    amps = (highs[-5:] - lows[-5:]) / lows[-5:] * 100
+                    avg_amp5 = np.mean(amps)
+                else:
+                    avg_amp5 = 99.0
+
+                # -----------------------------------------
+                # 🐺 T.U.A.W 双轨引信雷达 核心判决逻辑
+                # -----------------------------------------
+                # 1. 兵临城下 (距离新高 -8% 到 -1%)
+                cond_dist_radar = -8 <= dist_high_pct <= -1
                 
+                # 2. 极致窒息 (量比 < 1.0 且 近5日平均振幅 < 5%)
+                cond_vcp = (vol_ratio < 1.0) and (avg_amp5 < 5.0)
+                
+                # 3. 动量底座 (极强 RS评分 > 85 或 60日暴涨 > 30%)
+                cond_momentum = (rs_score > 85) or (r60_pct > 30)
+                
+                # 4. 黄金体型 (今日成交额 3亿 - 15亿，专吃游资接力区间)
+                cond_turnover = 300_000_000 <= turnover_1 <= 1_500_000_000
+
+                # [阶段一] 🧨 引信雷达 (周五建鱼池：缩量装死)
+                fuse_radar = cond_dist_radar and cond_vcp and cond_momentum and cond_turnover
+
+                # [阶段二] 🔥 狙击触发 (周一/二点火：量比突升，白线上穿黄线，开始刺破新高)
+                cond_dist_sniper = -8 <= dist_high_pct <= 2
+                trigger_sniper = cond_dist_sniper and (vol_ratio > 1.5) and cond_momentum and cond_turnover and (price > ma20)
+
+                # =========================================
+                # 经典备用形态保留
+                # =========================================
                 breakout = (price > ma20 and price > ma50 and ma50 > ma150 and ma150 > ma200 and vol_ratio > 1.5 and rsi > 60)
                 ambush = (abs(price - ma20) / ma20 < 0.03 and vol_ratio < 1.1 and ma50 > ma150 and ma150 > ma200)
-                pit = (price < high60 * 0.85 and price >= ma50 * 0.98 and vol_ratio > 1.3)
+
+                # 四大形态均未满足，无情抛弃
+                if not (fuse_radar or trigger_sniper or breakout or ambush): 
+                    continue
                 
-                if not (breakout or ambush or pit): continue
+                # 授予战术评级标签
+                if trigger_sniper:
+                    type_label = "🔥 狙击触发(主力点火)"
+                elif fuse_radar:
+                    type_label = "🧨 引信雷达(缩量潜伏)"
+                elif breakout:
+                    type_label = "🚀 趋势突破"
+                else:
+                    type_label = "🧘 均线伏击"
                 
-                type_label = "🐉 黄金坑" if pit else ("🔥 突破起飞" if breakout else "🧘 缩量伏击")
-                
+                # -----------------------------------------
+                # 📦 结果装载上传
+                # -----------------------------------------
                 all_results.append({
                     "Ticker": ticker.split('.')[0],
                     "Name": ticker_to_name[ticker],
                     "Price": round(price, 2),
                     "Type": type_label,
-                    "RS_Score": round(rs * 100, 2),
+                    "RS_Score": round(rs_score, 2),
                     "RSI": round(rsi, 2),
                     "Vol_Ratio": round(vol_ratio, 2),
-                    "Dist_High%": f"{round(((price - h250) / h250) * 100, 2)}%",
-                    "Turnover(亿)": round(turnover_5 / 100000000, 2)
+                    "Dist_High%": f"{round(dist_high_pct, 2)}%",
+                    "Turnover(亿)": round(turnover_1 / 100000000, 2)
                 })
             except Exception:
                 continue
