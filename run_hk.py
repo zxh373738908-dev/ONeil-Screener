@@ -110,113 +110,121 @@ def get_hk_share_list():
 
 
 # ==========================================
-# 🧠 STEP 2: 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
+# 🧠 STEP 2: 核心选股引擎 (V3.0 终极动量 + 流动性护城河)
 # ==========================================
 def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts, mktcap):
+    # 1. 基础数据防爆校验：至少需要 125 天的数据来计算 120D_Return
+    if len(closes) < 125: 
+        return {"status": "fail", "reason": "次新/数据不足120天"}
+
     close = closes[-1]
-    last_amount = amounts[-1]
+    # 取近5日平均成交额，比单日成交额更稳定，防单日假爆量
+    avg_amount_5d = np.mean(amounts[-5:]) 
     
-    if close == 0.0 or vols[-1] == 0: return {"status": "fail", "reason": "停牌/无数据"}
-    if last_amount < 30000000: return {"status": "fail", "reason": "成交极度萎靡(<3000万)"} 
-
-    # --- 基础技术指标计算 ---
-    ma20 = np.mean(closes[-20:])
-    ma50 = np.mean(closes[-50:])
-    ma60 = np.mean(closes[-60:])
-    ma150 = np.mean(closes[-150:])
-    ma200 = np.mean(closes[-200:])
-    
-    h250, l250 = np.max(highs[-250:]), np.min(lows[-250:])
-    dist_high_pct = (close - h250) / h250 if h250 > 0 else 0
-    
-    avg_v50 = np.mean(vols[-50:])
-    vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
-    pct_change_today = (close - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
-    
-    r120_ret = (close - closes[-121]) / closes[-121] if closes[-121] > 0 else 0
+    if close == 0.0 or vols[-1] == 0: 
+        return {"status": "fail", "reason": "停牌/今日无数据"}
 
     # -----------------------------------------------------
-    # 🌟 轨线 1：老龙回头 (黄金坑 + 神奇九转 + 放量点火)
+    # 🛡️ 第一道门：V2.0 港股专属流性护城河 (绝对底线)
     # -----------------------------------------------------
-    td_buy = np.zeros(len(closes))
-    for i in range(4, len(closes)):
-        if closes[i] < closes[i-4]: td_buy[i] = td_buy[i-1] + 1
-        else: td_buy[i] = 0
-    has_td9_bottom = np.any(td_buy[-3:] >= 9)  
-    
-    is_bullish_engulfing = (close > opens[-2]) and (closes[-2] < opens[-2]) and (pct_change_today > 0.02)
-    bottom_signal = has_td9_bottom or is_bullish_engulfing
-
-    is_old_dragon = (
-        r120_ret > 0.12 and                        
-        (-0.25 <= dist_high_pct <= -0.05) and      
-        (close < ma20) and (close >= ma60 * 0.98) and 
-        bottom_signal and                          
-        (vol_ratio_today > 1.5) and (pct_change_today > 0.03) 
-    )
-
-    # -----------------------------------------------------
-    # 🚀 轨线 2：底部放量起爆 (口袋支点 Pocket Pivot)
-    # -----------------------------------------------------
-    vol_ratio_3d = np.max(vols[-3:]) / avg_v50 if avg_v50 > 0 else 0
-    daily_returns_3d = [(closes[-i] - closes[-i-1])/closes[-i-1] for i in range(1, 4)]
-    max_daily_ret_3d = max(daily_returns_3d)
-
-    is_explosive_breakout = (
-        vol_ratio_3d >= 2.0 and        
-        max_daily_ret_3d >= 0.04 and   
-        close > ma50 and close > ma20 and 
-        close >= h250 * 0.50           
-    )
-
-    # -----------------------------------------------------
-    # 📈 轨线 3：经典欧奈尔多头 (抓主升浪)
-    # -----------------------------------------------------
-    is_standard_uptrend = (
-        close > ma20 and close > ma50 and 
-        ma50 > ma150 and ma150 > ma200 and 
-        close >= h250 * 0.75  
-    )
-
-    # ================= 裁决逻辑 =================
-    if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend): 
-        return {"status": "fail", "reason": "未触发任何策略体系"}
+    # 过滤掉低于 200亿 市值的边缘资产 (20,000,000,000)
+    if mktcap < 20000000000: 
+        return {"status": "fail", "reason": "市值<200亿(小盘/庄股)"}
         
-    if close > (ma50 * 1.30): 
-        return {"status": "fail", "reason": "偏离50日线>30%(极度超买)"}
+    # 过滤掉日均成交额低于 1亿 港币的一滩死水 (100,000,000)
+    if avg_amount_5d < 100000000: 
+        return {"status": "fail", "reason": "近期成交极度萎靡(<1亿)"}
 
-    # 计算 RSI 动量
-    deltas = np.diff(closes[-30:])
+    # -----------------------------------------------------
+    # 🚀 第二道门：V3.0 长中短动量引擎 (为 Google Sheets RPS 供弹)
+    # -----------------------------------------------------
+    # 【注意】这里必须输出 纯小数 (如 0.152)，绝不能加 "%" 字符串！
+    # 否则 Google Sheets 里的 PERCENTRANK.INC 排名函数会报错！
+    ret_20 = (close - closes[-21]) / closes[-21] if closes[-21] > 0 else 0
+    ret_60 = (close - closes[-61]) / closes[-61] if closes[-61] > 0 else 0
+    ret_120 = (close - closes[-121]) / closes[-121] if closes[-121] > 0 else 0
+
+    # -----------------------------------------------------
+    # 🎯 第三道门：狙击枪扳机 (14日 RSI 黄金坑测算)
+    # -----------------------------------------------------
+    deltas = np.diff(closes[-30:]) # 取近30天作为平滑计算的基础
     up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
-    rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
-    
-    if rsi < 50: return {"status": "fail", "reason": "RSI<50(反转动能未确认)"} 
+    rsi_14 = 100 - (100 / (1 + (up/down))) if down > 0 else 100
 
-    # 动态生成专属战法标签
-    trend_tag = []
-    if is_old_dragon: trend_tag.append("🐉 老龙回头(黄金坑)")
-    if is_explosive_breakout: trend_tag.append("🚀 底部放量起爆")
-    if is_standard_uptrend: trend_tag.append("📈 经典多头排列")
-    if is_standard_uptrend and is_explosive_breakout: trend_tag = ["🔥 完美共振(多头+起爆)"]
+    # -----------------------------------------------------
+    # 📊 第四道门：异常爆量监控 (辅助判断主力异动)
+    # -----------------------------------------------------
+    avg_v50 = np.mean(vols[-50:])
+    vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
 
-    close_60 = closes[-61]
-    ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
-    
+    # 🏷️ 动态战术标签：直接在表格里告诉你该干什么！
+    if rsi_14 <= 45:
+        action_zone = "🎯 老龙回头(RSI<45 极佳买点)"
+    elif rsi_14 <= 55:
+        action_zone = "👀 黄金坑预警(RSI 45-55 盯盘)"
+    elif rsi_14 >= 70:
+        action_zone = "🔥 极度亢奋(RSI>70 准备止盈)"
+    else:
+        action_zone = "⏳ 趋势延续中(持股/等待回落)"
+
+    # ================= 组装战报 =================
+    # 将全部高流动性个股上报给 Sheets，由 Sheets 去做 RPS 排名
     data = {
         "Ticker": ticker.replace(".HK", ""), 
         "Name": name, 
         "Price": round(close, 2), 
-        "60D_Return%": f"{round(ret_60 * 100, 2)}%",
-        "RSI": round(rsi, 2), 
-        "Turnover_Rate%": "N/A", 
+        "20D_Return": round(ret_20, 4),   # 供 Sheets 计算 RPS_20
+        "60D_Return": round(ret_60, 4),   # 供 Sheets 计算 RPS_60
+        "120D_Return": round(ret_120, 4), # 供 Sheets 计算 RPS_120
+        "RSI_14": round(rsi_14, 2), 
         "Vol_Ratio": round(vol_ratio_today, 2),
-        "Dist_High%": f"{round(dist_high_pct * 100, 2)}%",
         "Mkt_Cap(亿)": round(mktcap / 100000000, 2), 
-        "Turnover(亿)": round(last_amount / 100000000, 2),
-        "Trend": " + ".join(trend_tag)
+        "Turnover_5D(亿)": round(avg_amount_5d / 100000000, 2),
+        "Action_Zone": action_zone
     }
     return {"status": "success", "data": data}
+
+
+# ==========================================
+# 📝 STEP 4: 写入作战指令 (需配合 V3.0 修改排序逻辑)
+# ==========================================
+def write_sheet(final_stocks, diag_msg=None):
+    print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets 表格...")
+    sheet_name = "HK-Share Screener"
+    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        sheet = get_worksheet(sheet_name)
+        sheet.clear()
+
+        if len(final_stocks) == 0:
+            sheet.update_acell("A1", "No Signal: 战局恶劣或处于洗盘期，暂无极品标的。")
+            if diag_msg: sheet.update_acell("A3", diag_msg)
+            print(f"⚠️ {sheet_name} 已写入空仓报告。")
+            return
+
+        df = pd.DataFrame(final_stocks)
+        
+        # [修改点]：因为传给表格的是纯小数(如0.152)，无需再剥离 "%" 符号，直接按 120D_Return (基本面趋势) 降序排
+        df = df.sort_values(by='120D_Return', ascending=False)
+        
+        # [修改点]：放大输送容量，输出前 200 只高流动性标的（必须量大，Google Sheets的排名函数算出来才精准）
+        df = df.head(200) 
+
+        # 写入表头及数据
+        sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
+        
+        # 写入更新时间戳 (UTC+8)
+        sheet.update_acell("N1", "Last Updated(UTC+8):")
+        sheet.update_acell("O1", now_str)
+        
+        if diag_msg: 
+            sheet.update_acell("P1", diag_msg)
+            
+        print(f"🎉 大功告成！已成功将 {len(df)} 只高流动性核心资产送达 Google Sheets 排名阵列！")
+    except Exception as e:
+        print(f"❌ 表格写入失败: {e}")
 
 
 # ==========================================
