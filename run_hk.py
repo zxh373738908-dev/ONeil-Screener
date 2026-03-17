@@ -34,8 +34,40 @@ def get_worksheet(sheet_name="HK-Share Screener"):
     except gspread.exceptions.WorksheetNotFound:
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
+
 # ==========================================
-# 🌍 STEP 1: 获取港股名册 (TradingView 国际接口无视封锁版)
+# 🌐 附加模块：获取港股【中文名称】翻译字典
+# ==========================================
+def get_chinese_name_mapping():
+    print("   -> 🌐 正在连接东方财富 CDN 节点，获取【港股中文名】映射表...")
+    mapping = {}
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "pn": 1, "pz": 5000, 
+        "po": 1, "np": 1, 
+        "fltt": 2, "invt": 2, 
+        "fid": "f3",
+        "fs": "m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2,m:116+t:3,m:116+t:4,m:116+t:1,m:116+t:2", 
+        "fields": "f12,f14"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("data") and data["data"].get("diff"):
+            for item in data["data"]["diff"]:
+                # 去除左侧的 0 (例如 00700 变成 700) 方便精准匹配
+                code = str(item.get("f12", "")).lstrip('0')
+                name = item.get("f14", "")
+                if code and name:
+                    mapping[code] = name
+        print(f"   -> ✅ 成功获取 {len(mapping)} 个中文股票名称！")
+    except Exception as e:
+        print(f"   -> ⚠️ 中文名称字典获取失败，将默认使用 TradingView 原生名。")
+    return mapping
+
+
+# ==========================================
+# 🌍 STEP 1: 获取港股名册 (TradingView + 中文汉化)
 # ==========================================
 def get_hk_share_list():
     print("\n🌍 [STEP 1] 启动【底层脱壳机制】：侦测到国内源联合封锁，切换至国际级【TradingView 量化中枢】...")
@@ -53,7 +85,7 @@ def get_hk_share_list():
     }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Content-Type": "application/json",
         "Origin": "https://www.tradingview.com",
         "Referer": "https://www.tradingview.com/"
@@ -72,23 +104,32 @@ def get_hk_share_list():
         if not raw_list:
             raise ValueError("获取到的股票列表为空")
             
+        # 汉化准备：获取中文翻译表
+        cn_mapping = get_chinese_name_mapping()
+        
         stock_list = []
         for item in raw_list:
             fields = item.get("d", [])
             if len(fields) >= 4:
-                raw_code, name, price, mktcap = fields[0], fields[1], fields[2], fields[3]
+                raw_code, name_eng, price, mktcap = fields[0], fields[1], fields[2], fields[3]
+                
+                # 提取纯数字代码
                 clean_sym = re.sub(r'[^0-9]', '', str(raw_code))
                 if not clean_sym: continue
                 
+                # 中文翻译匹配 (去0匹配，如果找不到中文，就用原来的英文名)
+                clean_sym_for_map = clean_sym.lstrip('0')
+                cn_name = cn_mapping.get(clean_sym_for_map, name_eng)
+                
                 stock_list.append({
                     "代码": clean_sym,
-                    "名称": name,
+                    "名称": cn_name,
                     "最新价": float(price) if price is not None else 0.0,
                     "总市值": float(mktcap) if mktcap is not None else 0.0
                 })
                 
         df = pd.DataFrame(stock_list)
-        print(f"   -> ✅ TradingView 国际专线接入成功！提取全市场 {len(df)} 只基础名册。")
+        print(f"   -> ✅ TradingView 国际专线接入成功！提取并汉化全市场 {len(df)} 只基础名册。")
         
     except Exception as e:
         print(f"   -> ❌ 致命错误：TradingView 数据流被阻断: {e}")
@@ -101,24 +142,22 @@ def get_hk_share_list():
     print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，送往 Yahoo 天基演算。")
     return df[['代码', '名称', '最新价', '总市值']]
 
+
 # ==========================================
 # 🧠 STEP 2: 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
 # ==========================================
 def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts, mktcap):
-    # 1. 基础数据防爆校验：确保有足够的K线数据计算250日新高和长线均线
     if len(closes) < 250: 
         return {"status": "fail", "reason": "次新/数据不足250天"}
 
     close = closes[-1]
     last_amount = amounts[-1]
     
-    # 取近5日平均成交额，防单日异常骗线 (港股极其重要)
     avg_amount_5d = np.mean(amounts[-5:]) 
     
     if close == 0.0 or vols[-1] == 0: 
         return {"status": "fail", "reason": "停牌/今日无数据"}
         
-    # [优化] 流动性护城河提升至 5000 万，过滤掉容易被操纵的仙股/庄股
     if avg_amount_5d < 50000000: 
         return {"status": "fail", "reason": "5日均成交萎靡(<5000万)"} 
 
@@ -136,45 +175,36 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
     vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
     pct_change_today = (close - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
 
-    r120_ret = (close - closes[-121]) / closes[-121] if closes[-121] > 0 else 0
-
-    # 计算 RSI (14日) - 用于动量过滤
     deltas = np.diff(closes[-15:])
     up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
     rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
 
-    # -----------------------------------------------------
-    # 🌟 轨线 1：老龙回头 (核心优化：长线多头 + 缩量回踩关键均线 + 收阳企稳)
-    # -----------------------------------------------------
+    # 🌟 轨线 1：老龙回头
     touch_ma20 = abs(close - ma20) / ma20 <= 0.03
     touch_ma50 = abs(close - ma50) / ma50 <= 0.03
     
     is_old_dragon = (
-        (ma50 > ma150) and                  # 大级别趋势必须是向上的
-        (touch_ma20 or touch_ma50) and      # 刚好回踩到支撑线附近
-        (close > opens[-1]) and             # 今天必须是红盘阳线（拒绝接飞刀）
-        (vol_ratio_today < 1.2) and         # 回踩时量能不能太大（证明主力没出货，是洗盘）
-        (rsi > 40)                          # RSI没有进入极度弱势区
+        (ma50 > ma150) and                  
+        (touch_ma20 or touch_ma50) and      
+        (close > opens[-1]) and             
+        (vol_ratio_today < 1.2) and         
+        (rsi > 40)                          
     )
 
-    # -----------------------------------------------------
-    # 🚀 轨线 2：底部/平台放量起爆 (核心优化：放量倍数 + 突破MA20 + 涨幅要求)
-    # -----------------------------------------------------
+    # 🚀 轨线 2：底部/平台放量起爆
     is_explosive_breakout = (
-        (vol_ratio_today >= 1.8) and        # 爆量：今日成交量是过去50天均量的1.8倍以上
-        (pct_change_today >= 0.035) and     # 实体大阳线：日涨幅 > 3.5%
-        (close > ma20) and                  # 强势突破20日生命线
-        (close >= h250 * 0.60)              # 拒绝底部挣扎的垃圾股，至少在年内半山腰以上
+        (vol_ratio_today >= 1.8) and        
+        (pct_change_today >= 0.035) and     
+        (close > ma20) and                  
+        (close >= h250 * 0.60)              
     )
 
-    # -----------------------------------------------------
-    # 📈 轨线 3：经典欧奈尔多头 (核心优化：严苛的均线排列 + 逼近新高)
-    # -----------------------------------------------------
+    # 📈 轨线 3：经典欧奈尔多头
     is_standard_uptrend = (
-        (close > ma20) and (ma20 > ma50) and (ma50 > ma150) and (ma150 > ma200) and # 完美多头排列
-        (close >= h250 * 0.80) and          # 距离一年最高点不到20% (上方几乎无套牢盘)
-        (rsi > 55)                          # 动量强劲
+        (close > ma20) and (ma20 > ma50) and (ma50 > ma150) and (ma150 > ma200) and 
+        (close >= h250 * 0.80) and          
+        (rsi > 55)                          
     )
 
     # ================= 裁决逻辑 =================
@@ -182,12 +212,11 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
         return {"status": "fail", "reason": "未触发极品作战形态"}
         
     if close > (ma50 * 1.25): 
-        return {"status": "fail", "reason": "偏离50日线>25%(极度超买，盈亏比差)"}
+        return {"status": "fail", "reason": "偏离50日线>25%(极度超买)"}
 
     if close < ma200 and not is_explosive_breakout:
         return {"status": "fail", "reason": "跌破200日牛熊线"}
 
-    # 🏷️ 动态生成专属战法标签
     trend_tag = []
     if is_old_dragon: trend_tag.append("🐉老龙回头(踩均线)")
     if is_explosive_breakout: trend_tag.append("🚀放量起爆(主力点火)")
@@ -199,21 +228,21 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
     close_60 = closes[-61]
     ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
 
-    # ================= 组装战报 =================
-    # 【核心修复】：全部输出纯数字格式，不再使用"%"字符串，彻底解决降序排序报错问题
+    # 组装数据 (全部为纯数字类型，适配自动排序)
     data = {
         "Ticker": ticker.replace(".HK", ""), 
         "Name": name, 
         "Price": round(close, 2), 
-        "60D_Return": round(ret_60 * 100, 2),        # 纯数字，代表百分比
+        "60D_Return": round(ret_60 * 100, 2),        
         "RSI": round(rsi, 2), 
         "Vol_Ratio": round(vol_ratio_today, 2),
-        "Dist_High(%)": round(dist_high_pct * 100, 2), # 纯数字，负数代表距离最高点的跌幅
+        "Dist_High(%)": round(dist_high_pct * 100, 2), 
         "Mkt_Cap(亿)": round(mktcap / 100000000, 2), 
         "Turnover(亿)": round(last_amount / 100000000, 2),
         "Trend": " + ".join(trend_tag)
     }
     return {"status": "success", "data": data}
+
 
 # ==========================================
 # 🚀 STEP 3: Yahoo Finance 并发盲扫与分发
@@ -268,7 +297,6 @@ def scan_hk_market_via_yfinance(df_list):
                     continue
                 
                 amounts = closes * vols 
-                
                 info = ticker_to_info[ticker]
                 res = apply_advanced_logic(ticker, info['name'], opens, closes, highs, lows, vols, amounts, info['mktcap'])
                 
@@ -285,6 +313,7 @@ def scan_hk_market_via_yfinance(df_list):
                 continue
                 
     return all_results, fail_reasons
+
 
 # ==========================================
 # 📝 STEP 4: 写入作战指令
@@ -306,9 +335,9 @@ def write_sheet(final_stocks, diag_msg=None):
 
         df = pd.DataFrame(final_stocks)
         
-        # 【核心修复】：直接根据 float 类型的 '60D_Return' 降序排列，去掉了所有多余的文本替换处理
+        # 直接使用纯数字进行降序排序
         df = df.sort_values(by='60D_Return', ascending=False)
-        df = df.head(50) # 仅向指挥部汇报最强前 50 只龙头
+        df = df.head(50) 
 
         # 写入表头及数据
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
@@ -323,12 +352,13 @@ def write_sheet(final_stocks, diag_msg=None):
     except Exception as e:
         print(f"❌ 表格写入失败: {e}")
 
+
 # ==========================================
 # MAIN 主函数
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n========== 港股猎手系统 V10.0 (实战极品起爆版) ==========")
+    print(f"\n========== 港股猎手系统 V10.1 (全中文汉化版) ==========")
     print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
     
     # 1. 获取名单
