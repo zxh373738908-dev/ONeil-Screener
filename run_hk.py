@@ -35,12 +35,11 @@ def get_worksheet(sheet_name="HK-Share Screener"):
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
 # ==========================================
-# ⚡ STEP 1: 获取港股名册 (TradingView 国际接口无视封锁版)
+# 🌍 STEP 1: 获取港股名册 (TradingView 国际接口无视封锁版)
 # ==========================================
 def get_hk_share_list():
     print("\n🌍 [STEP 1] 启动【底层脱壳机制】：侦测到国内源联合封锁，切换至国际级【TradingView 量化中枢】...")
     
-    # 彻底使用 TradingView 全球筛选器 API (免验证，无视机房 IP 封锁)
     url = "https://scanner.tradingview.com/hongkong/scan"
     
     payload = {
@@ -73,17 +72,13 @@ def get_hk_share_list():
         if not raw_list:
             raise ValueError("获取到的股票列表为空")
             
-        # 提取并清洗数据
         stock_list = []
         for item in raw_list:
             fields = item.get("d", [])
             if len(fields) >= 4:
                 raw_code, name, price, mktcap = fields[0], fields[1], fields[2], fields[3]
-                
-                # TradingView 港股代码格式一般为数字，提取纯数字部分
                 clean_sym = re.sub(r'[^0-9]', '', str(raw_code))
-                if not clean_sym: 
-                    continue
+                if not clean_sym: continue
                 
                 stock_list.append({
                     "代码": clean_sym,
@@ -101,144 +96,136 @@ def get_hk_share_list():
 
     # 🌟 核心过滤条件：股价 >= 1港币 且 市值 >= 100亿港币
     df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
-    
-    # 过滤掉无名称的数据
     df = df[df['名称'].astype(str).str.strip() != '']
     
     print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，送往 Yahoo 天基演算。")
     return df[['代码', '名称', '最新价', '总市值']]
 
-
 # ==========================================
-# 🧠 STEP 2: 核心选股引擎 (V3.0 终极动量 + 流动性护城河)
+# 🧠 STEP 2: 核心选股引擎 (三轨制：经典 + 起爆 + 老龙回头)
 # ==========================================
 def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts, mktcap):
-    # 1. 基础数据防爆校验：至少需要 125 天的数据来计算 120D_Return
-    if len(closes) < 125: 
-        return {"status": "fail", "reason": "次新/数据不足120天"}
+    # 1. 基础数据防爆校验：确保有足够的K线数据计算250日新高和长线均线
+    if len(closes) < 250: 
+        return {"status": "fail", "reason": "次新/数据不足250天"}
 
     close = closes[-1]
-    # 取近5日平均成交额，比单日成交额更稳定，防单日假爆量
+    last_amount = amounts[-1]
+    
+    # 取近5日平均成交额，防单日异常骗线 (港股极其重要)
     avg_amount_5d = np.mean(amounts[-5:]) 
     
     if close == 0.0 or vols[-1] == 0: 
         return {"status": "fail", "reason": "停牌/今日无数据"}
-
-    # -----------------------------------------------------
-    # 🛡️ 第一道门：V2.0 港股专属流性护城河 (绝对底线)
-    # -----------------------------------------------------
-    # 过滤掉低于 200亿 市值的边缘资产 (20,000,000,000)
-    if mktcap < 20000000000: 
-        return {"status": "fail", "reason": "市值<200亿(小盘/庄股)"}
         
-    # 过滤掉日均成交额低于 1亿 港币的一滩死水 (100,000,000)
-    if avg_amount_5d < 100000000: 
-        return {"status": "fail", "reason": "近期成交极度萎靡(<1亿)"}
+    # [优化] 流动性护城河提升至 5000 万，过滤掉容易被操纵的仙股/庄股
+    if avg_amount_5d < 50000000: 
+        return {"status": "fail", "reason": "5日均成交萎靡(<5000万)"} 
 
-    # -----------------------------------------------------
-    # 🚀 第二道门：V3.0 长中短动量引擎 (为 Google Sheets RPS 供弹)
-    # -----------------------------------------------------
-    # 【注意】这里必须输出 纯小数 (如 0.152)，绝不能加 "%" 字符串！
-    # 否则 Google Sheets 里的 PERCENTRANK.INC 排名函数会报错！
-    ret_20 = (close - closes[-21]) / closes[-21] if closes[-21] > 0 else 0
-    ret_60 = (close - closes[-61]) / closes[-61] if closes[-61] > 0 else 0
-    ret_120 = (close - closes[-121]) / closes[-121] if closes[-121] > 0 else 0
+    # --- 基础技术指标计算 ---
+    ma20 = np.mean(closes[-20:])
+    ma50 = np.mean(closes[-50:])
+    ma60 = np.mean(closes[-60:])
+    ma150 = np.mean(closes[-150:])
+    ma200 = np.mean(closes[-200:])
 
-    # -----------------------------------------------------
-    # 🎯 第三道门：狙击枪扳机 (14日 RSI 黄金坑测算)
-    # -----------------------------------------------------
-    deltas = np.diff(closes[-30:]) # 取近30天作为平滑计算的基础
-    up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
-    down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
-    rsi_14 = 100 - (100 / (1 + (up/down))) if down > 0 else 100
+    h250 = np.max(highs[-250:])
+    dist_high_pct = (close - h250) / h250 if h250 > 0 else 0
 
-    # -----------------------------------------------------
-    # 📊 第四道门：异常爆量监控 (辅助判断主力异动)
-    # -----------------------------------------------------
     avg_v50 = np.mean(vols[-50:])
     vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
+    pct_change_today = (close - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
 
-    # 🏷️ 动态战术标签：直接在表格里告诉你该干什么！
-    if rsi_14 <= 45:
-        action_zone = "🎯 老龙回头(RSI<45 极佳买点)"
-    elif rsi_14 <= 55:
-        action_zone = "👀 黄金坑预警(RSI 45-55 盯盘)"
-    elif rsi_14 >= 70:
-        action_zone = "🔥 极度亢奋(RSI>70 准备止盈)"
-    else:
-        action_zone = "⏳ 趋势延续中(持股/等待回落)"
+    r120_ret = (close - closes[-121]) / closes[-121] if closes[-121] > 0 else 0
+
+    # 计算 RSI (14日) - 用于动量过滤
+    deltas = np.diff(closes[-15:])
+    up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
+
+    # -----------------------------------------------------
+    # 🌟 轨线 1：老龙回头 (核心优化：长线多头 + 缩量回踩关键均线 + 收阳企稳)
+    # -----------------------------------------------------
+    touch_ma20 = abs(close - ma20) / ma20 <= 0.03
+    touch_ma50 = abs(close - ma50) / ma50 <= 0.03
+    
+    is_old_dragon = (
+        (ma50 > ma150) and                  # 大级别趋势必须是向上的
+        (touch_ma20 or touch_ma50) and      # 刚好回踩到支撑线附近
+        (close > opens[-1]) and             # 今天必须是红盘阳线（拒绝接飞刀）
+        (vol_ratio_today < 1.2) and         # 回踩时量能不能太大（证明主力没出货，是洗盘）
+        (rsi > 40)                          # RSI没有进入极度弱势区
+    )
+
+    # -----------------------------------------------------
+    # 🚀 轨线 2：底部/平台放量起爆 (核心优化：放量倍数 + 突破MA20 + 涨幅要求)
+    # -----------------------------------------------------
+    is_explosive_breakout = (
+        (vol_ratio_today >= 1.8) and        # 爆量：今日成交量是过去50天均量的1.8倍以上
+        (pct_change_today >= 0.035) and     # 实体大阳线：日涨幅 > 3.5%
+        (close > ma20) and                  # 强势突破20日生命线
+        (close >= h250 * 0.60)              # 拒绝底部挣扎的垃圾股，至少在年内半山腰以上
+    )
+
+    # -----------------------------------------------------
+    # 📈 轨线 3：经典欧奈尔多头 (核心优化：严苛的均线排列 + 逼近新高)
+    # -----------------------------------------------------
+    is_standard_uptrend = (
+        (close > ma20) and (ma20 > ma50) and (ma50 > ma150) and (ma150 > ma200) and # 完美多头排列
+        (close >= h250 * 0.80) and          # 距离一年最高点不到20% (上方几乎无套牢盘)
+        (rsi > 55)                          # 动量强劲
+    )
+
+    # ================= 裁决逻辑 =================
+    if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend): 
+        return {"status": "fail", "reason": "未触发极品作战形态"}
+        
+    if close > (ma50 * 1.25): 
+        return {"status": "fail", "reason": "偏离50日线>25%(极度超买，盈亏比差)"}
+
+    if close < ma200 and not is_explosive_breakout:
+        return {"status": "fail", "reason": "跌破200日牛熊线"}
+
+    # 🏷️ 动态生成专属战法标签
+    trend_tag = []
+    if is_old_dragon: trend_tag.append("🐉老龙回头(踩均线)")
+    if is_explosive_breakout: trend_tag.append("🚀放量起爆(主力点火)")
+    if is_standard_uptrend: trend_tag.append("📈经典多头(逼近新高)")
+    
+    if is_standard_uptrend and is_explosive_breakout: 
+        trend_tag = ["🔥主升浪爆发(多头+起爆)"]
+
+    close_60 = closes[-61]
+    ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
 
     # ================= 组装战报 =================
-    # 将全部高流动性个股上报给 Sheets，由 Sheets 去做 RPS 排名
+    # 【核心修复】：全部输出纯数字格式，不再使用"%"字符串，彻底解决降序排序报错问题
     data = {
         "Ticker": ticker.replace(".HK", ""), 
         "Name": name, 
         "Price": round(close, 2), 
-        "20D_Return": round(ret_20, 4),   # 供 Sheets 计算 RPS_20
-        "60D_Return": round(ret_60, 4),   # 供 Sheets 计算 RPS_60
-        "120D_Return": round(ret_120, 4), # 供 Sheets 计算 RPS_120
-        "RSI_14": round(rsi_14, 2), 
+        "60D_Return": round(ret_60 * 100, 2),        # 纯数字，代表百分比
+        "RSI": round(rsi, 2), 
         "Vol_Ratio": round(vol_ratio_today, 2),
+        "Dist_High(%)": round(dist_high_pct * 100, 2), # 纯数字，负数代表距离最高点的跌幅
         "Mkt_Cap(亿)": round(mktcap / 100000000, 2), 
-        "Turnover_5D(亿)": round(avg_amount_5d / 100000000, 2),
-        "Action_Zone": action_zone
+        "Turnover(亿)": round(last_amount / 100000000, 2),
+        "Trend": " + ".join(trend_tag)
     }
     return {"status": "success", "data": data}
-
-
-# ==========================================
-# 📝 STEP 4: 写入作战指令 (需配合 V3.0 修改排序逻辑)
-# ==========================================
-def write_sheet(final_stocks, diag_msg=None):
-    print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets 表格...")
-    sheet_name = "HK-Share Screener"
-    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        sheet = get_worksheet(sheet_name)
-        sheet.clear()
-
-        if len(final_stocks) == 0:
-            sheet.update_acell("A1", "No Signal: 战局恶劣或处于洗盘期，暂无极品标的。")
-            if diag_msg: sheet.update_acell("A3", diag_msg)
-            print(f"⚠️ {sheet_name} 已写入空仓报告。")
-            return
-
-        df = pd.DataFrame(final_stocks)
-        
-        # [修改点]：因为传给表格的是纯小数(如0.152)，无需再剥离 "%" 符号，直接按 120D_Return (基本面趋势) 降序排
-        df = df.sort_values(by='120D_Return', ascending=False)
-        
-        # [修改点]：放大输送容量，输出前 200 只高流动性标的（必须量大，Google Sheets的排名函数算出来才精准）
-        df = df.head(200) 
-
-        # 写入表头及数据
-        sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-        
-        # 写入更新时间戳 (UTC+8)
-        sheet.update_acell("N1", "Last Updated(UTC+8):")
-        sheet.update_acell("O1", now_str)
-        
-        if diag_msg: 
-            sheet.update_acell("P1", diag_msg)
-            
-        print(f"🎉 大功告成！已成功将 {len(df)} 只高流动性核心资产送达 Google Sheets 排名阵列！")
-    except Exception as e:
-        print(f"❌ 表格写入失败: {e}")
-
 
 # ==========================================
 # 🚀 STEP 3: Yahoo Finance 并发盲扫与分发
 # ==========================================
 def scan_hk_market_via_yfinance(df_list):
-    print("\n🚀[STEP 2] 启动【Yahoo Finance】天基武器，执行高速大盘演算...")
+    print("\n🚀 [STEP 2] 启动【Yahoo Finance】天基武器，执行高速大盘演算...")
     
     tickers = []
     ticker_to_info = {}
     
     for _, row in df_list.iterrows():
         code = str(row['代码'])
-        # TradingView 提取的代码可能是类似 "700"，补齐格式为 "0700.HK"
         yf_code = code.lstrip('0').zfill(4) + '.HK'
         tickers.append(yf_code)
         ticker_to_info[yf_code] = {
@@ -253,18 +240,16 @@ def scan_hk_market_via_yfinance(df_list):
     
     all_results = []
     fail_reasons = defaultdict(int)
-    chunk_size = 500  # Yahoo接口最佳并发分块
+    chunk_size = 500  
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
         print(f"   -> 📥 正在下载演算第 {i+1} ~ {min(i+chunk_size, len(tickers))} 只核心标的...")
         
-        # 为了满足至少250个交易日计算 h250，需要拉取2年的数据
         data = yf.download(chunk, period="2y", auto_adjust=True, threads=True, progress=False)
         
         for ticker in chunk:
             try:
-                # 适配单个ticker与多个ticker并列时的层级结构
                 if len(chunk) > 1:
                     closes = data['Close'][ticker].dropna().values
                     opens = data['Open'][ticker].dropna().values
@@ -282,7 +267,6 @@ def scan_hk_market_via_yfinance(df_list):
                     fail_reasons["次新/数据不足(<250天)"] += 1
                     continue
                 
-                # Yahoo没有提供港股每日总成交额（Amount），直接按 `收盘价 x 股数` 近似计算
                 amounts = closes * vols 
                 
                 info = ticker_to_info[ticker]
@@ -303,7 +287,7 @@ def scan_hk_market_via_yfinance(df_list):
     return all_results, fail_reasons
 
 # ==========================================
-# 📝 STEP 4: 写入作战指令 (保留这一个最新版的写入函数即可)
+# 📝 STEP 4: 写入作战指令
 # ==========================================
 def write_sheet(final_stocks, diag_msg=None):
     print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets 表格...")
@@ -315,31 +299,27 @@ def write_sheet(final_stocks, diag_msg=None):
         sheet.clear()
 
         if len(final_stocks) == 0:
-            sheet.update_acell("A1", "No Signal: 战局恶劣或处于洗盘期，暂无极品标的。")
+            sheet.update_acell("A1", "No Signal: 战局恶劣或未发现极品标的。")
             if diag_msg: sheet.update_acell("A3", diag_msg)
             print(f"⚠️ {sheet_name} 已写入空仓报告。")
             return
 
         df = pd.DataFrame(final_stocks)
         
-        # [核心修复]：直接使用纯数字列 120D_Return (或者 60D_Return) 进行降序排列
-        # 不再需要剥离 % 符号，因为上一步传过来的已经是浮点数
-        df = df.sort_values(by='120D_Return', ascending=False)
-        
-        # 放大输送容量，输出前 200 只高流动性标的（供Google Sheets算RPS）
-        df = df.head(200) 
+        # 【核心修复】：直接根据 float 类型的 '60D_Return' 降序排列，去掉了所有多余的文本替换处理
+        df = df.sort_values(by='60D_Return', ascending=False)
+        df = df.head(50) # 仅向指挥部汇报最强前 50 只龙头
 
         # 写入表头及数据
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
         
-        # 写入更新时间戳 (UTC+8)
-        sheet.update_acell("N1", "Last Updated(UTC+8):")
-        sheet.update_acell("O1", now_str)
-        
+        # 写入更新时间戳与诊断日志
+        sheet.update_acell("L1", "Last Updated(UTC+8):")
+        sheet.update_acell("M1", now_str)
         if diag_msg: 
-            sheet.update_acell("P1", diag_msg)
+            sheet.update_acell("N1", diag_msg)
             
-        print(f"🎉 大功告成！已成功将 {len(df)} 只高流动性核心资产送达 Google Sheets 排名阵列！")
+        print(f"🎉 大功告成！已成功将 {len(df)} 只战法认证龙头送达指挥部！")
     except Exception as e:
         print(f"❌ 表格写入失败: {e}")
 
@@ -348,23 +328,23 @@ def write_sheet(final_stocks, diag_msg=None):
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n========== 港股猎手系统 V9.1 (TradingView全球直连版) ==========")
+    print(f"\n========== 港股猎手系统 V10.0 (实战极品起爆版) ==========")
     print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
     
-    # 1. 获取名单 (TradingView 源)
+    # 1. 获取名单
     df_list = get_hk_share_list()
     if df_list.empty: 
         return
     
-    # 2. 批量扫描 (Yahoo 源)
+    # 2. 批量扫描核心逻辑
     final_stocks, fail_reasons = scan_hk_market_via_yfinance(df_list)
     
     # 3. 构建诊断报告
     fail_str = "".join([f"   - {r}: {c} 只\n" for r, c in sorted(fail_reasons.items(), key=lambda x:x[1], reverse=True)])
     diag_msg = (
-        f"[{now_str}] 港股(HK)诊断报告：\n"
-        f"📊 市场百亿过滤池: {len(df_list)}只\n"
-        f"🏆 最终选出高流动性标的: {len(final_stocks)}只\n"
+        f"[{now_str}] 港股战法扫描完毕：\n"
+        f"📊 百亿基础过滤池: {len(df_list)}只\n"
+        f"🏆 筛选出极品形态: {len(final_stocks)}只\n"
         f"🔪 淘汰明细：\n{fail_str}"
     )
     print("\n" + diag_msg)
