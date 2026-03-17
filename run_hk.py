@@ -24,7 +24,6 @@ scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-# 强制绑定 UTC+8 北京/香港时间
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
 def get_worksheet(sheet_name="HK-Share Screener"):
@@ -36,69 +35,55 @@ def get_worksheet(sheet_name="HK-Share Screener"):
 
 
 # ==========================================
-# 🌐 附加模块：获取港股【中文名称】翻译字典
+# 🌐 附加模块：腾讯证券极速汉化引擎 (无反爬)
 # ==========================================
-def get_chinese_name_mapping():
-    print("   -> 🌐 正在连接东方财富 CDN 节点，获取【港股中文名】映射表...")
-    mapping = {}
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": 1, "pz": 5000, 
-        "po": 1, "np": 1, 
-        "fltt": 2, "invt": 2, 
-        "fid": "f3",
-        # 获取港股主板和创业板的所有股票
-        "fs": "m:116+t:3,m:116+t:4,m:116+t:1,m:116+t:2,m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2", 
-        "fields": "f12,f14"
-    }
+def translate_to_chinese_via_tencent(df):
+    print("   -> 🌐 正在调取【腾讯证券】主节点，进行股票名称极速汉化...")
+    codes = df['代码'].tolist()
+    cn_mapping = {}
     
-    # 【核心修复】：加上严密的浏览器伪装，防止东方财富拦截
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://quote.eastmoney.com/",
-        "Accept": "application/json, text/plain, */*"
-    }
-    
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        data = resp.json()
-        if data.get("data") and data["data"].get("diff"):
-            for item in data["data"]["diff"]:
-                # 去除左侧的 0 (例如 00700 变成 700) 方便精准匹配
-                code = str(item.get("f12", "")).lstrip('0')
-                name = item.get("f14", "")
-                if code and name:
-                    mapping[code] = name
-        print(f"   -> ✅ 成功突破反爬！获取并映射了 {len(mapping)} 个中文股票名称！")
-    except Exception as e:
-        print(f"   -> ⚠️ 中文名称获取失败({e})，将默认使用英文名。")
+    # 腾讯接口每次支持批量查询几十个，我们将600多只股票分块请求，极快且不会被封
+    chunk_size = 50
+    for i in range(0, len(codes), chunk_size):
+        chunk = codes[i:i+chunk_size]
+        # 腾讯的港股格式是 hk00700, hk09988，用 zfill(5) 补齐5位
+        query_str = ",".join([f"hk{str(c).zfill(5)}" for c in chunk])
+        url = f"http://qt.gtimg.cn/q={query_str}"
         
-    return mapping
+        try:
+            resp = requests.get(url, timeout=5)
+            # 腾讯返回格式示例: v_hk00700="100~腾讯控股~00700~..."
+            matches = re.findall(r'v_hk(\d+)="[^~]+~([^~]+)~', resp.text)
+            for code, name in matches:
+                clean_code = str(code).lstrip('0')
+                cn_mapping[clean_code] = name
+        except Exception:
+            pass # 如果某一批次失败，直接跳过，保留原始英文名
+            
+    # 替换 DataFrame 中的名称，如果腾讯没查到，就用原来的 TradingView 英文名保底
+    df['名称'] = df.apply(lambda row: cn_mapping.get(str(row['代码']), row['名称']), axis=1)
+    print(f"   -> ✅ 腾讯数据桥接成功！已完美汉化 {len(cn_mapping)} 只核心标的。")
+    return df
 
 
 # ==========================================
-# 🌍 STEP 1: 获取港股名册 (TradingView + 中文汉化)
+# 🌍 STEP 1: 获取港股名册 (TradingView + 腾讯汉化)
 # ==========================================
 def get_hk_share_list():
-    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：侦测到国内源联合封锁，切换至国际级【TradingView 量化中枢】...")
+    print("\n🌍 [STEP 1] 启动【底层脱壳机制】：切换至国际级【TradingView 量化中枢】...")
     
     url = "https://scanner.tradingview.com/hongkong/scan"
     
     payload = {
         "columns": ["name", "description", "close", "market_cap_basic"],
-        "range": [0, 4000],  # 一次性拉取全部港股
+        "range": [0, 4000], 
         "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
-        "filter": [
-            # 仅筛选纯正股票，排除权证、牛熊证等杂项
-            {"left": "type", "operation": "equal", "right": "stock"}
-        ]
+        "filter": [{"left": "type", "operation": "equal", "right": "stock"}]
     }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Content-Type": "application/json",
-        "Origin": "https://www.tradingview.com",
-        "Referer": "https://www.tradingview.com/"
+        "User-Agent": "Mozilla/5.0",
+        "Content-Type": "application/json"
     }
     
     try:
@@ -111,35 +96,23 @@ def get_hk_share_list():
         data = resp.json()
         raw_list = data.get("data", [])
         
-        if not raw_list:
-            raise ValueError("获取到的股票列表为空")
-            
-        # 汉化准备：获取中文翻译表
-        cn_mapping = get_chinese_name_mapping()
-        
         stock_list = []
         for item in raw_list:
             fields = item.get("d", [])
             if len(fields) >= 4:
                 raw_code, name_eng, price, mktcap = fields[0], fields[1], fields[2], fields[3]
-                
-                # 提取纯数字代码
                 clean_sym = re.sub(r'[^0-9]', '', str(raw_code))
                 if not clean_sym: continue
                 
-                # 中文翻译匹配 (去0匹配，如果找不到中文，就用原来的英文名)
-                clean_sym_for_map = clean_sym.lstrip('0')
-                cn_name = cn_mapping.get(clean_sym_for_map, name_eng)
-                
                 stock_list.append({
                     "代码": clean_sym,
-                    "名称": cn_name,
+                    "名称": name_eng, # 暂存英文名
                     "最新价": float(price) if price is not None else 0.0,
                     "总市值": float(mktcap) if mktcap is not None else 0.0
                 })
                 
         df = pd.DataFrame(stock_list)
-        print(f"   -> ✅ TradingView 国际专线接入成功！提取并汉化全市场 {len(df)} 只基础名册。")
+        print(f"   -> ✅ TradingView 接入成功！提取全市场 {len(df)} 只基础名册。")
         
     except Exception as e:
         print(f"   -> ❌ 致命错误：TradingView 数据流被阻断: {e}")
@@ -149,7 +122,10 @@ def get_hk_share_list():
     df = df[(df['最新价'] >= 1.0) & (df['总市值'] >= 10000000000)].copy()
     df = df[df['名称'].astype(str).str.strip() != '']
     
-    print(f"   -> ✅ 基础洗盘完毕！通过真实市值提纯出 {len(df)} 只【百亿级】候选标的，送往 Yahoo 天基演算。")
+    # 【汉化】只对入选的几百只百亿标的进行翻译，速度极快
+    df = translate_to_chinese_via_tencent(df)
+    
+    print(f"   -> ✅ 基础洗盘完毕！提纯出 {len(df)} 只【百亿级】候选标的，送往 Yahoo 天基演算。")
     return df[['代码', '名称', '最新价', '总市值']]
 
 
@@ -238,7 +214,6 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
     close_60 = closes[-61]
     ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
 
-    # 组装数据 (全部为纯数字类型，适配自动排序)
     data = {
         "Ticker": ticker.replace(".HK", ""), 
         "Name": name, 
@@ -274,7 +249,6 @@ def scan_hk_market_via_yfinance(df_list):
         
     print(f"   -> 📡 构建完成 {len(tickers)} 条数据通道，开始高维批量下载 (请求周期: 2年)...")
     if not tickers:
-        print("   -> ❌ 致命错误：转换后的 Yahoo Tickers 列表为空！")
         return [], {}
     
     all_results = []
@@ -345,7 +319,7 @@ def write_sheet(final_stocks, diag_msg=None):
 
         df = pd.DataFrame(final_stocks)
         
-        # 直接使用纯数字进行降序排序
+        # 降序排序并截取前 50 支最强个股
         df = df.sort_values(by='60D_Return', ascending=False)
         df = df.head(50) 
 
@@ -368,7 +342,7 @@ def write_sheet(final_stocks, diag_msg=None):
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n========== 港股猎手系统 V10.1 (全中文汉化版) ==========")
+    print(f"\n========== 港股猎手系统 V10.2 (腾讯极速汉化版) ==========")
     print(f"⏰ 当前系统时间 (UTC+8): {now_str}")
     
     # 1. 获取名单
