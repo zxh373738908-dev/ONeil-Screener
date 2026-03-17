@@ -303,7 +303,7 @@ def scan_hk_market_via_yfinance(df_list):
     return all_results, fail_reasons
 
 # ==========================================
-# 📝 STEP 4: 写入作战指令
+# 📝 STEP 4: 写入作战指令 (保留这一个最新版的写入函数即可)
 # ==========================================
 def write_sheet(final_stocks, diag_msg=None):
     print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets 表格...")
@@ -321,23 +321,25 @@ def write_sheet(final_stocks, diag_msg=None):
             return
 
         df = pd.DataFrame(final_stocks)
-        # 根据 60日收益率 降序排列
-        df['Sort_Num'] = df['60D_Return%'].str.replace('%', '').astype(float)
-        df = df.sort_values(by='Sort_Num', ascending=False).drop(columns=['Sort_Num'])
-        df = df.head(50)
+        
+        # [核心修复]：直接使用纯数字列 120D_Return (或者 60D_Return) 进行降序排列
+        # 不再需要剥离 % 符号，因为上一步传过来的已经是浮点数
+        df = df.sort_values(by='120D_Return', ascending=False)
+        
+        # 放大输送容量，输出前 200 只高流动性标的（供Google Sheets算RPS）
+        df = df.head(200) 
 
         # 写入表头及数据
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
         
         # 写入更新时间戳 (UTC+8)
-        sheet.update_acell("M1", "Last Updated(UTC+8):")
-        sheet.update_acell("N1", now_str)
+        sheet.update_acell("N1", "Last Updated(UTC+8):")
+        sheet.update_acell("O1", now_str)
         
-        # 写入诊断信息
         if diag_msg: 
-            sheet.update_acell("O1", diag_msg)
+            sheet.update_acell("P1", diag_msg)
             
-        print(f"🎉 大功告成！已成功将 {len(df)} 只战法认证龙头送达指挥部！")
+        print(f"🎉 大功告成！已成功将 {len(df)} 只高流动性核心资产送达 Google Sheets 排名阵列！")
     except Exception as e:
         print(f"❌ 表格写入失败: {e}")
 
@@ -362,7 +364,7 @@ def main():
     diag_msg = (
         f"[{now_str}] 港股(HK)诊断报告：\n"
         f"📊 市场百亿过滤池: {len(df_list)}只\n"
-        f"🏆 最终选出最强龙头: {min(len(final_stocks), 50)}只\n"
+        f"🏆 最终选出高流动性标的: {len(final_stocks)}只\n"
         f"🔪 淘汰明细：\n{fail_str}"
     )
     print("\n" + diag_msg)
