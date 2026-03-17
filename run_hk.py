@@ -47,11 +47,20 @@ def get_chinese_name_mapping():
         "po": 1, "np": 1, 
         "fltt": 2, "invt": 2, 
         "fid": "f3",
-        "fs": "m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2,m:116+t:3,m:116+t:4,m:116+t:1,m:116+t:2", 
+        # 获取港股主板和创业板的所有股票
+        "fs": "m:116+t:3,m:116+t:4,m:116+t:1,m:116+t:2,m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2", 
         "fields": "f12,f14"
     }
+    
+    # 【核心修复】：加上严密的浏览器伪装，防止东方财富拦截
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json, text/plain, */*"
+    }
+    
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
         data = resp.json()
         if data.get("data") and data["data"].get("diff"):
             for item in data["data"]["diff"]:
@@ -60,9 +69,10 @@ def get_chinese_name_mapping():
                 name = item.get("f14", "")
                 if code and name:
                     mapping[code] = name
-        print(f"   -> ✅ 成功获取 {len(mapping)} 个中文股票名称！")
+        print(f"   -> ✅ 成功突破反爬！获取并映射了 {len(mapping)} 个中文股票名称！")
     except Exception as e:
-        print(f"   -> ⚠️ 中文名称字典获取失败，将默认使用 TradingView 原生名。")
+        print(f"   -> ⚠️ 中文名称获取失败({e})，将默认使用英文名。")
+        
     return mapping
 
 
