@@ -31,7 +31,7 @@ def get_worksheet(sheet_name="HK-Share Screener"):
         return doc.add_worksheet(title=sheet_name, rows=100, cols=20)
 
 # ==========================================
-# 🌐 附加模塊：騰訊證券極速漢化引擎
+# 🌐 附加模塊：騰訊證券極速漢化
 # ==========================================
 def translate_to_chinese_via_tencent(df):
     print(" -> 🌐 正在調取【騰訊證券】主節點，進行股票名稱極速漢化...")
@@ -55,23 +55,16 @@ def translate_to_chinese_via_tencent(df):
     return df
 
 # ==========================================
-# 📊 核心升級：Python 原生 FRVP 籌碼峰演算引擎
+# 📊 附加模塊：Python 原生 FRVP 籌碼峰演算引擎
 # ==========================================
-def calculate_frvp_poc(highs, lows, vols, lookback=120, bins=50):
-    """
-    模擬 TradingView 的 Fixed Range Volume Profile
-    精準計算過去 N 天的 POC (Point of Control) 主力絕對成本線
-    """
-    if len(highs) < lookback:
-        lookback = len(highs)
-        
+def calculate_frvp_poc(highs, lows, vols, lookback=120, bins=60):
+    if len(highs) < lookback: lookback = len(highs)
     recent_h = highs[-lookback:]
     recent_l = lows[-lookback:]
     recent_v = vols[-lookback:]
     
     min_p, max_p = np.min(recent_l), np.max(recent_h)
-    if max_p == min_p: 
-        return min_p
+    if max_p == min_p: return min_p
         
     bin_size = (max_p - min_p) / bins
     profile = np.zeros(bins)
@@ -96,7 +89,7 @@ def calculate_frvp_poc(highs, lows, vols, lookback=120, bins=50):
 # 🌍 STEP 1: 獲取港股名冊 (包含 TV VWAP)
 # ==========================================
 def get_hk_share_list():
-    print("\n🌍 [STEP 1] 啟動【底層脫殼機制】：切換至國際級【TradingView 量化中樞】...")
+    print("\n🌍 [STEP 1] 啟動【底層脫殼機制】：提取 TradingView 名冊與 VWAP...")
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {
         "columns": ["name", "description", "close", "market_cap_basic", "VWAP"],
@@ -135,74 +128,105 @@ def get_hk_share_list():
     return df[['代碼', '名稱', '最新價', '總市值', 'VWAP']]
 
 # ==========================================
-# 🧠 STEP 2: 籌碼峰優化選股引擎 (公差放寬實戰版)
+# 🧠 STEP 2: 核心選股引擎 (100%保留原版 + 籌碼確認)
 # ==========================================
 def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts, mktcap, tv_vwap):
-    # ⚠️ 修正：最低要求 150 天，不強制要求 250 天，避免港股休市導致的誤殺
-    if len(closes) < 150: return {"status": "fail", "reason": "次新/數據不足150天"}
-    
+    if len(closes) < 250:
+        return {"status": "fail", "reason": "次新/數據不足250天"}
+        
     close = closes[-1]
     last_amount = amounts[-1]
     avg_amount_5d = np.mean(amounts[-5:])
     
-    if close == 0.0 or vols[-1] == 0: return {"status": "fail", "reason": "停牌/今日無數據"}
-    if avg_amount_5d < 50000000: return {"status": "fail", "reason": "5日均成交萎靡(<5000萬)"}
+    if close == 0.0 or vols[-1] == 0:
+        return {"status": "fail", "reason": "停牌/今日無數據"}
+    if avg_amount_5d < 50000000:
+        return {"status": "fail", "reason": "5日均成交萎靡(<5000萬)"}
 
-    # 動態獲取均線與極值 (適應不同數據長度)
-    data_len = len(closes)
+    # --- 基礎技術指標計算 (100%原版) ---
     ma20 = np.mean(closes[-20:])
     ma50 = np.mean(closes[-50:])
+    ma60 = np.mean(closes[-60:])
     ma150 = np.mean(closes[-150:])
-    h_lookback = min(250, data_len)
-    h250 = np.max(highs[-h_lookback:])
+    ma200 = np.mean(closes[-200:])
+    h250 = np.max(highs[-250:])
+    dist_high_pct = (close - h250) / h250 if h250 > 0 else 0
     
     avg_v50 = np.mean(vols[-50:])
     vol_ratio_today = vols[-1] / avg_v50 if avg_v50 > 0 else 0
     pct_change_today = (close - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
     
-    # 🎯 核心武器：計算過去半年(約120日)的籌碼峰 POC
+    deltas = np.diff(closes[-15:])
+    up = pd.Series(np.where(deltas > 0, deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    down = pd.Series(np.where(deltas < 0, -deltas, 0)).ewm(com=13, adjust=False).mean().iloc[-1]
+    rsi = 100 - (100 / (1 + (up/down))) if down > 0 else 100
+
+    # 🎯 掛載籌碼峰 (POC) 演算
     poc_6m = calculate_frvp_poc(highs, lows, vols, lookback=120, bins=60)
     dist_to_poc = (close - poc_6m) / poc_6m if poc_6m > 0 else 0
 
-    # 🌟 戰役一：籌碼真空拔槍點 (跳空越過雷區)
-    # 修正：放寬漲幅至 2.5%，距離 POC 容忍度放寬至 8%
-    is_vacuum_breakout = (
-        (vol_ratio_today >= 1.5) and 
-        (pct_change_today >= 0.025) and 
-        (close > poc_6m) and 
-        (dist_to_poc < 0.08) and 
-        (close >= h250 * 0.70)
-    )
-
-    # 🌟 戰役二：均線+籌碼 雙重神級共振底 (老龍回頭)
-    # 修正：POC 與 MA50 重合度放寬至 5% (實戰中絕對精確重合很難)
-    poc_ma50_confluence = abs(poc_6m - ma50) / ma50 <= 0.05
-    touch_confluence = abs(close - poc_6m) / poc_6m <= 0.05
-    
-    is_confluence_dip = (
+    # 🌟 軌線 1：老龍回頭 (100%原版邏輯)
+    touch_ma20 = abs(close - ma20) / ma20 <= 0.03
+    touch_ma50 = abs(close - ma50) / ma50 <= 0.03
+    is_old_dragon = (
         (ma50 > ma150) and 
-        poc_ma50_confluence and 
-        touch_confluence and 
-        (vol_ratio_today < 1.3) # 洗盤允許稍微大一點點的量
+        (touch_ma20 or touch_ma50) and 
+        (close > opens[-1]) and 
+        (vol_ratio_today < 1.2) and 
+        (rsi > 40)
     )
 
-    # 🌟 保底戰役：經典多頭強勢股 (確保系統每天能輸出強勢標的供觀察)
+    # 🚀 軌線 2：底部/平台放量起爆 (100%原版邏輯)
+    is_explosive_breakout = (
+        (vol_ratio_today >= 1.8) and 
+        (pct_change_today >= 0.035) and 
+        (close > ma20) and 
+        (close >= h250 * 0.60)
+    )
+
+    # 📈 軌線 3：經典歐奈爾多頭 (100%原版邏輯)
     is_standard_uptrend = (
-        (close > ma20) and (ma20 > ma50) and (ma50 > ma150) and 
-        (close >= h250 * 0.85) and 
-        (vol_ratio_today >= 1.2)
+        (close > ma20) and (ma20 > ma50) and (ma50 > ma150) and (ma150 > ma200) and 
+        (close >= h250 * 0.80) and 
+        (rsi > 55)
     )
 
     # ================= 裁決邏輯 =================
-    if not (is_vacuum_breakout or is_confluence_dip or is_standard_uptrend):
-        return {"status": "fail", "reason": "未觸發籌碼/均線極品形態"}
+    if not (is_old_dragon or is_explosive_breakout or is_standard_uptrend):
+        return {"status": "fail", "reason": "未觸發極品作戰形態"}
+        
+    if close > (ma50 * 1.25):
+        return {"status": "fail", "reason": "偏離50日線>25%(極度超買)"}
+    if close < ma200 and not is_explosive_breakout:
+        return {"status": "fail", "reason": "跌破200日牛熊線"}
 
+    # ================= 賦予【籌碼峰確認】勳章 =================
     trend_tag = []
-    if is_confluence_dip: trend_tag.append("🛡️神級共振底(POC+MA50)")
-    if is_vacuum_breakout: trend_tag.append("🚀籌碼真空突破")
-    if is_standard_uptrend and not (is_vacuum_breakout or is_confluence_dip): 
-        trend_tag.append("📈經典多頭逼空")
+    
+    if is_old_dragon:
+        # 如果老龍回頭踩到的位置，距離半年成本線(POC)不到 5%，這就是神級共振！
+        if abs(close - poc_6m)/poc_6m <= 0.05:
+            trend_tag.append("🐉老龍回頭(👑籌碼共振)")
+        else:
+            trend_tag.append("🐉老龍回頭(踩均線)")
+            
+    if is_explosive_breakout:
+        # 如果起爆點剛好站上整座籌碼大山(POC)，意味著進入真空區！
+        if close > poc_6m and dist_to_poc <= 0.10:
+            trend_tag.append("🚀放量起爆(🌪️躍入真空區)")
+        else:
+            trend_tag.append("🚀放量起爆(主力點火)")
+            
+    if is_standard_uptrend and not is_old_dragon and not is_explosive_breakout:
+        trend_tag.append("📈經典多頭(逼近新高)")
 
+    if is_standard_uptrend and is_explosive_breakout:
+        trend_tag = ["🔥主升浪爆發(多頭+起爆)"]
+
+    close_60 = closes[-61]
+    ret_60 = (close - close_60) / close_60 if close_60 > 0 else 0
+
+    # 數據面板新增 POC 和 VWAP
     data = {
         "Ticker": ticker.replace(".HK", ""),
         "Name": name,
@@ -210,6 +234,8 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
         "POC(半年)": round(poc_6m, 2),
         "VWAP(日內)": round(tv_vwap, 2),
         "Dist_POC(%)": round(dist_to_poc * 100, 2),
+        "60D_Return": round(ret_60 * 100, 2),
+        "RSI": round(rsi, 2),
         "Vol_Ratio": round(vol_ratio_today, 2),
         "Mkt_Cap(億)": round(mktcap / 100000000, 2),
         "Turnover(億)": round(last_amount / 100000000, 2),
@@ -221,8 +247,7 @@ def apply_advanced_logic(ticker, name, opens, closes, highs, lows, vols, amounts
 # 🚀 STEP 3: Yahoo Finance 併發演算
 # ==========================================
 def scan_hk_market_via_yfinance(df_list):
-    # ⚠️ 修正：將下載週期改回 "2y"，確保有足夠的 K 線供給 250 日高點等指標
-    print("\n🚀 [STEP 2] 啟動【Yahoo + FRVP 籌碼峰】天基武器，執行高維矩陣演算 (2年全量數據)...")
+    print("\n🚀 [STEP 2] 啟動【Yahoo + TV 籌碼峰】天基武器，執行高速大盤演算 (週期: 2年)...")
     tickers = []
     ticker_to_info = {}
     
@@ -242,8 +267,7 @@ def scan_hk_market_via_yfinance(df_list):
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
-        print(f" -> 📥 正在下載並渲染籌碼峰 第 {i+1} ~ {min(i+chunk_size, len(tickers))} 隻標的...")
-        # ⚠️ 關鍵：period="2y" 解決數據飢餓！
+        print(f" -> 📥 正在下載並渲染 第 {i+1} ~ {min(i+chunk_size, len(tickers))} 隻標的...")
         data = yf.download(chunk, period="2y", auto_adjust=True, threads=True, progress=False)
         
         for ticker in chunk:
@@ -261,8 +285,8 @@ def scan_hk_market_via_yfinance(df_list):
                     lows = data['Low'].dropna().values
                     vols = data['Volume'].dropna().values
                     
-                if len(closes) < 120:
-                    fail_reasons["次新/數據極度不足(<120天)"] += 1
+                if len(closes) < 250:
+                    fail_reasons["次新/數據不足(<250天)"] += 1
                     continue
                     
                 amounts = closes * vols
@@ -273,8 +297,11 @@ def scan_hk_market_via_yfinance(df_list):
                     all_results.append(res["data"])
                 else:
                     fail_reasons[res["reason"]] += 1
+            except KeyError:
+                fail_reasons["接口丟包/退市"] += 1
+                continue
             except Exception:
-                fail_reasons["接口數據異常/退市"] += 1
+                fail_reasons["數據異常截斷"] += 1
                 continue
                 
     return all_results, fail_reasons
@@ -283,7 +310,7 @@ def scan_hk_market_via_yfinance(df_list):
 # 📝 STEP 4: 寫入作戰指令
 # ==========================================
 def write_sheet(final_stocks, diag_msg=None):
-    print("\n📝 [STEP 3] 正在將【上帝視角】作戰名單寫入 Google Sheets...")
+    print("\n📝 [STEP 3] 正在將作戰名單寫入 Google Sheets...")
     sheet_name = "HK-Share Screener"
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
     
@@ -291,20 +318,21 @@ def write_sheet(final_stocks, diag_msg=None):
         sheet = get_worksheet(sheet_name)
         sheet.clear()
         if len(final_stocks) == 0:
-            sheet.update_acell("A1", "No Signal: 未發現符合籌碼共振/真空突破的極品。")
+            sheet.update_acell("A1", "No Signal: 戰局惡劣或未發現極品標的。")
             if diag_msg: sheet.update_acell("A3", diag_msg)
+            print(f"⚠️ {sheet_name} 已寫入空倉報告。")
             return
             
         df = pd.DataFrame(final_stocks)
-        # 優先按照趨勢強度排序，共振底和突破排前面
-        df = df.sort_values(by=['Trend', 'Dist_POC(%)'], ascending=[False, True])
+        # 降序排序，將帶有【籌碼共振】和【躍入真空】勳章的龍頭排在最前面！
+        df = df.sort_values(by=['Trend', '60D_Return'], ascending=[False, False])
         df = df.head(50)
         
         sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-        sheet.update_acell("M1", "Last Updated(UTC+8):")
-        sheet.update_acell("N1", now_str)
-        if diag_msg: sheet.update_acell("O1", diag_msg)
-        print(f"🎉 大功告成！已成功將 {len(df)} 隻【籌碼峰認證】龍頭送達指揮部！")
+        sheet.update_acell("N1", "Last Updated(UTC+8):")
+        sheet.update_acell("O1", now_str)
+        if diag_msg: sheet.update_acell("P1", diag_msg)
+        print(f"🎉 大功告成！已成功將 {len(df)} 隻戰法認證龍頭送達指揮部！")
     except Exception as e:
         print(f"❌ 表格寫入失敗: {e}")
 
@@ -313,7 +341,7 @@ def write_sheet(final_stocks, diag_msg=None):
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n========== 港股獵手系統 V5.1 (籌碼峰實戰容錯版) ==========")
+    print(f"\n========== 港股獵手系統 V10.3 (經典戰法 + 籌碼確認版) ==========")
     print(f"⏰ 當前系統時間 (UTC+8): {now_str}")
     
     df_list = get_hk_share_list()
@@ -323,9 +351,9 @@ def main():
     
     fail_str = "".join([f" - {r}: {c} 隻\n" for r, c in sorted(fail_reasons.items(), key=lambda x:x[1], reverse=True)])
     diag_msg = (
-        f"[{now_str}] 籌碼峰矩陣掃描完畢：\n"
+        f"[{now_str}] 港股戰法掃描完畢：\n"
         f"📊 百億基礎過濾池: {len(df_list)}隻\n"
-        f"🏆 籌碼真空/神級共振: {len(final_stocks)}隻\n"
+        f"🏆 篩選出極品形態: {len(final_stocks)}隻\n"
         f"🔪 淘汰明細：\n{fail_str}"
     )
     print("\n" + diag_msg)
