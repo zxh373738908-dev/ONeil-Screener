@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, time, warnings, logging
+import datetime, time, warnings, traceback, logging
 import yfinance as yf
 import akshare as ak
 
@@ -10,9 +10,10 @@ warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ==========================================
-# 基础设置
+# 1. 基础设置与 Google Sheets 连接
 # ==========================================
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
+
 scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
@@ -20,49 +21,67 @@ client = gspread.authorize(creds)
 def get_worksheet():
     doc = client.open_by_url(OUTPUT_SHEET_URL)
     try:
-        return doc.worksheet("A-Share Screener Pro")
+        # 维持原表名或根据需要修改
+        return doc.worksheet("A-Share Screener")
     except gspread.exceptions.WorksheetNotFound:
-        return doc.add_worksheet(title="A-Share Screener Pro", rows=100, cols=20)
+        return doc.add_worksheet(title="A-Share Screener", rows=100, cols=20)
 
 # ==========================================
-# 🛠️ 筹码分布确认算法 (TradingView 模拟)
+# 🛠️ 核心补丁：筹码分布计算 (只做数据确认，不干预逻辑)
 # ==========================================
-def check_chip_peak(df, lookback=120):
-    """
-    计算筹码峰状态
-    返回: POC价位, 上方阻力百分比, 状态描述
-    """
-    if len(df) < lookback: return 0, 1.0, "数据不足"
-    
-    hist = df.tail(lookback).copy()
-    p_min, p_max = hist['Low'].min(), hist['High'].max()
-    bins = 50
-    price_range = np.linspace(p_min, p_max, bins + 1)
-    v_dist = np.zeros(bins)
-
-    for _, row in hist.iterrows():
-        # 简化版筹码分配
-        idx = np.where((price_range[:-1] >= row['Low']) & (price_range[1:] <= row['High']))[0]
-        if len(idx) > 0: v_dist[idx] += row['Volume'] / len(idx)
-        else:
-            c_idx = np.searchsorted(price_range, row['Close']) - 1
-            if 0 <= c_idx < bins: v_dist[c_idx] += row['Volume']
-
-    poc_idx = np.argmax(v_dist)
-    poc_price = (price_range[poc_idx] + price_range[poc_idx+1]) / 2
-    
-    curr_price = df['Close'].iloc[-1]
-    curr_idx = np.searchsorted(price_range, curr_price) - 1
-    overhead_vol = np.sum(v_dist[curr_idx:]) if curr_idx < bins else 0
-    res_ratio = overhead_vol / np.sum(v_dist)
-
-    return round(poc_price, 2), res_ratio, ("真空" if res_ratio < 0.15 else "有压")
+def get_chip_data(df_ticker, lookback=120):
+    """模拟 TradingView 筹码分布数据"""
+    try:
+        hist = df_ticker.tail(lookback)
+        p_min, p_max = hist['Low'].min(), hist['High'].max()
+        bins = 40
+        price_range = np.linspace(p_min, p_max, bins + 1)
+        v_dist = np.zeros(bins)
+        
+        for _, row in hist.iterrows():
+            idx = np.where((price_range[:-1] >= row['Low']) & (price_range[1:] <= row['High']))[0]
+            if len(idx) > 0: v_dist[idx] += row['Volume'] / len(idx)
+            else:
+                c_idx = np.searchsorted(price_range, row['Close']) - 1
+                if 0 <= c_idx < bins: v_dist[c_idx] += row['Volume']
+        
+        poc_price = (price_range[np.argmax(v_dist)] + price_range[np.argmax(v_dist)+1]) / 2
+        
+        # 计算上方阻力占比
+        curr_price = df_ticker['Close'].iloc[-1]
+        curr_idx = np.searchsorted(price_range, curr_price) - 1
+        overhead_vol = np.sum(v_dist[curr_idx:]) if curr_idx < bins else 0
+        res_ratio = (overhead_vol / np.sum(v_dist)) * 100 if np.sum(v_dist)>0 else 0
+        
+        return round(poc_price, 2), f"{round(res_ratio, 1)}%"
+    except:
+        return 0, "0%"
 
 # ==========================================
-# 🚀 STEP 2: 扫描 (核心逻辑整合)
+# 🌍 STEP 1: 获取 A 股名册 (保持原样)
 # ==========================================
-def scan_market_with_chips(df_list):
-    print("\n🚀 [STEP 2] 启动【动量+筹码】双引擎演算...")
+def get_a_share_list():
+    print("\n🌍 [STEP 1] 获取 A 股纯净名册...")
+    try:
+        df = ak.stock_info_a_code_name()
+    except:
+        df = ak.stock_zh_a_spot()
+
+    col_map = {}
+    for col in df.columns:
+        if col in ["代码", "symbol", "code"]: col_map[col] = "code"
+        elif col in ["名称", "name", "简称"]: col_map[col] = "name"
+    df = df.rename(columns=col_map)
+    df['code'] = df['code'].astype(str).str.extract(r'(\d{6})')
+    df = df.dropna(subset=['code']) 
+    df = df[~df['name'].astype(str).str.contains('ST', case=False)]
+    return df[['code', 'name']]
+
+# ==========================================
+# 🚀 STEP 2: 原汁原味选股方案 + 筹码确认
+# ==========================================
+def scan_market_via_yfinance(df_list):
+    print("\n🚀[STEP 2] 启动【T.U.A.W】原装战法筛选 + 筹码峰确认...")
     
     tickers = []
     ticker_to_name = {}
@@ -73,101 +92,133 @@ def scan_market_with_chips(df_list):
         ticker_to_name[t] = row['name']
         
     all_results = []
-    chunk_size = 500
+    chunk_size = 800 
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
-        print(f"   -> 📥 正在处理第 {i+1} ~ {min(i+chunk_size, len(tickers))} 只标的...")
         data = yf.download(chunk, period="1y", auto_adjust=True, threads=True, progress=False)
         
         for ticker in chunk:
             try:
-                # 1. 基础数据准备
+                # 数据解包
                 if len(chunk) > 1:
-                    df_t = pd.DataFrame({
+                    df_ticker = pd.DataFrame({
                         'Open': data['Open'][ticker], 'High': data['High'][ticker],
                         'Low': data['Low'][ticker], 'Close': data['Close'][ticker],
                         'Volume': data['Volume'][ticker]
                     }).dropna()
                 else:
-                    df_t = data.dropna()
+                    df_ticker = data.dropna()
                 
-                if len(df_t) < 200: continue
+                if len(df_ticker) < 200: continue
                 
-                closes = df_t['Close'].values
-                highs = df_t['High'].values
-                lows = df_t['Low'].values
-                vols = df_t['Volume'].values
+                closes = df_ticker['Close'].values
+                highs = df_ticker['High'].values
+                lows = df_ticker['Low'].values
+                vols = df_ticker['Volume'].values
+                
                 price = closes[-1]
+                if price < 5: continue
                 
-                # -----------------------------------------
-                # 🛡️ 您原有的【动量+VCP】筛选逻辑 (完全保留)
-                # -----------------------------------------
+                # 成交额判定
                 turnover_1 = price * vols[-1]
                 turnover_5 = np.mean(closes[-5:] * vols[-5:])
-                if turnover_5 < 100000000 or price < 5: continue 
+                if turnover_5 < 100000000: continue 
                 
-                # 均线与高点计算
-                ma20 = np.mean(closes[-20:]); ma50 = np.mean(closes[-50:])
-                ma150 = np.mean(closes[-150:]); ma200 = np.mean(closes[-200:])
+                # 指标计算
+                ma20, ma50 = np.mean(closes[-20:]), np.mean(closes[-50:])
+                ma150, ma200 = np.mean(closes[-150:]), np.mean(closes[-200:])
                 h250 = np.max(highs[-250:])
                 
-                # 动量计算
+                # 量比
                 vol_ratio = vols[-1] / np.mean(vols[-50:])
-                r20 = (closes[-1] - closes[-21]) / closes[-21]
-                r60 = (closes[-1] - closes[-61]) / closes[-61]
-                r120 = (closes[-1] - closes[-121]) / closes[-121]
+                
+                # RSI
+                deltas = np.diff(closes[-30:])
+                gain = np.where(deltas > 0, deltas, 0)
+                loss = np.where(deltas < 0, -deltas, 0)
+                avg_gain = pd.Series(gain).ewm(com=13, adjust=False).mean().iloc[-1]
+                avg_loss = pd.Series(loss).ewm(com=13, adjust=False).mean().iloc[-1]
+                rsi = 100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))
+                
+                # 动量 RS
+                r20, r60, r120 = (price/closes[-21]-1), (price/closes[-61]-1), (price/closes[-121]-1)
                 rs_score = (r20*0.4 + r60*0.3 + r120*0.3) * 100
                 dist_high_pct = ((price - h250) / h250) * 100
-                
-                # VCP 振幅
+
+                # VCP 测谎仪
                 amps = (highs[-5:] - lows[-5:]) / lows[-5:] * 100
                 avg_amp5 = np.mean(amps)
 
-                # 原有战法判定
-                cond_momentum = (rs_score > 80) or (r60 * 100 > 25)
+                # =========================================
+                # ⚔️ 核心逻辑判定 (维持您原来的逻辑)
+                # =========================================
+                cond_dist_radar = -8 <= dist_high_pct <= -1
+                cond_vcp = (vol_ratio < 1.0) and (avg_amp5 < 5.0)
+                cond_momentum = (rs_score > 85) or (r60 * 100 > 30)
                 cond_turnover = 300_000_000 <= turnover_1 <= 1_500_000_000
-                
-                # [战法A: 引信雷达]
-                fuse_radar = (-8 <= dist_high_pct <= -1) and (vol_ratio < 1.1) and (avg_amp5 < 5.0) and cond_momentum
-                # [战法B: 狙击触发]
-                trigger_sniper = (-8 <= dist_high_pct <= 2) and (vol_ratio > 1.5) and cond_momentum and (price > ma20)
-                
-                # 基础筛选：必须符合其中一个战法，才进入“筹码峰体检”
-                if not (fuse_radar or trigger_sniper):
+
+                # [1] 引信雷达
+                fuse_radar = cond_dist_radar and cond_vcp and cond_momentum and cond_turnover
+                # [2] 狙击触发
+                trigger_sniper = (-8 <= dist_high_pct <= 2) and (vol_ratio > 1.5) and cond_momentum and cond_turnover and (price > ma20)
+                # [3] 经典形态
+                breakout = (price > ma20 and price > ma50 and ma50 > ma150 and ma150 > ma200 and vol_ratio > 1.5 and rsi > 60)
+                ambush = (abs(price - ma20) / ma20 < 0.03 and vol_ratio < 1.1 and ma50 > ma150 and ma150 > ma200)
+
+                if not (fuse_radar or trigger_sniper or breakout or ambush): 
                     continue
-
-                # -----------------------------------------
-                # 👁️ 【方案一：筹码峰二次确认】 (核心新增)
-                # -----------------------------------------
-                poc, res_ratio, chip_status = check_chip_peak(df_t)
                 
-                # 筹码确认逻辑：
-                # 如果是狙击模式，但上方阻力 > 25%，说明是“强弩之末”，标记风险
-                chip_confirmed = "✅ 筹码通透" if res_ratio < 0.2 else "❌ 压力巨大"
+                # 分配标签
+                if trigger_sniper: type_label = "🔥 狙击触发"
+                elif fuse_radar: type_label = "🧨 引信雷达"
+                elif breakout: type_label = "🚀 趋势突破"
+                else: type_label = "🧘 均线伏击"
                 
-                # 如果是引信雷达（潜伏），价格最好在 POC 附近
-                poc_dist = (price - poc) / poc * 100
-                poc_support = "🎯 支撑位" if abs(poc_dist) < 3 else ""
-
-                # 结果组装
-                type_label = "🔥 狙击触发" if trigger_sniper else "🧨 引信雷达"
+                # -----------------------------------------
+                # 👁️ 【只在这里增加筹码数据】
+                # -----------------------------------------
+                poc, overhead_res = get_chip_data(df_ticker)
                 
                 all_results.append({
-                    "代码": ticker.split('.')[0],
-                    "名称": ticker_to_name[ticker],
-                    "现价": round(price, 2),
-                    "RS评分": round(rs_score, 1),
-                    "战法": type_label,
-                    "筹码确认": chip_confirmed,
-                    "POC价格": poc,
-                    "上方套牢%": f"{round(res_ratio*100, 1)}%",
-                    "备注": poc_support,
-                    "距高点%": f"{round(dist_high_pct, 1)}%",
-                    "成交额(亿)": round(turnover_1 / 100000000, 2)
+                    "Ticker": ticker.split('.')[0],
+                    "Name": ticker_to_name[ticker],
+                    "Price": round(price, 2),
+                    "Type": type_label,
+                    "RS_Score": round(rs_score, 2),
+                    "POC(筹码中心)": poc,
+                    "上方抛压%": overhead_res,
+                    "RSI": round(rsi, 2),
+                    "Vol_Ratio": round(vol_ratio, 2),
+                    "Dist_High%": f"{round(dist_high_pct, 2)}%",
+                    "Turnover(亿)": round(turnover_1 / 100000000, 2)
                 })
             except:
                 continue
     return all_results
 
-# (后续 get_a_share_list, write_sheet 等函数与之前保持一致)
+# ==========================================
+# 📝 STEP 3: 写入作战指令 (保持原样)
+# ==========================================
+def write_sheet(data):
+    print("\n📝 [STEP 3] 正在将绝密作战名单写入 Google Sheets...")
+    sheet = get_worksheet()
+    sheet.clear()
+    if not data:
+        sheet.update_acell("A1", "No Signal: 战局恶劣，暂无极品标的。")
+        return
+
+    df = pd.DataFrame(data)
+    df = df.sort_values("RS_Score", ascending=False).head(50)
+    sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
+    
+    tz_bj = datetime.timezone(datetime.timedelta(hours=8))
+    now = datetime.datetime.now(tz=tz_bj).strftime("%Y-%m-%d %H:%M:%S")
+    sheet.update_acell("L1", "Last Update (BJ Time):")
+    sheet.update_acell("M1", now)
+    print(f"🎉 大功告成！已更新 {len(df)} 只标的，筹码确认已完成。")
+
+if __name__ == "__main__":
+    stock_list = get_a_share_list()
+    results = scan_market_via_yfinance(stock_list)
+    write_sheet(results)
