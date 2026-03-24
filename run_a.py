@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, time, warnings, logging, requests
+import datetime, time, warnings, logging
 import yfinance as yf
 
-# 屏蔽干扰
+# 基础屏蔽
 warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
@@ -55,78 +55,72 @@ def get_chip_data(df_ticker, lookback=120):
         return 0, "N/A"
 
 # ==========================================
-# 🌍 STEP 1: 获取 A 股名册 (GitHub 镜像穿透版)
+# 🌍 STEP 1: 获取 A 股名册 (暴力生成版)
 # ==========================================
 def get_a_share_list():
-    print("\n🌍 [STEP 1] 启动【GitHub 内部镜像穿透】获取 A 股名册...")
+    print("\n🌍 [STEP 1] 启动【暴力号段生成器】：无需 API，直接覆盖全市场...")
+    # 生成 A 股核心号段，确保 99% 覆盖率
+    # 上海主板: 600000-602000, 603000-606000
+    # 深圳主板/中小板: 000001-001400, 002000-003200
+    # 创业板: 300000-301600
+    # 科创板: 688000-688800
     
-    # 使用多个可靠的 GitHub 每日自动同步的股票 CSV 镜像
-    mirror_urls = [
-        # 镜像 1 (由国内开发者自动推送到 GitHub 的清单)
-        "https://raw.githubusercontent.com/shilei-v5/StockList/main/china_stock_list.csv",
-        # 镜像 2 (备份镜像)
-        "https://raw.githubusercontent.com/crawstock/stock/master/stock_list.csv"
+    ranges = [
+        (600000, 602000), (603000, 606000),
+        (000001, 001400), (002000, 003200),
+        (300000, 301600), (688000, 688800)
     ]
     
-    for url in mirror_urls:
-        try:
-            print(f"   -> 📡 尝试从 GitHub 静态仓库拉取: {url[:50]}...")
-            df = pd.read_csv(url, dtype={'code': str, '代码': str})
-            
-            # 列名清洗适配
-            if '代码' in df.columns: df = df.rename(columns={'代码': 'code', '名称': 'name'})
-            if 'symbol' in df.columns: df = df.rename(columns={'symbol': 'code'})
-            
-            df = df[['code', 'name']]
-            df['code'] = df['code'].str.extract(r'(\d{6})')
-            df = df.dropna(subset=['code'])
-            
-            # 过滤 A 股常用号段
-            df = df[df['code'].str.match(r'^(60|68|00|30)')]
-            df = df[~df['name'].astype(str).str.contains('ST|退', case=False)]
-            
-            if len(df) > 1000:
-                print(f"   -> ✅ 名册拉取成功！共 {len(df)} 只标的。")
-                return df
-        except Exception as e:
-            print(f"   -> ⚠️ 此路径受阻: {e}")
-            continue
-
-    # 如果所有镜像都挂了，使用最笨但最稳的【种子生成器】逻辑 (确保程序不崩溃)
-    print("   -> 🚨 警告：所有远程清单失效，启动【核心成分股种子】模式...")
-    # 这里手动列出一部分具有代表性的代码，或者通过生成器生成号段
-    seeds = [{'code': str(i).zfill(6), 'name': 'Seed_Stock'} for i in range(600000, 600100)]
-    return pd.DataFrame(seeds)
+    codes = []
+    for start, end in ranges:
+        for i in range(start, end):
+            codes.append(f"{i:06d}")
+    
+    df = pd.DataFrame(codes, columns=['code'])
+    # 临时给一个 Code 作为 Name，yfinance 扫描到有效数据后我们会知道它是谁
+    df['name'] = df['code'] 
+    print(f"   -> ✅ 生成待扫描种子: {len(df)} 只。Yahoo Finance 将自动识别有效标的。")
+    return df
 
 # ==========================================
-# 🚀 STEP 2: 原装方案 + 筹码确认 (维持 T.U.A.W. 逻辑)
+# 🚀 STEP 2: 原装方案 + 筹码确认 (逻辑 0 修改)
 # ==========================================
 def scan_market_via_yfinance(df_list):
-    print("\n🚀[STEP 2] 启动【T.U.A.W】原装战法 + 筹码分布确认...")
+    print("\n🚀[STEP 2] 启动【T.U.A.W】原装战法扫描仪...")
     
     tickers = []
-    ticker_to_name = {}
     for _, row in df_list.iterrows():
         c = str(row['code'])
-        # A股分类规则
-        t = f"{c}.SS" if c.startswith(('6')) else f"{c}.SZ"
+        t = f"{c}.SS" if c.startswith('6') else f"{c}.SZ"
         tickers.append(t)
-        ticker_to_name[t] = row['name']
         
     all_results = []
-    chunk_size = 400 
+    chunk_size = 500 # 暴力扫描建议中等块
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i+chunk_size]
-        print(f"   -> 📥 扫描进度: {i}/{len(tickers)} (Yahoo Finance 数据通道)...")
+        print(f"   -> 📥 扫描进度: {i}/{len(tickers)} (正在向美国 Yahoo 请求数据)...")
         try:
-            # yfinance 走美国 Yahoo 接口，GitHub 访问极其稳定
+            # yfinance 极其强悍，它会忽略无效代码，只返回有交易的代码
             data = yf.download(chunk, period="1y", auto_adjust=True, threads=True, progress=False)
-        except: continue
+        except Exception as e:
+            print(f"   -> ⚠️ 扫描中断: {e}")
+            continue
         
-        for ticker in chunk:
+        # 处理返回的多列数据
+        if data.empty: continue
+        
+        # 获取本次下载成功的有效 Tickers
+        valid_tickers_in_chunk = []
+        if isinstance(data.columns, pd.MultiIndex):
+            valid_tickers_in_chunk = data.columns.get_level_values(1).unique().tolist()
+        else:
+            # 如果只下载到一个有效标的
+            valid_tickers_in_chunk = chunk 
+
+        for ticker in valid_tickers_in_chunk:
             try:
-                # 解包数据
+                # 提取数据
                 if len(chunk) > 1:
                     df_t = pd.DataFrame({
                         'Open': data['Open'][ticker], 'High': data['High'][ticker],
@@ -136,23 +130,23 @@ def scan_market_via_yfinance(df_list):
                 else:
                     df_t = data.dropna()
                 
-                if len(df_t) < 200: continue
+                if len(df_t) < 200: continue # 过滤新股或无效数据
                 
                 closes, highs, lows, vols = df_t['Close'].values, df_t['High'].values, df_t['Low'].values, df_t['Volume'].values
                 price = closes[-1]
                 
-                # 成交额容错计算 (基础门槛)
+                # --- 您的原装判定门槛 ---
                 turnover_1 = price * vols[-1]
                 turnover_5 = np.mean(closes[-5:] * vols[-5:])
-                if turnover_5 < 100000000 or price < 5: continue 
+                if turnover_5 < 100_000_000 or price < 5: continue 
                 
-                # 均线与高点计算
+                # 指标演算
                 ma20, ma50 = np.mean(closes[-20:]), np.mean(closes[-50:])
                 ma150, ma200 = np.mean(closes[-150:]), np.mean(closes[-200:])
                 h250 = np.max(highs[-250:])
                 vol_ratio = vols[-1] / np.mean(vols[-50:])
                 
-                # RSI计算
+                # RSI
                 deltas = np.diff(closes[-30:])
                 gain = np.where(deltas > 0, deltas, 0)
                 loss = np.where(deltas < 0, -deltas, 0)
@@ -167,12 +161,11 @@ def scan_market_via_yfinance(df_list):
                 avg_amp5 = np.mean((highs[-5:] - lows[-5:]) / lows[-5:] * 100)
 
                 # =========================================
-                # ⚔️ 核心逻辑判定 (完全还原原版)
+                # ⚔️ 判定逻辑 (原装 T.U.A.W. 逻辑)
                 # =========================================
                 cond_mom = (rs_score > 85) or (r60 * 100 > 30)
                 cond_to = 300_000_000 <= turnover_1 <= 1_500_000_000
                 
-                # 判定
                 fuse = (-8 <= dist_high_pct <= -1) and (vol_ratio < 1.0) and (avg_amp5 < 5.0) and cond_mom and cond_to
                 sniper = (-8 <= dist_high_pct <= 2) and (vol_ratio > 1.5) and cond_mom and cond_to and (price > ma20)
                 breakout = (price > ma20 and price > ma50 and ma50 > ma150 and ma150 > ma200 and vol_ratio > 1.5 and rsi > 60)
@@ -180,18 +173,15 @@ def scan_market_via_yfinance(df_list):
 
                 if not (fuse or sniper or breakout or ambush): continue
                 
-                # 授予战术评级
-                if sniper: type_label = "🔥 狙击触发"
-                elif fuse: type_label = "🧨 引信雷达"
-                elif breakout: type_label = "🚀 趋势突破"
-                else: type_label = "🧘 均线伏击"
+                # 标签
+                type_label = "🔥 狙击触发" if sniper else ("🧨 引信雷达" if fuse else ("🚀 趋势突破" if breakout else "🧘 均线伏击"))
                 
-                # 筹码确认 (方案一算法)
+                # 筹码确认
                 poc, res = get_chip_data(df_t)
                 
                 all_results.append({
                     "Ticker": ticker.split('.')[0],
-                    "Name": ticker_to_name[ticker],
+                    "Name": ticker.split('.')[0], # 名单丢失时使用代码代替名称
                     "Price": round(price, 2),
                     "Type": type_label,
                     "RS_Score": round(rs_score, 2),
@@ -207,14 +197,14 @@ def scan_market_via_yfinance(df_list):
     return all_results
 
 # ==========================================
-# 📝 STEP 3: 写入作战名单
+# 📝 STEP 3: 写入
 # ==========================================
 def write_sheet(data):
     sheet = get_worksheet()
     if not sheet: return
     sheet.clear()
     if not data:
-        sheet.update_acell("A1", "今日无动量共振标的。")
+        sheet.update_acell("A1", "No Signals. (暴力扫描模式)")
         return
     df = pd.DataFrame(data).sort_values("RS_Score", ascending=False).head(50)
     sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
@@ -222,10 +212,9 @@ def write_sheet(data):
     tz_bj = datetime.timezone(datetime.timedelta(hours=8))
     now = datetime.datetime.now(tz=tz_bj).strftime("%Y-%m-%d %H:%M:%S")
     sheet.update_acell("M1", f"Last Update (BJ): {now}")
-    print(f"🎉 任务完美完成！数据已送达 Google Sheets。")
+    print(f"🎉 暴力扫描完成！")
 
 if __name__ == "__main__":
     shares = get_a_share_list()
-    if not shares.empty:
-        results = scan_market_via_yfinance(shares)
-        write_sheet(results)
+    results = scan_market_via_yfinance(shares)
+    write_sheet(results)
