@@ -188,27 +188,56 @@ def run_scanner():
 
 def output_to_sheets(picks, etf_sum):
     try:
+        print("开始连接 Google Sheets...")
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        
+        # 检查凭据文件是否存在
+        import os
+        if not os.path.exists(creds_file):
+            print(f"❌ 错误: 找不到凭据文件 {creds_file}")
+            return
+
         creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
         client = gspread.authorize(creds)
-        sheet = client.open_by_url(SHEET_URL).worksheet("Screener")
+        
+        # 尝试打开表格
+        try:
+            sh = client.open_by_url(SHEET_URL)
+        except Exception as e:
+            print(f"❌ 无法打开表格 URL，请检查 URL 是否正确，并确保已共享权限给 Service Account。错误: {e}")
+            return
+
+        # 尝试打开工作表
+        try:
+            sheet = sh.worksheet("Screener")
+        except:
+            print("⚠️ 未找到名为 'Screener' 的工作表，正在尝试创建...")
+            sheet = sh.add_worksheet(title="Screener", rows="100", cols="20")
+
         sheet.clear()
         
         # 1. 写入 ETF 背景
         df_etf = pd.DataFrame(etf_sum)
-        sheet.update(values=[["=== 大盘/行业期权风向 ==="]] + [df_etf.columns.tolist()] + df_etf.values.tolist(), range_name="A1")
+        etf_content = [["=== 大盘/行业期权风向 ==="]] + [df_etf.columns.tolist()] + df_etf.values.tolist()
+        sheet.update(values=etf_content, range_name="A1")
         
         # 2. 写入个股结果
         if picks:
             df_picks = pd.DataFrame(picks).sort_values(by='Opt_Score', ascending=False)
-            start_row = len(df_etf) + 4
-            sheet.update(values=[["=== 策略精选 (动量+筹码+期权多头共振) ==="]] + [df_picks.columns.tolist()] + df_picks.values.tolist(), 
-                         range_name=f"A{start_row}")
+            start_row = len(df_etf) + 5
+            picks_content = [["=== 策略精选 (动量+筹码+期权多头共振) ==="]] + [df_picks.columns.tolist()] + df_picks.values.tolist()
+            # 使用新版 gspread 的语法
+            sheet.update(values=picks_content, range_name=f"A{start_row}")
         
-        sheet.update_acell("I1", f"Last Run: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        print("✅ 选股完成，结果已同步至 Google Sheets。")
+        # 写入更新时间
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        sheet.update(values=[["Last Run:", now_str]], range_name="I1")
+        
+        print(f"✅ 选股完成！成功同步 {len(picks)} 只个股到 Google Sheets。")
+
     except Exception as e:
-        print(f"❌ Sheets 同步失败: {e}")
+        # 打印详细的错误类型和内容
+        print(f"❌ Sheets 同步发生致命错误: {type(e).__name__} - {str(e)}")
 
 if __name__ == "__main__":
     run_scanner()
