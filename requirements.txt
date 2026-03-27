@@ -5,3 +5,4 @@ google-auth
 lxml
 html5lib
 akshare
+polygon-api-client
