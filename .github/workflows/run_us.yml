@@ -27,3 +27,5 @@ jobs:
 
       - name: Run US Screener
         run: python run_us.py
+      - name: Create credentials.json
+        run: echo '${{ secrets.GCP_SA_JSON }}' > credentials.json
