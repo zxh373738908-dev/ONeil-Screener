@@ -5,167 +5,210 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 import warnings
+import time
 from polygon import RESTClient
 
+# 忽略警告
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心
+# 1. 配置中心 (请务必填写你的 API KEY)
 # ==========================================
-POLYGON_API_KEY = "YOUR_POLYGON_API_KEY"
+POLYGON_API_KEY = "你的_POLYGON_API_KEY"
 client_poly = RESTClient(POLYGON_API_KEY)
 
 # Google Sheets 配置
-SHEET_URL = "你的表格URL"
-creds = Credentials.from_service_account_file("credentials.json", 
-    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-client_gs = gspread.authorize(creds)
+SHEET_URL = "你的_GOOGLE_SHEET_URL"
+creds_file = "credentials.json" # 确保此文件在目录下
 
-# 核心监控的 ETF 列表 (大盘 + 关键行业)
-MONITOR_ETFS = ["SPY", "QQQ", "IWM", "XLK", "XLF", "XLV", "SMH"]
+# 核心监控 ETF (用于判断大盘/行业背景)
+MONITOR_ETFS = ["SPY", "QQQ", "IWM", "XLK", "SMH"]
 
 # ==========================================
-# 2. 筹码峰计算函数
+# 2. 健壮的股票列表获取 (修复 KeyError)
+# ==========================================
+def get_us_core_tickers():
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    tickers = []
+    
+    # 抓取 S&P 500
+    try:
+        url_sp = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        tables = pd.read_html(url_sp, storage_options=headers)
+        for df in tables:
+            if 'Symbol' in df.columns:
+                tickers.extend(df['Symbol'].tolist())
+                break
+    except Exception as e: print(f"⚠️ S&P 500 抓取失败: {e}")
+
+    # 抓取 Nasdaq-100
+    try:
+        url_ndx = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+        tables = pd.read_html(url_ndx, storage_options=headers)
+        for df in tables:
+            # 兼容维基百科不同的列名
+            if 'Ticker' in df.columns:
+                tickers.extend(df['Ticker'].tolist())
+                break
+            elif 'Symbol' in df.columns:
+                tickers.extend(df['Symbol'].tolist())
+                break
+    except Exception as e: print(f"⚠️ Nasdaq-100 抓取失败: {e}")
+
+    # 清洗数据
+    clean_tickers = list(set([str(t).strip().replace('.', '-') for t in tickers if isinstance(t, str)]))
+    return clean_tickers
+
+# ==========================================
+# 3. 核心量化算法 (POC & 动量)
 # ==========================================
 def calculate_poc(df, bins=50):
+    """计算过去120天的筹码最密集价格(POC)"""
     if len(df) < 60: return 0, 0
-    lookback_df = df.tail(120)
-    p_min, p_max = lookback_df['Low'].min(), lookback_df['High'].max()
+    lookback = df.tail(120)
+    p_min, p_max = lookback['Low'].min(), lookback['High'].max()
     if p_max == p_min: return 0, 0
-    counts, bin_edges = np.histogram(lookback_df['Close'], bins=bins, weights=lookback_df['Volume'])
+    counts, bin_edges = np.histogram(lookback['Close'], bins=bins, weights=lookback['Volume'])
     max_idx = np.argmax(counts)
     poc_price = (bin_edges[max_idx] + bin_edges[max_idx+1]) / 2
-    current_price = df['Close'].iloc[-1]
-    dist_to_poc = (current_price - poc_price) / poc_price
+    dist_to_poc = (df['Close'].iloc[-1] - poc_price) / poc_price
     return round(poc_price, 2), dist_to_poc
 
 # ==========================================
-# 3. Polygon 期权异动探测器 (增强版)
+# 4. Polygon 期权异动探测 (增强胜率)
 # ==========================================
-def get_options_flow_sentiment(ticker, is_etf=False):
+def get_option_sentiment(ticker, is_etf=False):
     """
-    is_etf: ETF 的资金量更大，过滤阈值需调高
+    通过扫描期权链判断大资金情绪
+    规则: 成交量 > 持仓量 (Unusual) 且 单笔名义价值 > 阈值
     """
     try:
+        # 免费版 API 建议此处加一点微小的手工延迟，防止 429 报错
         snapshots = client_poly.get_snapshot_options_chain(ticker)
-        bullish_value = 0
-        total_value = 0
         
-        # 阈值设置：ETF 大单需 > 10万美金，个股 > 2万美金
-        threshold = 100000 if is_etf else 20000
+        bull_val, total_val, unusual_cnt = 0, 0, 0
+        threshold = 100000 if is_etf else 30000 # ETF 过滤阈值更高
         
         for s in snapshots:
             vol = s.day.volume
             oi = s.open_interest if s.open_interest else 0
-            last_p = s.day.last if s.day.last else 0
+            price = s.day.last if s.day.last else 0
             
-            # Unusual 核心逻辑：Vol > OI (新开仓)
-            if vol > 100 and vol > (oi * 1.1):
-                notional_value = vol * last_p * 100
-                if notional_value > threshold:
-                    total_value += notional_value
+            # Unusual 核心判断: 日内成交 > 现有持仓 (说明是今天新开的单)
+            if vol > 100 and vol > oi:
+                notional = vol * price * 100
+                if notional > threshold:
+                    unusual_cnt += 1
+                    total_val += notional
                     if s.details.contract_type == 'call':
-                        bullish_value += notional_value
+                        bull_val += notional
         
-        if total_value == 0: return 50, "Neutral/No Flow"
-        
-        sentiment = round((bullish_value / total_value) * 100, 2)
-        desc = f"${round(total_value/1e6, 2)}M | Bull:{sentiment}%"
+        if total_val == 0: return 50, "No Large Flow"
+        sentiment = round((bull_val / total_val) * 100, 2)
+        desc = f"${round(total_val/1e6, 2)}M | Bull:{sentiment}%"
         return sentiment, desc
-    except:
-        return 50, "API Error"
+    except Exception as e:
+        return 50, f"Error: {str(e)[:15]}"
 
 # ==========================================
-# 4. 扫描引擎
+# 5. 主扫描引擎
 # ==========================================
-def run_enhanced_scanner():
-    # A. 先获取 ETF 的现状 (作为背景过滤)
-    print("📡 正在扫描核心 ETF 期权风向...")
-    etf_signals = {}
+def run_scanner():
+    # A. 获取全市场标的
+    tickers = get_us_core_tickers()
+    if not tickers: return
+    
+    # B. 背景诊断：扫描 ETF
+    print("📡 正在诊断大盘/行业 ETF 期权背景...")
+    etf_summary = []
     etf_data = yf.download(MONITOR_ETFS, period="1y", group_by='ticker', progress=False)
-    
     for etf in MONITOR_ETFS:
-        df_etf = etf_data[etf].dropna()
-        poc, dist = calculate_poc(df_etf)
-        sent, desc = get_options_flow_sentiment(etf, is_etf=True)
-        # 记录 ETF 是否在支撑位且期权看涨
-        etf_signals[etf] = {
-            "at_support": (dist >= -0.02 and dist <= 0.05),
-            "bullish_flow": (sent > 55),
-            "desc": desc
-        }
+        sent, desc = get_option_sentiment(etf, is_etf=True)
+        etf_summary.append({"ETF": etf, "Sentiment": sent, "Detail": desc})
+        time.sleep(1) # 简单规避频率限制
     
-    # B. 获取个股列表
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].tolist()
-    ndx100 = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100', storage_options=headers)[0]['Ticker'].tolist()
-    tickers = list(set([str(t).replace('.', '-') for t in (sp500 + ndx100)]))
-    
+    # C. 下载个股数据
     print(f"🚀 开始扫描 {len(tickers)} 只个股技术面...")
     data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
     
     final_picks = []
+    
+    # D. 循环扫描
     for ticker in tickers:
         try:
+            if ticker not in data.columns.levels[0]: continue
             df = data[ticker].dropna()
             if len(df) < 200: continue
             
+            # --- 策略条件计算 ---
             close = float(df['Close'].iloc[-1])
-            # 基础动量 + 筹码支撑 策略
-            poc_p, dist_poc = calculate_poc(df)
-            ma50, ma200 = df['Close'].tail(50).mean(), df['Close'].tail(200).mean()
+            volume = float(df['Volume'].iloc[-1])
+            if close < 15 or (close * volume) < 50000000: continue # 流动性过滤
+            
+            ma50 = df['Close'].tail(50).mean()
+            ma200 = df['Close'].tail(200).mean()
             ret_120d = (close - df['Close'].iloc[-126]) / df['Close'].iloc[-126]
-            rsi = 100 - (100 / (1 + (df['Close'].tail(14).diff().clip(lower=0).mean() / -df['Close'].tail(14).diff().clip(upper=0).mean())))
+            poc_p, dist_poc = calculate_poc(df)
+            
+            # RSI 回调计算
+            delta = df['Close'].tail(14).diff()
+            up, down = delta.clip(lower=0).mean(), -delta.clip(upper=0).mean()
+            rsi = 100 - (100 / (1 + (up/down if down != 0 else 1)))
 
-            # 策略核心条件
-            is_strategy_match = (ret_120d > 0.15) and (ma50 > ma200) and \
-                                (dist_poc >= -0.015 and dist_poc <= 0.06) and (rsi < 62)
+            # --- 核心策略：动量龙头 + 筹码支撑 + RSI不超买 ---
+            is_tech_ok = (ret_120d > 0.20) and (ma50 > ma200) and \
+                         (dist_poc >= -0.01 and dist_poc <= 0.07) and (rsi < 62)
 
-            if is_strategy_match:
-                # C. 命中技术面后，调入 Polygon 期权探测器
-                opt_sent, opt_desc = get_options_flow_sentiment(ticker)
+            if is_tech_ok:
+                print(f"🔍 技术面命中: {ticker}，正在请求 Polygon 期权数据...")
                 
-                # 如果个股期权看涨情绪 > 60%，则是高胜率标的
-                if opt_sent >= 60:
-                    # 确定所属行业 (简单演示：如果是科技股，看 QQQ 信号)
-                    # 实际操作中可增加判断逻辑，此处演示普适逻辑
-                    mkt_context = "Strong" if etf_signals["SPY"]["bullish_flow"] else "Weak"
-                    
+                # --- 胜率增强：期权异动扫描 ---
+                # 注意：如果是 Polygon 免费版，此处必须 Sleep 防止 429 报错
+                time.sleep(12) 
+                opt_sent, opt_flow = get_option_sentiment(ticker)
+                
+                # 过滤条件：只有期权情绪 > 58% (偏看涨) 才入选
+                if opt_sent >= 58:
                     final_picks.append({
                         "Ticker": ticker,
                         "Opt_Score": opt_sent,
-                        "Mkt_Context": mkt_context,
+                        "Mom_120d": f"{round(ret_120d*100, 2)}%",
                         "Price": close,
-                        "Dist_POC": f"{round(dist_poc*100,2)}%",
-                        "Opt_Flow": opt_desc,
-                        "Mom_120d": f"{round(ret_120d*100,2)}%"
+                        "Dist_POC": f"{round(dist_poc*100, 2)}%",
+                        "RSI": round(rsi, 2),
+                        "Option_Flow": opt_flow
                     })
-                    print(f"🎯 发现高胜率标的: {ticker} (期权评分: {opt_sent})")
-        except:
+                    print(f"⭐ 发现高胜率标的: {ticker} (期权看涨比例: {opt_sent}%)")
+
+        except Exception as e:
             continue
 
-    # D. 写入 Google Sheets
-    update_sheets(final_picks, etf_signals)
+    # E. 写入 Google Sheets
+    output_to_sheets(final_picks, etf_summary)
 
-def update_sheets(picks, etf_signals):
+def output_to_sheets(picks, etf_sum):
     try:
-        sheet = client_gs.open_by_url(SHEET_URL).worksheet("Screener")
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_file(creds_file, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_url(SHEET_URL).worksheet("Screener")
         sheet.clear()
         
-        # 先写 ETF 状态作为参考
-        etf_df = pd.DataFrame([{"ETF": k, "Flow": v["desc"], "Support": v["at_support"]} for k, v in etf_signals.items()])
-        sheet.update(values=[["--- 大盘/行业风向标 ---"]] + [etf_df.columns.tolist()] + etf_df.values.tolist(), range_name="A1")
+        # 1. 写入 ETF 背景
+        df_etf = pd.DataFrame(etf_sum)
+        sheet.update(values=[["=== 大盘/行业期权风向 ==="]] + [df_etf.columns.tolist()] + df_etf.values.tolist(), range_name="A1")
         
-        # 再写选股结果
+        # 2. 写入个股结果
         if picks:
-            df = pd.DataFrame(picks).sort_values(by='Opt_Score', ascending=False)
-            start_row = len(etf_df) + 4
-            sheet.update(values=[["--- 策略精选个股 (动量+筹码+期权异动) ---"]] + [df.columns.tolist()] + df.values.tolist(), 
+            df_picks = pd.DataFrame(picks).sort_values(by='Opt_Score', ascending=False)
+            start_row = len(df_etf) + 4
+            sheet.update(values=[["=== 策略精选 (动量+筹码+期权多头共振) ==="]] + [df_picks.columns.tolist()] + df_picks.values.tolist(), 
                          range_name=f"A{start_row}")
         
-        print("✅ Sheets 更新完成")
+        sheet.update_acell("I1", f"Last Run: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print("✅ 选股完成，结果已同步至 Google Sheets。")
     except Exception as e:
-        print(f"❌ 写入失败: {e}")
+        print(f"❌ Sheets 同步失败: {e}")
 
 if __name__ == "__main__":
-    run_enhanced_scanner()
+    run_scanner()
