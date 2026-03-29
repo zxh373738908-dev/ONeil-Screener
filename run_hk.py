@@ -14,7 +14,7 @@ from gspread_formatting import *
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置 (精准锁定)
+# 1. 核心配置 (SS_KEY 和 GID 保持不变)
 # ==========================================
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 TARGET_GID = 665566258  
@@ -32,7 +32,7 @@ def init_v35_sheet():
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🌐 2. 增强型数据工具
+# 🌐 2. 增强型工具 (汉化引擎)
 # ==========================================
 def get_chinese_names(codes):
     mapping = {}
@@ -48,10 +48,10 @@ def get_chinese_names(codes):
     return mapping
 
 # ==========================================
-# 🧠 3. V35 核心算法：吸筹比与口袋突破
+# 🧠 3. V35.1 演算核心：吸筹比与口袋突破
 # ==========================================
-def analyze_v35(ticker, name, df_h, mkt_cap, turnover, tv_vwap, sector, hsi_series):
-    if df_h.empty or len(df_h) < 250: return None
+def analyze_v35(ticker, name, df_h, mkt_cap, tv_vwap, sector, hsi_series):
+    if df_h.empty or len(df_h) < 252: return None
     try:
         close = df_h['Close'].values.flatten()
         high = df_h['High'].values.flatten()
@@ -64,41 +64,38 @@ def analyze_v35(ticker, name, df_h, mkt_cap, turnover, tv_vwap, sector, hsi_seri
     ret_3m = cp / close[-63] if len(close) > 63 else 1
     ret_6m = cp / close[-126] if len(close) > 126 else 1
     ret_12m = cp / close[-252] if len(close) > 252 else 1
-    # 按照 4:3:3 权重比例
     hsi_ret = hsi_series.iloc[-1] / hsi_series.iloc[-252]
     rs_raw = (ret_3m * 0.4 + ret_6m * 0.3 + ret_12m * 0.3) / hsi_ret
 
-    # B. U/D Volume Ratio (50D) - 机构吸筹活跃度
-    # 统计过去50天：上涨日成交量之和 / 下跌日成交量之和
+    # B. U/D Volume Ratio (50D)
     diff = np.diff(close[-51:])
     up_v = np.sum(vol[-50:][diff > 0])
     dn_v = np.sum(vol[-50:][diff < 0])
-    ud_ratio = up_v / dn_v if dn_v > 0 else 1.0
+    ud_ratio = up_v / dn_v if dn_v > 0.001 else 1.0
 
-    # C. Pocket Pivot (口袋突破) 检测
-    # 规则：今日上涨 + 成交量 > 过去10天内最大的那个阴线量
-    down_vol_max = 0
+    # C. Pocket Pivot (口袋突破)
+    down_vol_max = 0.001
     for i in range(1, 11):
-        if close[-i-1] > close[-i]: # 阴线
+        if close[-i-1] > close[-i]:
             down_vol_max = max(down_vol_max, vol[-i])
     is_pocket = (close[-1] > close[-2]) and (vol[-1] > down_vol_max)
 
-    # D. 基础指标与风控
-    ma10, ma50, ma200 = np.mean(close[-10:]), np.mean(close[-50:]), np.mean(close[-200:])
+    # D. 基础指标
+    ma50, ma200 = np.mean(close[-50:]), np.mean(close[-200:])
     adr_20 = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
-    tightness = (np.max(high[-10:]) - np.min(low[-10:])) / (np.max(high[-50:]) - np.min(low[-50:]))
+    tightness = (np.max(high[-10:]) - np.min(low[-10:])) / (np.max(high[-50:]) - np.min(low[-50:]) + 0.001)
     ext_50 = (cp / ma50 - 1) * 100
     
-    if cp < ma200: return None # 拒绝空头
-    if adr_20 < 1.4: return None # 拒绝死鱼
+    if cp < ma200: return None
+    if adr_20 < 1.4: return None
 
-    # E. 智能勋章系统
+    # E. 智能勋章
     signal = "📈 经典多头"
     if is_pocket and tightness < 0.65: signal = "🎯 口袋起爆"
     elif abs(cp - ma50)/ma50 < 0.03 and ud_ratio > 1.2: signal = "🐉 老龙吸筹"
     elif cp > np.max(close[-20:]) and vol[-1] > np.mean(vol[-50:]) * 1.5: signal = "🚀 动能突围"
 
-    # F. ATR 动态止损位 (2.1倍ATR)
+    # F. ATR 动态止损
     tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
     atr = pd.Series(tr).rolling(20).mean().iloc[-1]
 
@@ -108,39 +105,36 @@ def analyze_v35(ticker, name, df_h, mkt_cap, turnover, tv_vwap, sector, hsi_seri
         "Tightness": round(tightness, 2), "ADR": round(adr_20, 2),
         "Price": round(cp, 2), "Ext_50": round(ext_50, 1),
         "Stop_Loss": round(cp - (atr * 2.1), 2),
-        "Mkt_Cap": round(float(mkt_cap/1e8), 1), "Score_Sort": rs_raw
+        "Mkt_Cap": round(float(mkt_cap/1e8), 1)
     }
 
 # ==========================================
-# 🚀 4. 执行指挥部
+# 🚀 4. 执行流程
 # ==========================================
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    print(f"[{now_str}] 🚀 V35.0 机构吸筹猎手启动...")
+    print(f"[{now_str}] 🚀 V35.1 机构吸筹猎手 (修复格式异常)...")
     
-    # 1. 宏观对冲背景
     hsi_raw = yf.download("^HSI", period="350d", progress=False)
     hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
     hsi_p = hsi_series.iloc[-1]
     hsi_ma50 = hsi_series.rolling(50).mean().iloc[-1]
     mkt_weather = "☀️ 进攻 (Risk-On)" if hsi_p > hsi_ma50 else "❄️ 防御 (Risk-Off)"
 
-    # 2. 获取蓝筹池
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {
-        "columns": ["name", "description", "close", "market_cap_basic", "VWAP", "Value.Traded", "sector"],
+        "columns": ["name", "description", "close", "market_cap_basic", "VWAP", "sector"],
         "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.1e10}],
         "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
     }
     resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
     df_pool = pd.DataFrame([
         {"code": re.sub(r'[^0-9]', '', d['d'][0]), "mkt": d['d'][3], 
-         "vwap": d['d'][4], "turnover": d['d'][5], "sector": d['d'][6] or "其他"} for d in resp
+         "vwap": d['d'][4], "sector": d['d'][5] or "其他"} for d in resp
     ])
 
     name_map = get_chinese_names(df_pool['code'].tolist())
 
-    # 3. 批量演算
     final_list = []
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     chunk_size = 40
@@ -151,52 +145,48 @@ def main():
             try:
                 code_clean = t.split('.')[0].lstrip('0')
                 row = df_pool[df_pool['code'] == code_clean].iloc[0]
-                res = analyze_v35(t, name_map.get(code_clean, t), data[t].dropna(), row['mkt'], row['turnover'], row['vwap'], row['sector'], hsi_series)
+                res = analyze_v35(t, name_map.get(code_clean, t), data[t].dropna(), row['mkt'], row['vwap'], row['sector'], hsi_series)
                 if res: final_list.append(res)
             except: continue
-        time.sleep(1)
+        time.sleep(1.5)
 
     if not final_list: return
     res_df = pd.DataFrame(final_list)
 
-    # 4. 深度评级逻辑
+    # 行业与综合评分
     res_df['RS评分'] = res_df['RS_Raw'].rank(pct=True).apply(lambda x: int(x*99))
     sector_scores = res_df.groupby('Sector')['RS评分'].mean().to_dict()
     res_df['Sector_Alpha'] = res_df['Sector'].map(sector_scores).round(1)
-
-    # 综合排序逻辑：RS评级(60%) + 吸筹奖励(20%) + 行业Alpha(20%)
-    res_df['Commander_Score'] = (res_df['RS评分'] * 0.6) + (res_df['UD_Ratio'] * 15) + (res_df['Sector_Alpha'] * 0.2)
+    res_df['Score'] = (res_df['RS评分'] * 0.6) + (res_df['UD_Ratio'] * 15) + (res_df['Sector_Alpha'] * 0.2)
     
-    # 剔除超买 (Ext_50 > 22%)
     res_df = res_df[res_df['Ext_50'] < 22]
-    final_output = res_df.sort_values(by="Commander_Score", ascending=False).head(55)
+    final_output = res_df.sort_values(by="Score", ascending=False).head(55)
 
-    # 5. 精准推送
+    # 推送 Sheets
     sh = init_v35_sheet()
     sh.clear()
     
-    header = [[f"📊 大盘天气: {mkt_weather}", f"📡 信号更新: {now_str}", "💡 战术: 优先关注 '口袋起爆' 且 UD_Ratio > 1.2 的标的", "", "", "", "", ""]]
+    header = [[f"📊 大盘: {mkt_weather}", f"🕒 更新: {now_str}", "💡 战术: 优先 '口袋起爆' + UD > 1.2", "", "", "", "", ""]]
     sh.update(range_name="A1", values=header)
 
     cols = ["Ticker", "Name", "Action", "Sector", "RS评分", "Sector_Alpha", "Price", "Ext_50", "Tightness", "UD_Ratio", "ADR", "Stop_Loss"]
     sh.update(range_name="A3", values=[cols] + final_output[cols].values.tolist(), value_input_option="USER_ENTERED")
 
-    # 6. 自动美化
+    # 视觉美化 (修正后的 foregroundColor 参数)
     set_frozen(sh, rows=3)
     format_cell_range(sh, 'A3:L3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0, 0, 0)))
     
     rules = get_conditional_format_rules(sh)
-    # 高吸筹比绿色标记
+    # 修复：使用 foregroundColor 属性
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('J4:J100', sh)],
         booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['1.19']),
-                                format=cellFormat(textFormat=textFormat(bold=True, color=color(0, 0.5, 0)), backgroundColor=color(0.8, 1, 0.8)))))
-    # 口袋突破特殊黄色标记
+                                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.5, 0)), backgroundColor=color(0.8, 1, 0.8)))))
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)],
         booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🎯']),
                                 format=cellFormat(backgroundColor=color(1, 0.9, 0.6)))))
     rules.save()
 
-    print(f"✅ V35.0 任务完成。已锁定 {len(final_output)} 支高质量标的。")
+    print(f"✅ V35.1 部署成功！今日锁定 {len(final_output)} 支优质标的。")
 
 if __name__ == "__main__":
     main()
