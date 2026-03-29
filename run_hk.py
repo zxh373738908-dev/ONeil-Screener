@@ -26,23 +26,37 @@ def init_v27_sheet():
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     doc = client.open_by_url(OUTPUT_SHEET_URL)
-    # 确保打开第一个工作表
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. V27.1 核心引擎
+# 🧠 2. V27.2 核心引擎 (修正数据提取逻辑)
 # ==========================================
 
-def calculate_v27_metrics(df_h, hsi_df):
+def calculate_v27_metrics(df_h, hsi_series):
+    """
+    df_h: 个股 DataFrame
+    hsi_series: 恒指收盘价 Series (确保是 1D)
+    """
     if df_h.empty or len(df_h) < 200: return None
     
-    close = df_h['Close'].values
-    high = df_h['High'].values
-    low = df_h['Low'].values
-    vol = df_h['Volume'].values
+    # 统一处理 yfinance 可能返回的多级索引
+    try:
+        if isinstance(df_h['Close'], pd.DataFrame):
+            close = df_h['Close'].iloc[:, 0].values
+            high = df_h['High'].iloc[:, 0].values
+            low = df_h['Low'].iloc[:, 0].values
+            vol = df_h['Volume'].iloc[:, 0].values
+        else:
+            close = df_h['Close'].values
+            high = df_h['High'].values
+            low = df_h['Low'].values
+            vol = df_h['Volume'].values
+    except:
+        return None
+
     cp = close[-1]
     
-    # A. ADR 活跃度 (降至 1.8 增加信号量)
+    # A. ADR 活跃度
     adr = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
     if adr < 1.8: return None 
 
@@ -50,10 +64,11 @@ def calculate_v27_metrics(df_h, hsi_df):
     avg_vol_50 = np.mean(vol[-50:])
     is_vdu = vol[-1] < (avg_vol_50 * 0.5)
 
-    # C. RS 演算
+    # C. RS 演算 (使用传入的 1D HSI 序列)
     try:
-        hsi_close = hsi_df['Close'].reindex(df_h.index).ffill().values
-        rs_line = close / hsi_close
+        # 将恒指序列对齐到个股时间轴
+        aligned_hsi = hsi_series.reindex(df_h.index).ffill().values
+        rs_line = close / aligned_hsi
         rs_slope_now = (rs_line[-1] - rs_line[-10]) / rs_line[-10]
         rs_slope_prev = (rs_line[-11] - rs_line[-20]) / rs_line[-20]
         rs_accel = rs_slope_now - rs_slope_prev
@@ -70,38 +85,47 @@ def calculate_v27_metrics(df_h, hsi_df):
     elif rs_accel > 0 and rs_slope_now > 0: label = "🔥 引擎加速"
     elif cp < ma50 and cp > ma200: label = "⏳ 结构回调"
 
+    # ATR 止损
     tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
     atr = pd.Series(tr).rolling(20).mean().iloc[-1]
 
     return {
-        "Price": round(cp, 2),
-        "ADR": round(adr, 2),
+        "Price": round(float(cp), 2),
+        "ADR": round(float(adr), 2),
         "RS_Raw": rs_line[-1] * 100,
-        "RS_Accel": round(rs_accel * 100, 4),
+        "RS_Accel": round(float(rs_accel * 100), 4),
         "VDU": "YES" if is_vdu else "",
         "Action": label,
-        "Ext50": round(ext50, 1),
-        "StopLoss": round(cp - (atr * 2.0), 2)
+        "Ext50": round(float(ext50), 1),
+        "StopLoss": round(float(cp - (atr * 2.0)), 2)
     }
 
 # ==========================================
-# 🚀 3. 执行流程
+# 🚀 3. 主执行流程
 # ==========================================
 
 def main():
-    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V27.1 系统启动...")
+    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V27.2 系统启动 (修复版)...")
     
-    # 1. 指数背景
+    # 1. 恒指背景 (确保提取为 scalar)
     try:
-        hsi_df = yf.download("^HSI", period="350d", progress=False)
-        hsi_cp = hsi_df['Close'].iloc[-1]
-        is_safe = hsi_cp > hsi_df['Close'].rolling(50).mean().iloc[-1]
+        hsi_raw = yf.download("^HSI", period="350d", progress=False)
+        # 兼容新旧版本 yfinance 的提取逻辑
+        hsi_df_close = hsi_raw['Close']
+        if isinstance(hsi_df_close, pd.DataFrame):
+            hsi_series = hsi_df_close.iloc[:, 0]
+        else:
+            hsi_series = hsi_df_close
+            
+        hsi_cp = float(hsi_series.iloc[-1])
+        hsi_ma50 = float(hsi_series.rolling(50).mean().iloc[-1])
+        is_safe = hsi_cp > hsi_ma50
         print(f" -> 恒指当前價: {hsi_cp:.2f}, 状态: {'☀️进攻' if is_safe else '❄️防御'}")
     except Exception as e:
-        print(f" -> ❌ 恒指数据下载失败: {e}")
+        print(f" -> ❌ 恒指数据处理失败: {e}")
         return
 
-    # 2. 获取初筛池
+    # 2. 获取初筛池 (TV)
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
                "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.0e10},
@@ -117,18 +141,23 @@ def main():
 
     df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "Others"} for d in tv_data])
 
-    # 3. 批量演算 (改为单线程提高 CI 稳定性)
+    # 3. 批量演算 (单线程确保稳定)
     final_list = []
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
-    print(f" -> 正在演算 K 线数据，请稍候...")
+    print(f" -> 正在下载 {len(tickers)} 支个股数据...")
     
-    # 分批下载防封
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=False)
     
     for _, row in df_pool.iterrows():
         t = str(row['code']).zfill(4)+".HK"
         try:
-            m = calculate_v27_metrics(data[t].dropna(), hsi_df)
+            # 提取个股 DataFrame
+            if len(tickers) > 1:
+                stock_df = data[t].dropna()
+            else:
+                stock_df = data.dropna()
+                
+            m = calculate_v27_metrics(stock_df, hsi_series)
             if m:
                 m.update({"代码": row['code'], "行业": row['sector']})
                 final_list.append(m)
@@ -136,13 +165,13 @@ def main():
 
     print(f" -> 筛选完成，符合条件标的: {len(final_list)} 支")
 
-    # 4. 处理结果并写入
+    # 4. 更新 Google Sheets
     sh = init_v27_sheet()
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
     
     if not final_list:
         sh.clear()
-        sh.update("A1", [[f"最後更新: {now_str} | 今日無符合條件標的 (ADR/VDU門檻未達)"]])
+        sh.update([ [f"最後更新: {now_str} | 今日無符合條件標的"] ], "A1")
         print("⚠️ 今日无信号，已更新时间戳。")
         return
 
@@ -155,17 +184,17 @@ def main():
     final_output = res_df.sort_values(by="狙击得分", ascending=False).groupby('行业').head(3)
     final_output = final_output[["代码", "RS评级", "Action", "狙击得分", "VDU", "ADR", "Ext50", "行业", "StopLoss"]].head(35)
 
-    # 5. 更新表格
+    # 写入表格
     sh.clear()
     header = [f"大盘: {'☀️进攻' if is_safe else '❄️防御'}", f"更新: {now_str}", f"选股总数: {len(final_output)}", "", "", "", "", "", ""]
     sh.update([header] + [final_output.columns.values.tolist()] + final_output.values.tolist(), "A1")
     
-    # 格式化
+    # 美化格式
     set_frozen(sh, rows=2)
     format_cell_range(sh, 'A1:I1', cellFormat(textFormat=textFormat(bold=True, italic=True), backgroundColor=color(0.9, 0.9, 0.9)))
     format_cell_range(sh, 'A2:I2', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0, 0, 0.4)))
     
-    print(f"✅ V27.1 运行成功，数据已推送到 Google Sheets。")
+    print(f"✅ V27.2 运行成功，数据已推送到 Google Sheets。")
 
 if __name__ == "__main__":
     main()
