@@ -15,8 +15,9 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 核心配置
 # ==========================================
+# 👈 请再次确认这个 URL 跟你浏览器地址栏里的一模一样
 OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit#gid=0"
-SHEET_NAME = "HK-Share Screener" # 👈 确保这里的名字和你的 Google Sheet 标签名完全一致
+SHEET_NAME = "HK-Share Screener" 
 CREDS_FILE = "credentials.json"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -25,18 +26,24 @@ def init_v27_sheet():
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     doc = client.open_by_url(OUTPUT_SHEET_URL)
+    
+    print(f" -> 📄 正在访问文档: '{doc.title}'") # 👈 诊断：看看打印出的文档名对不对
+    
     try:
-        return doc.worksheet(SHEET_NAME) # 👈 按名字寻找标签页
+        ws = doc.worksheet(SHEET_NAME)
+        print(f" -> ✅ 找到目标标签页: '{SHEET_NAME}'")
     except:
-        return doc.get_worksheet(0) # 找不到就用第一个
+        ws = doc.get_worksheet(0)
+        print(f" -> ⚠️ 未找到标签页 '{SHEET_NAME}'，将写入第一个标签页: '{ws.title}'")
+    
+    return ws
 
 # ==========================================
-# 🧠 2. V27.3 欧奈尔核心引擎
+# 🧠 2. 核心算法 (保持严选逻辑)
 # ==========================================
 
 def calculate_v27_metrics(df_h, hsi_series):
     if df_h.empty or len(df_h) < 250: return None
-    
     try:
         if isinstance(df_h['Close'], pd.DataFrame):
             close = df_h['Close'].iloc[:, 0].values
@@ -51,28 +58,16 @@ def calculate_v27_metrics(df_h, hsi_series):
     except: return None
 
     cp = close[-1]
+    ma50, ma150, ma200 = np.mean(close[-50:]), np.mean(close[-150:]), np.mean(close[-200:])
+    low_52w, high_52w = np.min(low[-250:]), np.max(high[-250:])
     
-    # --- A. 欧奈尔/米纳尔维尼 趋势模板过滤 ---
-    ma50 = np.mean(close[-50:])
-    ma150 = np.mean(close[-150:])
-    ma200 = np.mean(close[-200:])
-    low_52w = np.min(low[-250:])
-    high_52w = np.max(high[-250:])
+    # 欧奈尔硬性趋势过滤
+    if cp < ma150 or cp < ma200 or ma150 < ma200: return None
+    if cp < low_52w * 1.25 or cp < high_52w * 0.75: return None
     
-    # 铁律 1: 股价必须在 150天和200天线线上方
-    if cp < ma150 or cp < ma200: return None
-    # 铁律 2: 150天线在200天线上方 (长线走牛)
-    if ma150 < ma200: return None
-    # 铁律 3: 股价距离52周低点至少涨了25%
-    if cp < low_52w * 1.25: return None
-    # 铁律 4: 股价距离52周高点在25%以内 (高位强势)
-    if cp < high_52w * 0.75: return None
-
-    # B. ADR 活跃度 (恢复到 2.2% 确保质量)
     adr = np.mean((high[-10:] - low[-10:]) / close[-10:]) * 100
-    if adr < 2.2: return None 
+    if adr < 2.0: return None 
 
-    # C. RS 演算
     try:
         aligned_hsi = hsi_series.reindex(df_h.index).ffill().values
         rs_line = close / aligned_hsi
@@ -81,14 +76,10 @@ def calculate_v27_metrics(df_h, hsi_series):
         rs_accel = rs_slope_now - rs_slope_prev
     except: return None
 
-    # D. 状态标记
     is_vdu = vol[-1] < np.mean(vol[-50:]) * 0.5
-    
-    label = "📡 轨道维持"
-    if is_vdu and cp > ma50: label = "💎 窒息枯竭"
-    elif rs_accel > 0 and rs_slope_now > 0: label = "🔥 引擎加速"
+    label = "🔥 引擎加速" if rs_accel > 0 else "📡 轨道维持"
+    if is_vdu: label = "💎 窒息枯竭"
 
-    # ATR 止损
     tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
     atr = pd.Series(tr).rolling(20).mean().iloc[-1]
 
@@ -104,33 +95,31 @@ def calculate_v27_metrics(df_h, hsi_series):
     }
 
 # ==========================================
-# 🚀 3. 执行流程
+# 🚀 3. 主流程
 # ==========================================
 
 def main():
-    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V27.3 欧奈尔严选版启动...")
+    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V27.4 透明诊断版启动...")
     
+    # 1. 准备数据
     try:
         hsi_raw = yf.download("^HSI", period="350d", progress=False)
         hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
         hsi_cp = float(hsi_series.iloc[-1])
         is_safe = hsi_cp > float(hsi_series.rolling(50).mean().iloc[-1])
         print(f" -> 恒指: {hsi_cp:.2f} ({'进攻' if is_safe else '防御'})")
-    except Exception as e:
-        print(f" -> ❌ 恒指获取失败: {e}"); return
+    except: print(" -> ❌ 恒指获取失败"); return
 
+    # 2. 初始池抓取
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
-               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}, # 提高到120亿
+               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10},
                           {"left": "close", "operation": "greater", "right": 1.0}],
                "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
-    try:
-        tv_data = requests.post(url, json=payload, timeout=15).json().get('data', [])
-        print(f" -> 初始池: {len(tv_data)} 支")
-    except: print(" -> ❌ TV抓取失败"); return
-
+    tv_data = requests.post(url, json=payload, timeout=15).json().get('data', [])
     df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "Others"} for d in tv_data])
 
+    # 3. 核心计算
     final_list = []
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=False)
@@ -147,34 +136,36 @@ def main():
 
     print(f" -> 精选后标的: {len(final_list)} 支")
 
-    # 更新 Sheets
+    # 4. 写入表格 (修正参数顺序 Bug)
     sh = init_v27_sheet()
+    sh.clear() # 👈 清空旧数据
+    
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    sh.clear()
     
     if not final_list:
-        sh.update([ [f"最後更新: {now_str} | 今日無符合強勢趨勢標的"] ], "A1")
+        sh.update(range_name="A1", values=[ [f"最後更新: {now_str} | 今日無符合強勢趨勢標的"] ])
         return
 
     res_df = pd.DataFrame(final_list)
-    # RS评级 (百分位)
     res_df['RS评级'] = res_df['RS_Raw'].rank(pct=True).apply(lambda x: int(x*99))
-    sector_alpha = res_df.groupby('行业')['RS评级'].mean().to_dict()
-    res_df['行业Alpha'] = res_df['行业'].map(sector_alpha).round(1)
-    res_df['综合得分'] = (res_df['RS评级'] * 0.6) + (res_df['行业Alpha'] * 0.2) + (res_df['ADR'] * 2)
+    res_df['综合得分'] = (res_df['RS评级'] * 0.7) + (res_df['ADR'] * 2.5)
     
-    # 最终取精华
     final_output = res_df.sort_values(by="综合得分", ascending=False).groupby('行业').head(3)
     final_output = final_output[["代码", "RS评级", "Action", "综合得分", "VDU", "ADR", "Ext50", "行业", "StopLoss"]].head(35)
 
-    header = [f"大盘: {'进攻' if is_safe else '防御'}", f"更新: {now_str}", f"选股总数: {len(final_output)}", "", "", "", "", "", ""]
-    sh.update([header] + [final_output.columns.values.tolist()] + final_output.values.tolist(), "A1")
+    # 准备写入的数据列表
+    header = [f"大盘: {'进攻' if is_safe else '防御'}", f"更新: {now_str}", f"选股数: {len(final_output)}", "", "", "", "", "", ""]
+    data_to_write = [header] + [final_output.columns.values.tolist()] + final_output.values.tolist()
+
+    # 👈 修正：range_name 必须在第一位，或者明确指定 values 参数
+    sh.update(range_name="A1", values=data_to_write)
     
+    # 美化
     set_frozen(sh, rows=2)
-    format_cell_range(sh, 'A1:I1', cellFormat(textFormat=textFormat(bold=True), backgroundColor=color(0.95, 0.95, 0.95)))
-    format_cell_range(sh, 'A2:I2', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0.2, 0.2, 0.2)))
+    format_cell_range(sh, 'A1:I2', cellFormat(textFormat=textFormat(bold=True)))
     
-    print(f"✅ V27.3 推送成功。")
+    print(f" -> 🚀 数据已正式写入标签页: '{sh.title}'")
+    print(f"✅ V27.4 任务圆满完成。")
 
 if __name__ == "__main__":
     main()
