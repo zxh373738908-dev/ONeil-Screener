@@ -14,7 +14,7 @@ from gspread_formatting import *
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置 (精准定位)
+# 1. 核心配置
 # ==========================================
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 TARGET_GID = 665566258  
@@ -32,7 +32,7 @@ def init_v32_sheet():
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🌐 2. 数据工具 (腾讯汉化)
+# 🌐 2. 数据工具
 # ==========================================
 def get_chinese_names(codes):
     mapping = {}
@@ -48,7 +48,7 @@ def get_chinese_names(codes):
     return mapping
 
 # ==========================================
-# 🧠 3. V32.1 演算核心
+# 🧠 3. 演算核心
 # ==========================================
 
 def calculate_frvp_poc(highs, lows, vols, lookback=120):
@@ -78,12 +78,12 @@ def analyze_v32(ticker, name, df_h, mkt_cap, tv_turnover, tv_vwap, hsi_series):
     if np.isnan(cp): return None
 
     ma50, ma200 = np.mean(close[-50:]), np.mean(close[-200:])
-    if cp < ma200: return None # 200日牛熊线硬过滤
+    if cp < ma200: return None 
 
     poc_6m = calculate_frvp_poc(high, low, vol)
     dist_poc = (cp / poc_6m - 1) * 100
     
-    # 欧奈尔 RS 原始分
+    # RS 原始分
     rs_raw = (cp / close[-250]) / (hsi_series.iloc[-1] / hsi_series.iloc[-250])
 
     avg_vol50 = np.mean(vol[-50:])
@@ -96,7 +96,6 @@ def analyze_v32(ticker, name, df_h, mkt_cap, tv_turnover, tv_vwap, hsi_series):
     loss = -np.mean(delta[delta < 0]) if any(delta < 0) else 0.001
     rsi = 100 - (100 / (1 + gain/loss))
 
-    # 战法判断
     trend_tag = "📈經典多頭(逼近新高)"
     if abs(cp - poc_6m)/poc_6m < 0.03 and vol[-1] < avg_vol50 * 0.7:
         trend_tag = "🐉老龍回頭(👑籌碼共振)"
@@ -117,7 +116,7 @@ def analyze_v32(ticker, name, df_h, mkt_cap, tv_turnover, tv_vwap, hsi_series):
 
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 V32.1 Alpha 猎手启动 (修复格式异常)...")
+    print(f"[{now_str}] 🚀 V32.2 Alpha 猎手启动 (修复 TextFormat 属性)...")
     
     # 1. 恒指基准
     hsi_raw = yf.download("^HSI", period="350d", progress=False)
@@ -138,7 +137,7 @@ def main():
          "turnover": (d['d'][2] * d['d'][5]) if d['d'][5] else 0} for d in resp
     ])
 
-    print(f" -> 🌐 同步腾讯证券汉化名录...")
+    print(f" -> 🌐 同步腾讯汉化名录...")
     name_map = get_chinese_names(df_pool['code'].tolist())
 
     # 3. 分批演算
@@ -149,16 +148,20 @@ def main():
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         print(f" -> 📥 正在处理 {i+1} ~ {min(i+chunk_size, len(tickers))} 支...")
-        data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
-        for t in chunk:
-            try:
-                stock_df = data[t].dropna()
-                code_clean = t.split('.')[0].lstrip('0')
-                row_info = df_pool[df_pool['code'] == code_clean].iloc[0]
-                res = analyze_v32(t, name_map.get(code_clean, t), stock_df, row_info['mkt'], row_info['turnover'], row_info['vwap'], hsi_series)
-                if res: final_list.append(res)
-            except: continue
-        time.sleep(1.5)
+        # 增加重试逻辑
+        try:
+            data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
+            for t in chunk:
+                try:
+                    stock_df = data[t].dropna()
+                    code_clean = t.split('.')[0].lstrip('0')
+                    row_info = df_pool[df_pool['code'] == code_clean].iloc[0]
+                    res = analyze_v32(t, name_map.get(code_clean, t), stock_df, row_info['mkt'], row_info['turnover'], row_info['vwap'], hsi_series)
+                    if res: final_list.append(res)
+                except: continue
+        except Exception as e:
+            print(f" -> ⚠️ 批次下载失败: {e}")
+        time.sleep(2)
 
     if not final_list:
         print("⚠️ 今日无符合标的。")
@@ -178,19 +181,22 @@ def main():
     sh.update(range_name="A1", values=header + res_df[output_cols].values.tolist(), value_input_option="USER_ENTERED")
     sh.update_acell("M2", now_str) 
 
-    # 6. 视觉美化 (修正后的条件格式)
+    # 6. 视觉美化 (修正 TextFormat 参数)
     set_frozen(sh, rows=1)
-    # RS评分在 M列，即第13列
     rule = ConditionalFormatRule(
         ranges=[GridRange.from_a1_range('M2:M100', sh)],
         booleanRule=BooleanRule(
-            condition=BooleanCondition('NUMBER_GREATER', ['89']), # 👈 修正为官方标准写法
-            format=cellFormat(textFormat=textFormat(bold=True, color=color(0.8, 0, 0)), backgroundColor=color(1, 0.9, 0.9))
+            condition=BooleanCondition('NUMBER_GREATER', ['89']),
+            # 👈 修复：foregroundColor 代替 color
+            format=cellFormat(
+                textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)), 
+                backgroundColor=color(1, 0.9, 0.9)
+            )
         )
     )
     set_conditional_format_rules(sh, [rule])
 
-    print(f"✅ V32.1 任务圆满完成。")
+    print(f"✅ V32.2 任务成功！")
 
 if __name__ == "__main__":
     main()
