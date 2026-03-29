@@ -5,14 +5,7 @@ from google.oauth2.service_account import Credentials
 import datetime, time, warnings, logging, requests, os
 import yfinance as yf
 
-# 尝试导入美化插件
-try:
-    from gspread_formatting import *
-    HAS_FORMATTING = True
-except ImportError:
-    HAS_FORMATTING = False
-
-# 基础屏蔽
+# 屏蔽干扰
 warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
@@ -29,139 +22,134 @@ def init_sheet():
     client = gspread.authorize(creds)
     doc = client.open_by_key(SS_KEY)
     try:
-        return doc.worksheet("A-Share V26-Spark")
+        return doc.worksheet("A-Share V37-Omniscience")
     except:
-        return doc.add_worksheet(title="A-Share V26-Spark", rows=1000, cols=20)
+        return doc.add_worksheet(title="A-Share V37-Omniscience", rows=1000, cols=20)
 
 # ==========================================
-# 🧠 2. V26.0 火种决策引擎
+# 🧠 2. V37.0 “全知者”核心算法
 # ==========================================
-def analyze_v26_logic(df, rs_raw_val, sector_bonus, breadth_factor):
+def analyze_v37_omniscience(df, rs_val, mkt_cap):
     try:
-        c = df['Close'].values; h = df['High'].values; l = df['Low'].values; v = df['Volume'].values
+        sub_df = df.tail(252)
+        c = sub_df['Close'].values; h = sub_df['High'].values; l = sub_df['Low'].values
+        v = sub_df['Volume'].values; o = sub_df['Open'].values
         price = c[-1]
-        ma20 = df['Close'].rolling(20).mean().iloc[-1]
-        ma200 = df['Close'].rolling(200).mean().iloc[-1]
-        h250 = np.max(h[-250:])
         
-        dist_high = (price / h250 - 1) * 100
-        ext_20 = (price / ma20 - 1) * 100
+        # --- A. 均线系统 (MA50/200) ---
+        ma50 = sub_df['Close'].rolling(50).mean().iloc[-1]
+        ma200 = sub_df['Close'].rolling(200).mean().iloc[-1]
+        dist_ma50 = (price / ma50 - 1) * 100
+        dist_ma200 = (price / ma200 - 1) * 100
         
-        # --- A. 信号定义 ---
-        tag = "🔍 观察"
-        # 1. 相对强度领先 (即便在跌，也比大盘硬)
-        if rs_raw_val > 1.1: tag = "💎 相对强势"
+        # --- B. 机构护盘止跌探测 ---
+        # 逻辑：过去5天内有缩量(VDU)，且今日收盘高于昨日高点(吞噬/突破)
+        vdu_5d = np.min(v[-5:]) < (np.mean(v[-60:]) * 0.5)
+        is_reversal = price > h[-2] and v[-1] > v[-2]
         
-        # 2. 超跌火种探测 (偏离均线太远且放量)
-        avg_v50 = np.mean(v[-50:])
-        if ext_20 < -15 and v[-1] > avg_v50 * 1.5:
-            tag = "🌋 底部火种"
+        # --- C. 52周位置 ---
+        h52 = np.max(h); l52 = np.min(l)
+        range_pos = (price - l52) / (h52 - l52) * 100
         
-        # 3. 趋势幸存者
-        if price > ma20 and price > ma200:
-            tag = "🛡️ 趋势幸存"
+        # --- D. 筹码与空间 ---
+        v_hist, bins = np.histogram(c[-120:], bins=50, weights=v[-120:])
+        curr_bin_idx = np.searchsorted(bins, price)
+        overhead_bins = v_hist[curr_bin_idx:]
+        target_p = bins[curr_bin_idx + np.argmax(overhead_bins)] if len(overhead_bins) > 0 else price * 1.15
+        
+        tr = pd.concat([sub_df['High']-sub_df['Low'], abs(sub_df['High']-sub_df['Close'].shift())], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+        stop_p = price - (atr * 1.5)
+        rr_ratio = (target_p - price) / (price - stop_p) if (price - stop_p) > 0 else 0
 
-        # --- B. 评分逻辑 (不设截断) ---
-        score = (rs_raw_val * 60) + sector_bonus
-        if "幸存" in tag: score += 20
-        if "强势" in tag: score += 10
+        # ==========================================
+        # ⚔️ 核心战法分队 (含茅台类蓝筹反弹)
+        # ==========================================
+        tag = "持有"
+        # 1. 🛡️ 龙之支点 (专门针对 600519 这种大盘白马反弹)
+        if mkt_cap > 800e8 and abs(dist_ma50) < 3.5 and is_reversal:
+            tag = "🛡️龙之支点(蓝筹反弹)"
+        # 2. 💎 极光核心 (右侧主升浪)
+        elif range_pos > 75 and rr_ratio > 2.5 and vdu_5d:
+            tag = "💎极光核心(主升)"
+        # 3. 🗡️ 执剑枢轴
+        elif vdu_5d and price > ma50:
+            tag = "🗡️执剑枢轴"
         
-        final_score = score * (breadth_factor + 0.2) # 冰点期给予一定系数补偿
-        
-        return tag, round(final_score, 1), round(dist_high, 1), round(ext_20, 1)
+        if range_pos < 40: tag = "🔍观察期"
+
+        # --- E. 评分逻辑 (对蓝筹支点加分) ---
+        score = (rs_val * 35) + (25 if tag == "🛡️龙之支点(蓝筹反弹)" else 0) + (min(rr_ratio, 5) * 10)
+        if range_pos > 70: score += 15
+
+        return tag, round(score, 1), round(target_p, 2), round(stop_p, 2), round(range_pos, 1), round(dist_ma50, 1)
     except:
-        return "ERR", 0, 0, 0
+        return "ERR", 0, 0, 0, 0, 0
 
 # ==========================================
 # 🚀 3. 主扫描流程
 # ==========================================
-def run_v26_spark():
+def run_v37_omniscience():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 A股猎手 V26.0 Spark 启动 (冰点强制选股模式)...")
+    print(f"[{now_str}] 🚀 A股猎手 V37.0 Omniscience 启动 (全视角: 包含蓝筹支点探测)...")
 
-    # 1. 广度探测
+    # 1. 基础基准
     try:
         idx = yf.download("000300.SS", period="350d", progress=False)
         idx_c = idx['Close'].iloc[:, 0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close']
-    except: return print("❌ 无法获取大盘指数")
+    except: return print("❌ 基准指数下载失败")
 
-    # 2. 获取池子
+    # 2. TV 云端筛选 (稍微调低门槛以捕捉反弹初期的标的)
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {
-        "columns": ["name", "description", "market_cap_basic", "volume", "close", "industry", "change"],
-        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 7e9}], # 降低市值门槛至70亿
-        "range": [0, 600], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+        "columns": ["name", "description", "market_cap_basic", "volume", "close", "industry"],
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 50e8}], # 50亿以上
+        "range": [0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
     }
     try:
         raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
-        df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "industry": d['d'][5], "chg": d['d'][6]} for d in raw_data])
+        df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][5]} for d in raw_data])
     except: return print("❌ 接口异常")
 
-    # 3. 广度因子
+    # 3. 扫描
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
-    breadth_check = yf.download(tickers[:100], period="250d", progress=False)['Close']
-    uptrend_count = sum([1 for t in breadth_check.columns if breadth_check[t].iloc[-1] > breadth_check[t].rolling(200).mean().iloc[-1]])
-    breadth_factor = max(0.3, min(1.0, (uptrend_count / 100) * 1.5))
-
-    # 4. 演算
     final_list = []
     chunk_size = 60
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
-        print(f" -> 扫描进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
+        print(f" -> 全知扫描进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
         data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
         
         for t in chunk:
             try:
                 df_h = data[t].dropna()
-                if len(df_h) < 200: continue
+                if len(df_h) < 252: continue
                 p = df_h['Close'].iloc[-1]
-                rs_raw = (p / df_h['Close'].iloc[-250]) / (idx_c.iloc[-1] / idx_c.iloc[-250])
+                rs_raw = (p / df_h['Close'].iloc[-120]) / (idx_c.iloc[-1] / idx_c.iloc[-120])
                 
-                c_code = t.split('.')[0]
-                row = df_pool[df_pool['code'] == c_code].iloc[0]
+                c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
                 
-                tag, score, d_high, ext_20 = analyze_v26_logic(df_h, rs_raw, 0, breadth_factor)
+                tag, score, target, stop, r_pos, d_ma50 = analyze_v37_omniscience(df_h, rs_raw, row_info['mkt'])
                 
-                # 无差别入榜，后续统一排序
+                if score < 35: continue
+
                 final_list.append({
-                    "Ticker": c_code, "Name": row['name'], "综合评分": score, "勋章": tag, 
-                    "行业": row['industry'], "RS评级": rs_raw, "距高点%": d_high, "MA20乖离%": ext_20, "Price": round(float(p), 2)
+                    "Ticker": c_code, "Name": row_info['name'], "评分": score, "战术勋章": tag, 
+                    "距MA50%": d_ma50, "52周位置%": r_pos, "目标价": target, "止损价": stop,
+                    "市值(亿)": round(row_info['mkt']/1e8, 2), "行业": row_info['industry'], "RS强度": round(rs_raw, 2)
                 })
             except: continue
 
-    # 5. 写入 Google Sheets
+    if not final_list: return
+    res_df = pd.DataFrame(final_list).sort_values(by="评分", ascending=False).head(60)
+
+    # 4. 写入
     sh = init_sheet(); sh.clear()
-    
-    if not final_list:
-        sh.update_acell("A1", "全场无数据，请检查网络。")
-        return
-
-    res_df = pd.DataFrame(final_list)
-    # 计算 RS 百分比排名
-    res_df['RS排名'] = res_df['RS评级'].rank(pct=True).apply(lambda x: int(x*99))
-    # 强制排序：无论行情多烂，取综合评分前 60 名
-    res_df = res_df.sort_values(by="综合评分", ascending=False).head(60)
-
-    cols = ["Ticker", "Name", "综合评分", "勋章", "行业", "RS排名", "距高点%", "MA20乖离%", "Price"]
+    cols = ["Ticker", "Name", "评分", "战术勋章", "距MA50%", "52周位置%", "目标价", "止损价", "市值(亿)", "行业", "RS强度"]
     sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
-    
-    status = "❄️ 极寒" if uptrend_count < 40 else "🔥 活跃"
-    sh.update_acell("J1", f"气象站 | 广度: {uptrend_count}% | 状态: {status} | 强制选股模式已开启")
+    sh.update_acell("L1", f"V37.0 Omniscience Active | 🛡️DragonPivot Mode ON | {now_str}")
 
-    if HAS_FORMATTING:
-        try:
-            set_frozen(sh, rows=1)
-            fmt_rules = get_conditional_format_rules(sh)
-            # 对 RS 排名 90 以上的加红
-            rule_rs = ConditionalFormatRule(ranges=[GridRange.from_a1_range('F2:F60', sh)],
-                booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER_OR_EQUAL', ['90']),
-                    format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1, 0, 0)))))
-            fmt_rules.append(rule_rs)
-            fmt_rules.save()
-        except: pass
-    
-    print(f"✅ V26.0 Spark 任务完成！已强行从寒冬中提取 {len(res_df)} 个火种。")
+    print(f"✅ V37.0 扫描大功告成！已锁定蓝筹支点标的。")
 
 if __name__ == "__main__":
-    run_v26_spark()
+    run_v37_omniscience()
