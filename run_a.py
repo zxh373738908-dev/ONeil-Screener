@@ -2,175 +2,167 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-import datetime, time, warnings, logging
+from gspread_formatting import *
+import datetime, time, warnings, logging, requests
 import yfinance as yf
 
-# 屏蔽所有不必要的日志
+# 屏蔽干扰
 warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ==========================================
-# 1. 基础设置与 Google Sheets 连接
+# 1. 配置中心
 # ==========================================
-OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit?gid=0#gid=0"
-scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
+CREDS_FILE = "credentials.json"
+TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
-def get_worksheet():
+def init_sheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+    doc = client.open_by_key(SS_KEY)
     try:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-        client = gspread.authorize(creds)
-        doc = client.open_by_url(OUTPUT_SHEET_URL)
-        try:
-            return doc.worksheet("A-Share Screener")
-        except gspread.exceptions.WorksheetNotFound:
-            return doc.add_worksheet(title="A-Share Screener", rows=1000, cols=20)
-    except Exception as e:
-        print(f"❌ Google Sheets 连接失败: {e}")
-        return None
-
-# ==========================================
-# 🛠️ 筹码分布计算核心 (方案一：本地模拟算法)
-# ==========================================
-def get_chip_data(df_ticker, lookback=120):
-    try:
-        hist = df_ticker.tail(lookback)
-        p_min, p_max = hist['Low'].min(), hist['High'].max()
-        bins = 40
-        price_range = np.linspace(p_min, p_max, bins + 1)
-        v_dist = np.zeros(bins)
-        for _, row in hist.iterrows():
-            idx = np.where((price_range[:-1] >= row['Low']) & (price_range[1:] <= row['High']))[0]
-            if len(idx) > 0:
-                v_dist[idx] += row['Volume'] / len(idx)
-            else:
-                c_idx = np.searchsorted(price_range, row['Close']) - 1
-                if 0 <= c_idx < bins: v_dist[c_idx] += row['Volume']
-        
-        poc_price = (price_range[np.argmax(v_dist)] + price_range[np.argmax(v_dist)+1]) / 2
-        curr_price = df_ticker['Close'].iloc[-1]
-        curr_idx = np.searchsorted(price_range, curr_price) - 1
-        overhead_vol = np.sum(v_dist[curr_idx:]) if curr_idx < bins else 0
-        total_vol = np.sum(v_dist)
-        res_ratio = (overhead_vol / total_vol) * 100 if total_vol > 0 else 0
-        return round(poc_price, 2), f"{round(res_ratio, 1)}%"
+        return doc.worksheet("A-Share V23-Aegis")
     except:
-        return 0, "N/A"
+        return doc.add_worksheet(title="A-Share V23-Aegis", rows=1000, cols=20)
 
 # ==========================================
-# 🌍 STEP 1: 获取 A 股名册 (暴力生成版)
+# 🧠 2. V23.0 “神盾”演算引擎
 # ==========================================
-def get_a_share_list():
-    print("\n🌍 [STEP 1] 启动【号段生成器】：跳过 API，直接覆盖全市场核心号段...")
-    ranges = [
-        (600000, 602000), (603000, 606000), # 沪市主板
-        (1, 1500), (2000, 3200),           # 深市主板
-        (300000, 301650),                  # 创业板
-        (688000, 688990)                   # 科创板
-    ]
-    codes = [f"{i:06d}" for start, end in ranges for i in range(start, end)]
-    return pd.DataFrame(codes, columns=['code'])
+def analyze_v23_logic(df, rs_raw_val, sector_rank_bonus, breadth_factor):
+    try:
+        c = df['Close'].values; h = df['High'].values; l = df['Low'].values; v = df['Volume'].values; o = df['Open'].values
+        price = c[-1]
+        
+        # --- A. 机构口袋买点 (Pocket Pivot) ---
+        # 逻辑：上涨，且今日量 > 过去10天内最大阴线量
+        rets = np.diff(c[-11:]) / c[-12:-1]
+        vols_10 = v[-11:-1]
+        max_down_vol = max([vols_10[i] for i in range(10) if rets[i] < 0] or [0])
+        is_pocket_pivot = price > o[-1] and v[-1] > max_down_vol
+        
+        # --- B. VCP 阶梯收缩率 (延续 V22) ---
+        v_now = np.std((h[-10:] - l[-10:]) / l[-10:] * 100)
+        v_prev = np.std((h[-20:-10] - l[-20:-10]) / l[-20:-10] * 100)
+        vcp_ratio = v_now / v_prev if v_prev > 0 else 1.0
+        
+        # --- C. 缺口与形体 ---
+        gap_up = (o[-1] / c[-2] - 1) * 100
+        rhc = (price - l[-1]) / (h[-1] - l[-1]) if (h[-1] - l[-1]) > 0 else 0.5
+        ma20 = df['Close'].rolling(20).mean().iloc[-1]
+        ext = (price / ma20 - 1) * 100
+        
+        # --- D. 筹码与止损 ---
+        v_profile, bins = np.histogram(c[-120:], bins=50, weights=v[-120:])
+        poc = (bins[np.argmax(v_profile)] + bins[np.argmax(v_profile)+1]) / 2
+        tr = pd.concat([df['High']-df['Low'], abs(df['High']-df['Close'].shift()), abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+        stop_loss = price - (atr * 1.5)
+        
+        # --- E. 战术标签 ---
+        tag = ""
+        if is_pocket_pivot and vcp_ratio < 0.8: tag = "💎口袋起爆"
+        elif gap_up > 2.5 and rhc > 0.8: tag = "⚡️强力缺口"
+        elif abs(price-poc)/poc < 0.03: tag = "🐉老龙回头"
+        else: tag = "📈趋势中"
+
+        # --- F. V23 终极综合评分 ---
+        # RS(50%) + 板块红利(15%) + 机构口袋(15%) + VCP收缩(20%) * 广度调节
+        score = (rs_raw_val * 50) + sector_rank_bonus
+        if is_pocket_pivot: score += 15
+        if vcp_ratio < 0.7: score += 15
+        if gap_up > 3: score += 10
+        score *= breadth_factor
+
+        return tag, poc, "✅" if is_pocket_pivot else "❌", round(vcp_ratio, 2), round(stop_loss, 2), round(score, 1), round(ext, 1)
+    except:
+        return "ERR", 0, "❌", 0, 0, 0, 0
 
 # ==========================================
-# 🚀 STEP 2: 原装方案 + 筹码确认 (全速扫描)
+# 🚀 3. 主扫描流程
 # ==========================================
-def scan_market_via_yfinance(df_list):
-    print("\n🚀[STEP 2] 启动【T.U.A.W】战法扫描仪式 (正在穿透铁幕)...")
-    tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_list['code']]
-    
-    all_results = []
-    chunk_size = 500  # 保持 500 的块大小以平衡速度和稳定性
-    
+def run_v23_aegis():
+    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{now_str}] 🚀 A股猎手 V23.0 Aegis 启动 (板块Alpha+机构口袋买点)...")
+
+    # 1. 广度与基准
+    idx = yf.download("000300.SS", period="350d", progress=False)
+    idx_c = idx['Close'].iloc[:, 0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close']
+
+    # 2. TV 云端名单 (市值>80亿)
+    tv_url = "https://scanner.tradingview.com/china/scan"
+    payload = {
+        "columns": ["name", "description", "market_cap_basic", "volume", "close", "industry", "change"],
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 8e9}],
+        "range": [0, 600], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+    }
+    raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
+    df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "industry": d['d'][5], "chg": d['d'][6], "mkt": d['d'][2]} for d in raw_data])
+
+    # --- 3. 计算板块Alpha (Sector Leadership) ---
+    print(" -> 📡 计算板块热力图 (Sector Alpha)...")
+    sector_performance = df_pool.groupby('industry')['chg'].mean().sort_values(ascending=False)
+    # 给排名前 20% 的板块加 20 分红利
+    top_sectors = sector_performance.head(len(sector_performance)//5).index.tolist()
+
+    # --- 4. 广度探测 ---
+    tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
+    breadth_check = yf.download(tickers[:100], period="250d", progress=False)['Close']
+    uptrend_count = sum([1 for t in breadth_check.columns if breadth_check[t].iloc[-1] > breadth_check[t].rolling(200).mean().iloc[-1]])
+    breadth_factor = max(0.5, min(1.0, (uptrend_count / 100) * 1.6))
+
+    # --- 5. 正式扫描 ---
+    final_list = []
+    chunk_size = 50
     for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i+chunk_size]
-        print(f"   -> 📥 扫描进度: {i}/{len(tickers)} (全球数据通道传输中)...")
-        try:
-            data = yf.download(chunk, period="1y", auto_adjust=True, threads=True, progress=False)
-            if data.empty or 'Close' not in data: continue
-            
-            valid_tickers = data['Close'].columns.tolist() if isinstance(data.columns, pd.MultiIndex) else ([chunk[0]] if not data.empty else [])
+        chunk = tickers[i : i + chunk_size]
+        data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
+        for t in chunk:
+            try:
+                df_h = data[t].dropna()
+                if len(df_h) < 200: continue
+                p = df_h['Close'].iloc[-1]
+                rs_raw = (p / df_h['Close'].iloc[-250]) / (idx_c.iloc[-1] / idx_c.iloc[-250])
+                if rs_raw < 1.05: continue
 
-            for t in valid_tickers:
-                try:
-                    # 数据切片
-                    if isinstance(data.columns, pd.MultiIndex):
-                        df_t = pd.DataFrame({
-                            'Open': data['Open'][t], 'High': data['High'][t],
-                            'Low': data['Low'][t], 'Close': data['Close'][t],
-                            'Volume': data['Volume'][t]
-                        }).dropna()
-                    else:
-                        df_t = data.dropna()
-                    
-                    if len(df_t) < 200: continue
-                    
-                    closes, highs, lows, vols = df_t['Close'].values, df_t['High'].values, df_t['Low'].values, df_t['Volume'].values
-                    price = closes[-1]
-                    
-                    # 您的原装逻辑门槛 (Turnover 调整为 1.5亿起，过滤僵尸股)
-                    turnover_1 = price * vols[-1]
-                    if turnover_1 < 150_000_000 or price < 5: continue 
-                    
-                    vol_ratio = vols[-1] / np.mean(vols[-50:])
-                    h250 = np.max(highs[-250:])
-                    r20, r60, r120 = (price/closes[-21]-1), (price/closes[-61]-1), (price/closes[-121]-1)
-                    rs_score = (r20*0.4 + r60*0.3 + r120*0.3) * 100
-                    dist_high_pct = ((price - h250) / h250) * 100
-                    amp5 = np.mean((highs[-5:] - lows[-5:]) / lows[-5:] * 100)
-
-                    # =========================================
-                    # ⚔️ 战法判定逻辑 (还原原版 T.U.A.W.)
-                    # =========================================
-                    cond_mom = (rs_score > 85) or (r60 * 100 > 30)
-                    # 判定 1: 引信雷达 (缩量伏击)
-                    fuse = (-8 <= dist_high_pct <= -1) and (vol_ratio < 1.0) and (amp5 < 5.0) and cond_mom
-                    # 判定 2: 狙击触发 (突破点火)
-                    sniper = (-8 <= dist_high_pct <= 2) and (vol_ratio > 1.5) and cond_mom and (price > np.mean(closes[-20:]))
-                    
-                    if not (fuse or sniper): continue
-                    
-                    # 计算筹码峰确认数据
-                    poc, res = get_chip_data(df_t)
-                    
-                    all_results.append({
-                        "Ticker": t.split('.')[0],
-                        "Type": "🔥 狙击" if sniper else "🧨 伏击",
-                        "Price": round(price, 2),
-                        "RS_Score": round(rs_score, 2),
-                        "POC(筹码中心)": poc,
-                        "上方抛压%": res,
-                        "量比": round(vol_ratio, 2),
-                        "距高点%": f"{round(dist_high_pct, 2)}%",
-                        "成交额(亿)": round(turnover_1 / 100000000, 2)
-                    })
-                except: continue
-        except: continue
+                c_code = t.split('.')[0]
+                row = df_pool[df_pool['code'] == c_code].iloc[0]
+                bonus = 20 if row['industry'] in top_sectors else 0
                 
-    return all_results
+                tag, poc, pocket, vcp_r, stop, score, ext = analyze_v23_logic(df_h, rs_raw, bonus, breadth_factor)
+                
+                if score < 55: continue
 
-# ==========================================
-# 📝 STEP 3: 极速写入
-# ==========================================
-def write_sheet(data):
-    sheet = get_worksheet()
-    if not sheet: return
-    sheet.clear()
-    if not data:
-        sheet.update_acell("A1", "No Signal Today. (Extreme Speed Mode)")
-        return
-    
-    df = pd.DataFrame(data).sort_values("RS_Score", ascending=False).head(50)
-    sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1")
-    
-    # 记录更新时间
-    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    sheet.update_acell("K1", f"V9.2 Extreme Speed Last Update (BJ): {now}")
-    print(f"🎉 任务秒杀完成！数据已同步。")
+                final_list.append({
+                    "Ticker": c_code, "Name": row['name'], "综合评分": score, "战术勋章": tag, 
+                    "机构口袋": pocket, "行业": row['industry'], "止损点": stop, "VCP收缩率": vcp_r, "MA20偏离": ext, "RS评级": rs_raw
+                })
+            except: continue
 
-# ==========================================
-# 主流程
-# ==========================================
+    if not final_list: return
+
+    # 6. 排序与写入
+    res_df = pd.DataFrame(final_list)
+    res_df['RS评级'] = res_df['RS评级'].rank(pct=True).apply(lambda x: int(x*99))
+    res_df = res_df.sort_values(by="综合评分", ascending=False).head(60)
+
+    sh = init_sheet(); sh.clear()
+    cols = ["Ticker", "Name", "综合评分", "战术勋章", "机构口袋", "行业", "止损点", "VCP收缩率", "MA20偏离", "RS评级"]
+    sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("K1", f"V23.0 Aegis Mode | Breadth: {round(breadth_factor,2)} | Updated: {now_str}")
+
+    # 7. 视觉美化 (口袋买点与行业龙头)
+    set_frozen(sh, rows=1)
+    fmt_rules = get_conditional_format_rules(sh)
+    # 口袋买点 ✅ 加亮
+    rule_pocket = ConditionalFormatRule(ranges=[GridRange.from_a1_range('E2:E60', sh)],
+        booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['✅']),
+            format=cellFormat(backgroundColor=color(0.8, 1, 0.8), textFormat=textFormat(bold=True))))
+    fmt_rules.append(rule_pocket)
+    fmt_rules.save()
+    
+    print(f"✅ V23.0 Aegis 部署完成！锁定真龙。")
+
 if __name__ == "__main__":
-    print(f"\n{'='*50}\n   A股猎手 V9.2 - 极速战镰版\n{'='*50}")
-    seeds = get_a_share_list()
-    results = scan_market_via_yfinance(seeds)
-    write_sheet(results)
+    run_v23_aegis()
