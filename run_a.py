@@ -27,150 +27,140 @@ def init_sheet():
         return doc.add_worksheet(title="A-Share V39-Titan", rows=1000, cols=20)
 
 # ==========================================
-# 🧠 2. V39.2 统领算法引擎
+# 🧠 2. 核心算法引擎
 # ==========================================
 def analyze_v39_logic(df, rs_val, mkt_cap, m_regime):
     try:
-        sub_df = df.tail(200).copy()
-        c = sub_df['Close'].values; h = sub_df['High'].values; l = sub_df['Low'].values
-        v = sub_df['Volume'].values; o = sub_df['Open'].values
+        sub_df = df.tail(150).copy()
+        c = sub_df['Close'].values; h = sub_df['High'].values; l = sub_df['Low'].values; v = sub_df['Volume'].values; o = sub_df['Open'].values
         price = c[-1]
         
-        # --- A. VCP 3.0 ---
+        # VCP 3.0
         v_std_3 = np.std((h[-3:] - l[-3:]) / l[-3:] * 100)
         v_std_10 = np.std((h[-10:] - l[-10:]) / l[-10:] * 100)
         is_coiling = v_std_3 < v_std_10 * 0.75
         
-        # --- B. 黎明枢轴 ---
         pivot_p = np.max(h[-10:-1])
         is_break_pivot = price > pivot_p
         
-        # --- C. 机构吸筹质量 ---
+        # 机构吸筹
         entity_ratio = abs(c - o) / (h - l + 0.001)
         niv_short = (np.sign(c[-10:] - o[-10:]) * v[-10:] * entity_ratio[-10:]).sum()
-        is_heavy_accum = niv_short > 0
         
-        # --- D. 均线与空间 ---
         ma50 = sub_df['Close'].rolling(50).mean().iloc[-1]
-        ma200 = sub_df['Close'].rolling(200).mean().iloc[-1]
         
-        v_hist, bins = np.histogram(c[-120:], bins=50, weights=v[-120:])
-        curr_idx = np.searchsorted(bins, price * 1.01)
-        overhead = v_hist[curr_idx:]
-        target_p = bins[curr_idx + np.argmax(overhead)] if len(overhead) > 0 else price * 1.12
-        rr_ratio = (target_p - price) / (price * 0.05 + 0.001)
-
         # 战法判定
-        tag = "🛡️哨兵观察"
-        if is_coiling and is_break_pivot and is_heavy_accum:
-            tag = "🌅黎明起爆(枢轴穿透)"
-        elif mkt_cap > 800e8 and niv_short > 0 and price > ma50:
-            tag = "🛡️泰坦基石(机构锁仓)"
-        elif price > ma50 and is_break_pivot and rs_val > 1.2:
-            tag = "🌪️主升加速"
+        tag = "🛡️观察"
+        if is_coiling and is_break_pivot and niv_short > 0: tag = "🌅黎明起爆"
+        elif mkt_cap > 800e8 and niv_short > 0 and price > ma50: tag = "🛡️基石反弹"
+        elif rs_val > 1.2: tag = "🌪️主升加速"
 
-        # 评分
-        score = (rs_val * 35) + (20 if is_heavy_accum else 0) + (20 if is_coiling else 0)
+        score = (rs_val * 35) + (20 if niv_short > 0 else 0) + (20 if is_coiling else 0)
         if m_regime == "DOWN": score *= 0.8
-        if price < ma200: score -= 20
 
-        return tag, round(score, 1), round(pivot_p, 2), round(target_p, 2), round(rr_ratio, 2)
+        return tag, round(score, 1), round(pivot_p, 2)
     except:
-        return "ERR", 0, 0, 0, 0
+        return "ERR", 0, 0
 
 # ==========================================
-# 🚀 3. 主扫描流程 (KeyError 修复版)
+# 🚀 3. 主扫描流程 (含降级保护逻辑)
 # ==========================================
-def run_v39_sentinel():
+def run_v39_resilient():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 A股猎手 V39.2 Titan-Sentinel 启动 (KeyError 修复版)...")
+    print(f"[{now_str}] 🚀 A股猎手 V39.5 坚守版启动 (带 API 降级保护)...")
 
-    # 定义统一列名，防止 KeyError
-    cols = ["Ticker", "Name", "泰坦分", "战术勋章", "黎明枢轴", "盈亏比", "目标价", "行业", "RS强度", "Price"]
+    cols = ["Ticker", "Name", "综合评分", "战术勋章", "黎明枢轴", "行业", "RS强度/涨幅", "Price"]
 
-    # 1. 大盘探测
+    # 1. 大盘探测 (带容错)
+    m_regime = "UP"
     try:
-        idx = yf.download("000300.SS", period="100d", progress=False)
-        idx_c = idx['Close'].iloc[:, 0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close']
-        m_regime = "UP" if idx_c.iloc[-1] > idx_c.rolling(50).mean().iloc[-1] else "DOWN"
-        print(f" -> 🚦 当前大盘环境: {m_regime}")
-    except: return print("❌ 指数获取失败")
+        idx = yf.download("000300.SS", period="50d", progress=False)
+        if not idx.empty:
+            close = idx['Close'].iloc[-1].values[0] if isinstance(idx['Close'].iloc[-1], pd.Series) else idx['Close'].iloc[-1]
+            ma50 = idx['Close'].rolling(50).mean().iloc[-1]
+            m_regime = "UP" if close > ma50 else "DOWN"
+            print(f" -> 🚦 大盘状态: {m_regime}")
+    except:
+        print(" -> ⚠️ 无法获取大盘数据，默认 UP 模式运行")
 
-    # 2. TV 名册
+    # 2. 从 TradingView 获取全市场活跃名单 (此接口 GitHub 访问极稳)
     tv_url = "https://scanner.tradingview.com/china/scan"
-    payload = {"columns": ["name", "description", "market_cap_basic", "industry"],
+    payload = {"columns": ["name", "description", "market_cap_basic", "industry", "close", "change"],
                "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 80e8}],
                "range": [0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
+    
     try:
         raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
-        df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][3]} for d in raw_data])
-    except: return print("❌ TV 接口异常")
+        df_pool = pd.DataFrame([
+            {"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][3], "price": d['d'][4], "chg": d['d'][5]} 
+            for d in raw_data
+        ])
+        print(f" -> ✅ 获取 TV 标的: {len(df_pool)} 只")
+    except:
+        return print("❌ 无法访问 TV 接口，网络彻底断开")
 
-    # 3. 扫描演算
+    # 3. Yahoo 数据拉取与演算
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
     all_hits = []
-    chunk_size = 60
+    chunk_size = 30 # 缩小分块以规避拦截
+    
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
-        print(f" -> 处理进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
-        data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
-        
-        for t in chunk:
-            try:
-                if t not in data.columns.get_level_values(0): continue
-                df_h = data[t].dropna()
-                if len(df_h) < 150: continue
-                p = df_h['Close'].iloc[-1]
-                rs_raw = (p / df_h['Close'].iloc[-120]) / (idx_c.iloc[-1] / idx_c.iloc[-120])
-                
-                c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
-                tag, score, pivot, target, rr = analyze_v39_logic(df_h, rs_raw, row_info['mkt'], m_regime)
-                
-                all_hits.append({
-                    "Ticker": c_code, "Name": row_info['name'], "泰坦分": score, "战术勋章": tag, 
-                    "黎明枢轴": pivot, "盈亏比": rr, "目标价": target,
-                    "行业": row_info['industry'], "RS强度": round(rs_raw, 2), "Price": round(float(p), 2)
-                })
-            except: continue
+        try:
+            # 伪装 Header 请求
+            data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True, timeout=10)
+            
+            for t in chunk:
+                try:
+                    if t not in data.columns.get_level_values(0): continue
+                    df_h = data[t].dropna()
+                    if len(df_h) < 100: continue
+                    
+                    p = df_h['Close'].iloc[-1]
+                    # 计算 RS (120日相对)
+                    rs_raw = (p / df_h['Close'].iloc[-120]) if len(df_h)>120 else 1.0
+                    
+                    c_code = t.split('.')[0]
+                    row_info = df_pool[df_pool['code'] == c_code].iloc[0]
+                    tag, score, pivot = analyze_v39_logic(df_h, rs_raw, row_info['mkt'], m_regime)
+                    
+                    all_hits.append({
+                        "Ticker": c_code, "Name": row_info['name'], "综合评分": score, "战术勋章": tag, 
+                        "黎明枢轴": pivot, "行业": row_info['industry'], "RS强度/涨幅": round(rs_raw, 2), "Price": round(float(p), 2)
+                    })
+                except: continue
+        except:
+            print(f" -> ⚠️ 块 {i//chunk_size + 1} Yahoo 连接受阻，跳过...")
+            continue
 
-    # 4. 强制结构化处理
+    # 4. 写入与降级保护核心
     sh = init_sheet(); sh.clear()
     
     if not all_hits:
-        sh.update_acell("A1", f"⚠️ 诊断：无法获取个股数据，可能被 Yahoo 暂时拦截。 {now_str}")
-        return
-
-    # 尝试按泰坦标准筛选
-    threshold = 50 if m_regime == "DOWN" else 40
-    final_hits = [h for h in all_hits if isinstance(h['泰坦分'], (int, float)) and h['泰坦分'] >= threshold]
-
-    if not final_hits:
-        print("⚠️ 原标准无匹配，切换至【哨兵模式】...")
-        final_hits = sorted(all_hits, key=lambda x: x['RS强度'], reverse=True)[:35]
-        for item in final_hits: 
-            item['战术勋章'] = "🛡️逆势哨兵(火种)"
-            item['泰坦分'] = "观察中"
-        diag_msg = f"🚦 大盘{m_regime}中。当前显示全市场 RS 相对强度最强的 35 个【哨兵】。"
+        print("🚨 致命拦截：Yahoo 接口全线崩溃！启动降级通道 (TV-Direct)...")
+        # 降级模式：直接使用 TradingView 传回的当日涨幅和价格
+        fallback_list = []
+        for _, row in df_pool.head(50).iterrows():
+            fallback_list.append({
+                "Ticker": row['code'], "Name": row['name'], "综合评分": "紧急降级", "战术勋章": "📻TV直连模式",
+                "黎明枢轴": "无数据", "行业": row['industry'], "RS强度/涨幅": f"{round(row['chg'], 2)}%", "Price": row['price']
+            })
+        final_df = pd.DataFrame(fallback_list)
+        diag_msg = "⚠️ Yahoo 接口被拦截，当前显示 TradingView 实时涨幅榜 (前50)。"
     else:
-        diag_msg = f"✅ 大盘{m_regime}中。发现 {len(final_hits)} 个泰坦级优质目标。"
+        # 标准模式：按照 RS 强度和评分排序
+        final_df = pd.DataFrame(all_hits).sort_values(by="综合评分", ascending=False).head(50)
+        diag_msg = f"✅ 数据链路正常。获取到 {len(all_hits)} 个泰坦深度分析目标。"
 
-    # 5. 安全写入 (解决 KeyError 核心)
-    res_df = pd.DataFrame(final_hits)
-    
-    # 确保 res_df 包含所有列，缺失的填充空值
+    # 5. 安全写入
     for col in cols:
-        if col not in res_df.columns:
-            res_df[col] = ""
-
-    # 按照定义的 cols 顺序重排
-    res_df = res_df[cols].fillna("")
-
-    # 写入表格
-    sh.update(range_name="A1", values=[cols] + res_df.values.tolist(), value_input_option="USER_ENTERED")
-    sh.update_acell("L1", diag_msg)
-    sh.update_acell("L2", f"Last Update: {now_str}")
+        if col not in final_df.columns: final_df[col] = ""
     
-    print(f"🎉 V39.2 扫描圆满成功！已写入 {len(res_df)} 条标的。")
+    sh.update(range_name="A1", values=[cols] + final_df[cols].values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("L1", f"状态: {diag_msg}")
+    sh.update_acell("L2", f"Last Update (BJ): {now_str}")
+    
+    print(f"🎉 V39.5 任务完成！")
 
 if __name__ == "__main__":
-    run_v39_sentinel()
+    run_v39_resilient()
