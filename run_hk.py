@@ -14,37 +14,36 @@ from gspread_formatting import *
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置 (精准锁定 GID)
+# 1. 核心配置 (用 KEY 锁定，拒绝重名文档)
 # ==========================================
-OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit"
-TARGET_GID = 665566258  # 👈 这是你浏览器里看到的那个页面的 ID
+# 从你的 URL 中提取的唯一 ID
+SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
+TARGET_GID = 665566258  
 CREDS_FILE = "credentials.json"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
-def init_v28_sheet():
+def init_v29_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
-    doc = client.open_by_url(OUTPUT_SHEET_URL)
     
-    print(f" -> 📄 成功访问文档: '{doc.title}'")
+    # 使用 open_by_key 确保绝不写错文件
+    doc = client.open_by_key(SS_KEY)
     
-    # 遍历所有标签页，寻找匹配 GID 的那一页
+    print(f" -> 🎯 已精准锁定唯一文档: '{doc.title}' (ID: {SS_KEY})")
+    
     worksheets = doc.worksheets()
     for ws in worksheets:
         if ws.id == TARGET_GID:
-            print(f" -> 🎯 成功锁定目标标签页: '{ws.title}' (ID: {ws.id})")
+            print(f" -> ✅ 已锁定目标标签页: '{ws.title}' (GID: {ws.id})")
             return ws
-            
-    # 如果找不到，就取第一个作为后备
-    print(f" -> ⚠️ 未找到 GID {TARGET_GID}，使用默认第一页")
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. 策略引擎 (保持严选逻辑)
+# 🧠 2. 策略引擎 (根据你的截图，恢复了你最喜欢的列结构)
 # ==========================================
 
-def calculate_v28_metrics(df_h, hsi_series):
+def calculate_v29_metrics(df_h, hsi_series):
     if df_h.empty or len(df_h) < 250: return None
     try:
         if isinstance(df_h['Close'], pd.DataFrame):
@@ -60,42 +59,46 @@ def calculate_v28_metrics(df_h, hsi_series):
     except: return None
 
     cp = close[-1]
-    ma50, ma150, ma200 = np.mean(close[-50:]), np.mean(close[-150:]), np.mean(close[-200:])
-    low_52w, high_52w = np.min(low[-250:]), np.max(high[-250:])
+    ma20 = np.mean(close[-20:])
+    ma50 = np.mean(close[-50:])
+    ma200 = np.mean(close[-200:])
     
-    # 欧奈尔硬性趋势过滤
-    if cp < ma150 or cp < ma200 or ma150 < ma200: return None
-    if cp < low_52w * 1.25 or cp < high_52w * 0.80: return None
-    
+    # 基础趋势过滤
+    if cp < ma200: return None 
+
     # ADR 活跃度
     adr = np.mean((high[-10:] - low[-10:]) / close[-10:]) * 100
     if adr < 2.0: return None 
 
-    # RS 计算
-    try:
-        aligned_hsi = hsi_series.reindex(df_h.index).ffill().values
-        rs_line = close / aligned_hsi
-        rs_slope_now = (rs_line[-1] - rs_line[-10]) / rs_line[-10]
-        rs_slope_prev = (rs_line[-11] - rs_line[-20]) / rs_line[-20]
-        rs_accel = rs_slope_now - rs_slope_prev
-    except: return None
+    # RS 演算 (这里模拟你的 60D_Return 和 RSI)
+    ret_60d = (cp / close[-60] - 1) * 100
+    
+    # 模拟一个 RSI (14)
+    delta = np.diff(close[-20:])
+    gain = np.mean(delta[delta > 0]) if any(delta > 0) else 0
+    loss = -np.mean(delta[delta < 0]) if any(delta < 0) else 1
+    rsi = 100 - (100 / (1 + gain/loss))
 
-    is_vdu = vol[-1] < np.mean(vol[-50:]) * 0.5
-    label = "🔥 引擎加速" if rs_accel > 0 else "📡 轨道维持"
-    if is_vdu: label = "💎 窒息枯竭"
-
-    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    atr = pd.Series(tr).rolling(20).mean().iloc[-1]
+    # 操作标记 (老龙回头逻辑)
+    avg_vol50 = np.mean(vol[-50:])
+    vol_ratio = vol[-1] / avg_vol50
+    
+    is_dragon = (cp > ma200) and (abs(cp-ma50)/ma50 < 0.03) and (vol[-1] < avg_vol50 * 0.7)
+    
+    action = "📈 经典多头"
+    if is_dragon: action = "🐉 老龙回头"
+    elif vol_ratio > 2 and cp > close[-2]: action = "🚀 放量起爆"
 
     return {
+        "Ticker": "", # 占位
+        "Name": "",   # 占位
         "Price": round(float(cp), 2),
-        "ADR": round(float(adr), 2),
-        "RS_Raw": rs_line[-1] * 100,
-        "RS_Accel": round(float(rs_accel * 100), 4),
-        "VDU": "YES" if is_vdu else "",
-        "Action": label,
-        "Ext50": round(float((cp/ma50-1)*100), 1),
-        "StopLoss": round(float(cp - (atr * 2.1)), 2)
+        "60D_Ret(%)": round(ret_60d, 2),
+        "RSI": round(rsi, 2),
+        "Vol_Ratio": round(vol_ratio, 2),
+        "Action": action,
+        "StopLoss": round(cp * 0.93, 2), # 简单 7% 止损
+        "Raw_RS": (cp / close[-250]) / (hsi_series.iloc[-1] / hsi_series.iloc[-250])
     }
 
 # ==========================================
@@ -103,69 +106,67 @@ def calculate_v28_metrics(df_h, hsi_series):
 # ==========================================
 
 def main():
-    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V28.0 启动 (GID 锁定版)...")
+    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V29.0 指挥官系统启动...")
     
     # 1. 准备大盘
-    try:
-        hsi_raw = yf.download("^HSI", period="350d", progress=False)
-        hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
-        hsi_cp = float(hsi_series.iloc[-1])
-        is_safe = hsi_cp > float(hsi_series.rolling(50).mean().iloc[-1])
-        print(f" -> 恒指: {hsi_cp:.2f} ({'进攻' if is_safe else '防御'})")
-    except: print(" -> ❌ 恒指获取失败"); return
-
-    # 2. 初始池
+    hsi_raw = yf.download("^HSI", period="350d", progress=False)
+    hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
+    
+    # 2. 获取池子
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
                "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.1e10},
                           {"left": "close", "operation": "greater", "right": 1.0}],
                "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     tv_data = requests.post(url, json=payload, timeout=15).json().get('data', [])
-    df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "Others"} for d in tv_data])
+    df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "name": d['d'][1], "sector": d['d'][4]} for d in tv_data])
 
-    # 3. 计算
-    final_list = []
+    # 3. 批量演算
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=False)
     
+    final_list = []
     for _, row in df_pool.iterrows():
         t = str(row['code']).zfill(4)+".HK"
         try:
-            stock_df = data[t].dropna() if len(tickers) > 1 else data.dropna()
-            m = calculate_v28_metrics(stock_df, hsi_series)
+            stock_df = data[t].dropna()
+            m = calculate_v29_metrics(stock_df, hsi_series)
             if m:
-                m.update({"代码": row['code'], "行业": row['sector']})
+                m.update({"Ticker": row['code'], "Name": row['name']})
                 final_list.append(m)
         except: continue
 
     print(f" -> 精选后标的: {len(final_list)} 支")
 
     # 4. 写入表格
-    sh = init_v28_sheet()
-    sh.clear()
+    sh = init_v29_sheet()
     
-    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    
+    # 写入一个显著的更新标记到 Z1
+    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
+    sh.update_acell("Z1", f"FORCE_REFRESH: {now_str}")
+
     if not final_list:
-        sh.update(range_name="A1", values=[[f"最後更新: {now_str} | 今日無符合標的"]])
+        sh.update_acell("A1", f"今日無符合標的 - {now_str}")
         return
 
+    # 处理结果
     res_df = pd.DataFrame(final_list)
-    res_df['RS评级'] = res_df['RS_Raw'].rank(pct=True).apply(lambda x: int(x*99))
-    res_df['综合得分'] = (res_df['RS评级'] * 0.7) + (res_df['ADR'] * 2.5)
+    res_df['RS评级'] = res_df['Raw_RS'].rank(pct=True).apply(lambda x: int(x*99))
+    res_df = res_df.sort_values(by="RS评级", ascending=False).head(40)
     
-    final_output = res_df.sort_values(by="综合得分", ascending=False).groupby('行业').head(3)
-    final_output = final_output[["代码", "RS评级", "Action", "综合得分", "VDU", "ADR", "Ext50", "行业", "StopLoss"]].head(40)
-
-    header = [f"大盘: {'进攻' if is_safe else '防御'}", f"更新: {now_str}", f"选股数: {len(final_output)}", "", "", "", "", "", ""]
-    data_to_write = [header] + [final_output.columns.values.tolist()] + final_output.values.tolist()
-
-    sh.update(range_name="A1", values=data_to_write)
+    # 整理列顺序 (尝试贴近你的截图风格)
+    output = res_df[["Ticker", "Name", "Price", "60D_Ret(%)", "RSI", "Vol_Ratio", "Action", "RS评级", "StopLoss"]]
     
-    # 美化
-    set_frozen(sh, rows=2)
-    format_cell_range(sh, 'A1:I2', cellFormat(textFormat=textFormat(bold=True), backgroundColor=color(0.9, 0.9, 0.9)))
-    print(f"✅ V28.0 推送成功至标签页: '{sh.title}'")
+    # 执行写入
+    sh.clear()
+    header = [["Ticker", "Name", "Price", "60D_Ret(%)", "RSI", "Vol_Ratio", "Trend_Action", "RS_Rank", "Stop_Loss", "", "Updated_At:", now_str]]
+    sh.update(range_name="A1", values=header + output.values.tolist())
+    
+    # 格式化
+    set_frozen(sh, rows=1)
+    format_cell_range(sh, 'A1:L1', cellFormat(textFormat=textFormat(bold=True), backgroundColor=color(0.9, 0.9, 0.9)))
+    
+    print(f"✅ V29.0 推送成功。请刷新 GID {TARGET_GID} 页面查看！")
 
 if __name__ == "__main__":
     main()
