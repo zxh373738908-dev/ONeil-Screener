@@ -10,39 +10,41 @@ import re
 import time
 from gspread_formatting import *
 
+# 基础设置
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置
+# 1. 核心配置 (精准锁定 GID)
 # ==========================================
-# 👈 请再次确认这个 URL 跟你浏览器地址栏里的一模一样
-OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit#gid=0"
-SHEET_NAME = "HK-Share Screener" 
+OUTPUT_SHEET_URL = "https://docs.google.com/spreadsheets/d/14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8/edit"
+TARGET_GID = 665566258  # 👈 这是你浏览器里看到的那个页面的 ID
 CREDS_FILE = "credentials.json"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
-def init_v27_sheet():
+def init_v28_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     doc = client.open_by_url(OUTPUT_SHEET_URL)
     
-    print(f" -> 📄 正在访问文档: '{doc.title}'") # 👈 诊断：看看打印出的文档名对不对
+    print(f" -> 📄 成功访问文档: '{doc.title}'")
     
-    try:
-        ws = doc.worksheet(SHEET_NAME)
-        print(f" -> ✅ 找到目标标签页: '{SHEET_NAME}'")
-    except:
-        ws = doc.get_worksheet(0)
-        print(f" -> ⚠️ 未找到标签页 '{SHEET_NAME}'，将写入第一个标签页: '{ws.title}'")
-    
-    return ws
+    # 遍历所有标签页，寻找匹配 GID 的那一页
+    worksheets = doc.worksheets()
+    for ws in worksheets:
+        if ws.id == TARGET_GID:
+            print(f" -> 🎯 成功锁定目标标签页: '{ws.title}' (ID: {ws.id})")
+            return ws
+            
+    # 如果找不到，就取第一个作为后备
+    print(f" -> ⚠️ 未找到 GID {TARGET_GID}，使用默认第一页")
+    return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. 核心算法 (保持严选逻辑)
+# 🧠 2. 策略引擎 (保持严选逻辑)
 # ==========================================
 
-def calculate_v27_metrics(df_h, hsi_series):
+def calculate_v28_metrics(df_h, hsi_series):
     if df_h.empty or len(df_h) < 250: return None
     try:
         if isinstance(df_h['Close'], pd.DataFrame):
@@ -63,11 +65,13 @@ def calculate_v27_metrics(df_h, hsi_series):
     
     # 欧奈尔硬性趋势过滤
     if cp < ma150 or cp < ma200 or ma150 < ma200: return None
-    if cp < low_52w * 1.25 or cp < high_52w * 0.75: return None
+    if cp < low_52w * 1.25 or cp < high_52w * 0.80: return None
     
+    # ADR 活跃度
     adr = np.mean((high[-10:] - low[-10:]) / close[-10:]) * 100
     if adr < 2.0: return None 
 
+    # RS 计算
     try:
         aligned_hsi = hsi_series.reindex(df_h.index).ffill().values
         rs_line = close / aligned_hsi
@@ -99,9 +103,9 @@ def calculate_v27_metrics(df_h, hsi_series):
 # ==========================================
 
 def main():
-    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V27.4 透明诊断版启动...")
+    print(f"[{datetime.datetime.now(TZ_SHANGHAI).strftime('%H:%M')}] 🚀 V28.0 启动 (GID 锁定版)...")
     
-    # 1. 准备数据
+    # 1. 准备大盘
     try:
         hsi_raw = yf.download("^HSI", period="350d", progress=False)
         hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
@@ -110,16 +114,16 @@ def main():
         print(f" -> 恒指: {hsi_cp:.2f} ({'进攻' if is_safe else '防御'})")
     except: print(" -> ❌ 恒指获取失败"); return
 
-    # 2. 初始池抓取
+    # 2. 初始池
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
-               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10},
+               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.1e10},
                           {"left": "close", "operation": "greater", "right": 1.0}],
                "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     tv_data = requests.post(url, json=payload, timeout=15).json().get('data', [])
     df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "Others"} for d in tv_data])
 
-    # 3. 核心计算
+    # 3. 计算
     final_list = []
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=False)
@@ -128,7 +132,7 @@ def main():
         t = str(row['code']).zfill(4)+".HK"
         try:
             stock_df = data[t].dropna() if len(tickers) > 1 else data.dropna()
-            m = calculate_v27_metrics(stock_df, hsi_series)
+            m = calculate_v28_metrics(stock_df, hsi_series)
             if m:
                 m.update({"代码": row['code'], "行业": row['sector']})
                 final_list.append(m)
@@ -136,14 +140,14 @@ def main():
 
     print(f" -> 精选后标的: {len(final_list)} 支")
 
-    # 4. 写入表格 (修正参数顺序 Bug)
-    sh = init_v27_sheet()
-    sh.clear() # 👈 清空旧数据
+    # 4. 写入表格
+    sh = init_v28_sheet()
+    sh.clear()
     
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
     
     if not final_list:
-        sh.update(range_name="A1", values=[ [f"最後更新: {now_str} | 今日無符合強勢趨勢標的"] ])
+        sh.update(range_name="A1", values=[[f"最後更新: {now_str} | 今日無符合標的"]])
         return
 
     res_df = pd.DataFrame(final_list)
@@ -151,21 +155,17 @@ def main():
     res_df['综合得分'] = (res_df['RS评级'] * 0.7) + (res_df['ADR'] * 2.5)
     
     final_output = res_df.sort_values(by="综合得分", ascending=False).groupby('行业').head(3)
-    final_output = final_output[["代码", "RS评级", "Action", "综合得分", "VDU", "ADR", "Ext50", "行业", "StopLoss"]].head(35)
+    final_output = final_output[["代码", "RS评级", "Action", "综合得分", "VDU", "ADR", "Ext50", "行业", "StopLoss"]].head(40)
 
-    # 准备写入的数据列表
     header = [f"大盘: {'进攻' if is_safe else '防御'}", f"更新: {now_str}", f"选股数: {len(final_output)}", "", "", "", "", "", ""]
     data_to_write = [header] + [final_output.columns.values.tolist()] + final_output.values.tolist()
 
-    # 👈 修正：range_name 必须在第一位，或者明确指定 values 参数
     sh.update(range_name="A1", values=data_to_write)
     
     # 美化
     set_frozen(sh, rows=2)
-    format_cell_range(sh, 'A1:I2', cellFormat(textFormat=textFormat(bold=True)))
-    
-    print(f" -> 🚀 数据已正式写入标签页: '{sh.title}'")
-    print(f"✅ V27.4 任务圆满完成。")
+    format_cell_range(sh, 'A1:I2', cellFormat(textFormat=textFormat(bold=True), backgroundColor=color(0.9, 0.9, 0.9)))
+    print(f"✅ V28.0 推送成功至标签页: '{sh.title}'")
 
 if __name__ == "__main__":
     main()
