@@ -50,7 +50,6 @@ def get_chinese_names(codes):
 # ==========================================
 # 🧠 3. 演算核心
 # ==========================================
-
 def calculate_frvp_poc(highs, lows, vols, lookback=120):
     if len(vols) < lookback: lookback = len(vols)
     h_s, l_s, v_s = highs[-lookback:], lows[-lookback:], vols[-lookback:]
@@ -76,21 +75,16 @@ def analyze_v32(ticker, name, df_h, mkt_cap, tv_turnover, tv_vwap, hsi_series):
     except: return None
 
     if np.isnan(cp): return None
-
-    ma50, ma200 = np.mean(close[-50:]), np.mean(close[-200:])
+    ma200 = np.mean(close[-200:])
     if cp < ma200: return None 
 
     poc_6m = calculate_frvp_poc(high, low, vol)
     dist_poc = (cp / poc_6m - 1) * 100
-    
-    # RS 原始分
     rs_raw = (cp / close[-250]) / (hsi_series.iloc[-1] / hsi_series.iloc[-250])
-
     avg_vol50 = np.mean(vol[-50:])
     vol_ratio = vol[-1] / avg_vol50 if avg_vol50 > 0 else 0
     ret_60d = (cp / close[-60] - 1) * 100
     
-    # RSI
     delta = np.diff(close[-20:])
     gain = np.mean(delta[delta > 0]) if any(delta > 0) else 0.001
     loss = -np.mean(delta[delta < 0]) if any(delta < 0) else 0.001
@@ -113,10 +107,9 @@ def analyze_v32(ticker, name, df_h, mkt_cap, tv_turnover, tv_vwap, hsi_series):
 # ==========================================
 # 🚀 4. 主执行流程
 # ==========================================
-
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 V32.2 Alpha 猎手启动 (修复 TextFormat 属性)...")
+    print(f"[{now_str}] 🚀 V32.3 Alpha 猎手启动 (修复 API 兼容性)...")
     
     # 1. 恒指基准
     hsi_raw = yf.download("^HSI", period="350d", progress=False)
@@ -131,10 +124,8 @@ def main():
     }
     resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
     df_pool = pd.DataFrame([
-        {"code": re.sub(r'[^0-9]', '', d['d'][0]), 
-         "mkt": d['d'][3], 
-         "vwap": d['d'][4] or d['d'][2], 
-         "turnover": (d['d'][2] * d['d'][5]) if d['d'][5] else 0} for d in resp
+        {"code": re.sub(r'[^0-9]', '', d['d'][0]), "mkt": d['d'][3], 
+         "vwap": d['d'][4] or d['d'][2], "turnover": (d['d'][2] * d['d'][5]) if d['d'][5] else 0} for d in resp
     ])
 
     print(f" -> 🌐 同步腾讯汉化名录...")
@@ -144,11 +135,9 @@ def main():
     final_list = []
     tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     chunk_size = 40
-    
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         print(f" -> 📥 正在处理 {i+1} ~ {min(i+chunk_size, len(tickers))} 支...")
-        # 增加重试逻辑
         try:
             data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
             for t in chunk:
@@ -159,44 +148,42 @@ def main():
                     res = analyze_v32(t, name_map.get(code_clean, t), stock_df, row_info['mkt'], row_info['turnover'], row_info['vwap'], hsi_series)
                     if res: final_list.append(res)
                 except: continue
-        except Exception as e:
-            print(f" -> ⚠️ 批次下载失败: {e}")
+        except: pass
         time.sleep(2)
 
-    if not final_list:
-        print("⚠️ 今日无符合标的。")
-        return
+    if not final_list: return
 
     # 4. 计算 RS 评级
     res_df = pd.DataFrame(final_list)
     res_df['RS评分'] = res_df['rs_raw'].rank(pct=True).apply(lambda x: int(x*99))
-    res_df = res_df.sort_values(by="RS评分", ascending=False).head(50)
+    res_df = res_df.sort_values(by="RS评分", ascending=False).head(60)
 
-    # 5. 精准写入
+    # 5. 写入表格
     sh = init_v32_sheet()
     sh.clear()
-    
     output_cols = ["Ticker", "Name", "Price", "POC", "VWAP", "Dist_POC", "60D_Ret", "RSI", "Vol_Ratio", "Mkt_Cap", "Turnover", "Trend", "RS评分"]
     header = [output_cols]
     sh.update(range_name="A1", values=header + res_df[output_cols].values.tolist(), value_input_option="USER_ENTERED")
-    sh.update_acell("M2", now_str) 
+    sh.update_acell("N2", f"Updated: {now_str}") 
 
-    # 6. 视觉美化 (修正 TextFormat 参数)
+    # 6. 视觉美化 (兼容性修复)
     set_frozen(sh, rows=1)
+    # 使用新版推荐的 API: get_conditional_format_rules
+    rules = get_conditional_format_rules(sh)
     rule = ConditionalFormatRule(
         ranges=[GridRange.from_a1_range('M2:M100', sh)],
         booleanRule=BooleanRule(
             condition=BooleanCondition('NUMBER_GREATER', ['89']),
-            # 👈 修复：foregroundColor 代替 color
             format=cellFormat(
                 textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)), 
                 backgroundColor=color(1, 0.9, 0.9)
             )
         )
     )
-    set_conditional_format_rules(sh, [rule])
+    rules.append(rule)
+    rules.save() # 👈 关键：保存规则
 
-    print(f"✅ V32.2 任务成功！")
+    print(f"✅ V32.3 推送成功！数据已更新至 Google Sheets。")
 
 if __name__ == "__main__":
     main()
