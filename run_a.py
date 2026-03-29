@@ -29,90 +29,79 @@ def init_sheet():
     client = gspread.authorize(creds)
     doc = client.open_by_key(SS_KEY)
     try:
-        # 修改表名为 V25
-        return doc.worksheet("A-Share V25-Watcher")
+        return doc.worksheet("A-Share V26-Spark")
     except:
-        return doc.add_worksheet(title="A-Share V25-Watcher", rows=1000, cols=20)
+        return doc.add_worksheet(title="A-Share V26-Spark", rows=1000, cols=20)
 
 # ==========================================
-# 🧠 2. V25.0 守望者演算引擎
+# 🧠 2. V26.0 火种决策引擎
 # ==========================================
-def analyze_v25_logic(df, rs_raw_val, sector_rank_bonus, breadth_factor):
+def analyze_v26_logic(df, rs_raw_val, sector_bonus, breadth_factor):
     try:
-        sub_df = df.tail(15)
-        c = sub_df['Close'].values; h = sub_df['High'].values; l = sub_df['Low'].values
-        v = sub_df['Volume'].values; o = sub_df['Open'].values
-        
+        c = df['Close'].values; h = df['High'].values; l = df['Low'].values; v = df['Volume'].values
         price = c[-1]
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
-        h250 = np.max(df['High'].tail(250))
+        ma200 = df['Close'].rolling(200).mean().iloc[-1]
+        h250 = np.max(h[-250:])
+        
         dist_high = (price / h250 - 1) * 100
+        ext_20 = (price / ma20 - 1) * 100
         
-        # --- A. 信号探测 ---
-        tag = "趋势守望"
-        is_hard_signal = False
+        # --- A. 信号定义 ---
+        tag = "🔍 观察"
+        # 1. 相对强度领先 (即便在跌，也比大盘硬)
+        if rs_raw_val > 1.1: tag = "💎 相对强势"
         
-        # 1. 回溯 3 日的口袋买点 (Pocket Pivot)
-        for i in range(-1, -4, -1):
-            rets_i = np.diff(df['Close'].iloc[i-11:i+1].values) / df['Close'].iloc[i-12:i].values
-            vols_i = df['Volume'].iloc[i-11:i].values
-            down_vols = [vols_i[j] for j in range(10) if rets_i[j] < 0]
-            max_down_v = max(down_vols) if down_vols else 999999999
-            
-            if c[i] > o[i] and v[i] > max_down_v:
-                tag = "✨起爆信号" if i == -1 else f"⚡{abs(i)-1}日前起爆"
-                is_hard_signal = True
-                break
+        # 2. 超跌火种探测 (偏离均线太远且放量)
+        avg_v50 = np.mean(v[-50:])
+        if ext_20 < -15 and v[-1] > avg_v50 * 1.5:
+            tag = "🌋 底部火种"
         
-        # 2. 韧性检测 (如果没信号但极度抗跌)
-        if not is_hard_signal:
-            if price > ma20 and dist_high > -5:
-                tag = "🛡️逆势韧性"
-            else:
-                tag = "🔎潜力观察"
+        # 3. 趋势幸存者
+        if price > ma20 and price > ma200:
+            tag = "🛡️ 趋势幸存"
 
-        # --- B. 评分逻辑 ---
-        score = (rs_raw_val * 50) + sector_rank_bonus
-        if is_hard_signal: score += 20
-        if tag == "🛡️逆势韧性": score += 10
+        # --- B. 评分逻辑 (不设截断) ---
+        score = (rs_raw_val * 60) + sector_bonus
+        if "幸存" in tag: score += 20
+        if "强势" in tag: score += 10
         
-        final_score = score * breadth_factor
+        final_score = score * (breadth_factor + 0.2) # 冰点期给予一定系数补偿
         
-        return tag, round(final_score, 1), dist_high
+        return tag, round(final_score, 1), round(dist_high, 1), round(ext_20, 1)
     except:
-        return "ERR", 0, 0
+        return "ERR", 0, 0, 0
 
 # ==========================================
 # 🚀 3. 主扫描流程
 # ==========================================
-def run_v25_watcher():
+def run_v26_spark():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 A股猎手 V25.0 Watcher 启动...")
+    print(f"[{now_str}] 🚀 A股猎手 V26.0 Spark 启动 (冰点强制选股模式)...")
 
     # 1. 广度探测
     try:
         idx = yf.download("000300.SS", period="350d", progress=False)
         idx_c = idx['Close'].iloc[:, 0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close']
-    except: return print("❌ 数据获取失败")
+    except: return print("❌ 无法获取大盘指数")
 
-    # 2. 获取 TV 池子 (适当扩大范围至 800 只)
+    # 2. 获取池子
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {
         "columns": ["name", "description", "market_cap_basic", "volume", "close", "industry", "change"],
-        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 8e9}],
-        "range": [0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 7e9}], # 降低市值门槛至70亿
+        "range": [0, 600], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
     }
-    raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
-    df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "industry": d['d'][5], "chg": d['d'][6], "mkt": d['d'][2]} for d in raw_data])
+    try:
+        raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
+        df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "industry": d['d'][5], "chg": d['d'][6]} for d in raw_data])
+    except: return print("❌ 接口异常")
 
-    # 3. 广度与行业
-    sector_perf = df_pool.groupby('industry')['chg'].mean().sort_values(ascending=False)
-    top_sectors = sector_perf.head(max(1, len(sector_perf)//5)).index.tolist()
-    
+    # 3. 广度因子
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
     breadth_check = yf.download(tickers[:100], period="250d", progress=False)['Close']
     uptrend_count = sum([1 for t in breadth_check.columns if breadth_check[t].iloc[-1] > breadth_check[t].rolling(200).mean().iloc[-1]])
-    breadth_factor = max(0.4, min(1.0, (uptrend_count / 100) * 1.5))
+    breadth_factor = max(0.3, min(1.0, (uptrend_count / 100) * 1.5))
 
     # 4. 演算
     final_list = []
@@ -120,7 +109,7 @@ def run_v25_watcher():
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
         print(f" -> 扫描进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
-        data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
+        data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
         
         for t in chunk:
             try:
@@ -131,51 +120,48 @@ def run_v25_watcher():
                 
                 c_code = t.split('.')[0]
                 row = df_pool[df_pool['code'] == c_code].iloc[0]
-                bonus = 15 if row['industry'] in top_sectors else 0
                 
-                tag, score, d_high = analyze_v25_logic(df_h, rs_raw, bonus, breadth_factor)
+                tag, score, d_high, ext_20 = analyze_v26_logic(df_h, rs_raw, 0, breadth_factor)
                 
-                # V25 降级逻辑：如果在冰点期，且没有爆款信号，只要 score > 30 且抗跌就入榜观察
-                if score > 35 or (uptrend_count < 50 and score > 28 and d_high > -8):
-                    final_list.append({
-                        "Ticker": c_code, "Name": row['name'], "综合评分": score, "勋章": tag, 
-                        "行业": row['industry'], "RS评级": rs_raw, "距高点%": round(d_high, 2), "Price": round(float(p), 2)
-                    })
+                # 无差别入榜，后续统一排序
+                final_list.append({
+                    "Ticker": c_code, "Name": row['name'], "综合评分": score, "勋章": tag, 
+                    "行业": row['industry'], "RS评级": rs_raw, "距高点%": d_high, "MA20乖离%": ext_20, "Price": round(float(p), 2)
+                })
             except: continue
 
-    # 5. 写入
+    # 5. 写入 Google Sheets
     sh = init_sheet(); sh.clear()
     
     if not final_list:
-        sh.update_acell("A1", f"⚠️ 极端风险：广度仅 {uptrend_count}%，全场无任何抗跌标的。")
+        sh.update_acell("A1", "全场无数据，请检查网络。")
         return
 
     res_df = pd.DataFrame(final_list)
-    res_df['RS评级'] = res_df['RS评级'].rank(pct=True).apply(lambda x: int(x*99))
-    # 排序：评分优先，距高点近优先
-    res_df = res_df.sort_values(by=["综合评分", "距高点%"], ascending=[False, False]).head(60)
+    # 计算 RS 百分比排名
+    res_df['RS排名'] = res_df['RS评级'].rank(pct=True).apply(lambda x: int(x*99))
+    # 强制排序：无论行情多烂，取综合评分前 60 名
+    res_df = res_df.sort_values(by="综合评分", ascending=False).head(60)
 
-    cols = ["Ticker", "Name", "综合评分", "勋章", "行业", "RS评级", "距高点%", "Price"]
+    cols = ["Ticker", "Name", "综合评分", "勋章", "行业", "RS排名", "距高点%", "MA20乖离%", "Price"]
     sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
     
-    # 表头预警
-    risk_level = "🔴 极高" if uptrend_count < 40 else ("🟡 中等" if uptrend_count < 60 else "🟢 较低")
-    header_msg = f"气象站 | 广度: {uptrend_count}% | 风险等级: {risk_level} | Updated: {now_str}"
-    sh.update_acell("I1", header_msg)
+    status = "❄️ 极寒" if uptrend_count < 40 else "🔥 活跃"
+    sh.update_acell("J1", f"气象站 | 广度: {uptrend_count}% | 状态: {status} | 强制选股模式已开启")
 
     if HAS_FORMATTING:
         try:
             set_frozen(sh, rows=1)
             fmt_rules = get_conditional_format_rules(sh)
-            # 给抗跌韧性的打上蓝色背景
-            rule_tough = ConditionalFormatRule(ranges=[GridRange.from_a1_range('D2:D60', sh)],
-                booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['韧性']),
-                    format=cellFormat(backgroundColor=color(0.9, 0.95, 1))))
-            fmt_rules.append(rule_tough)
+            # 对 RS 排名 90 以上的加红
+            rule_rs = ConditionalFormatRule(ranges=[GridRange.from_a1_range('F2:F60', sh)],
+                booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER_OR_EQUAL', ['90']),
+                    format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1, 0, 0)))))
+            fmt_rules.append(rule_rs)
             fmt_rules.save()
         except: pass
     
-    print(f"✅ V25.0 Watcher 任务完成！当前行情风险等级: {risk_level}")
+    print(f"✅ V26.0 Spark 任务完成！已强行从寒冬中提取 {len(res_df)} 个火种。")
 
 if __name__ == "__main__":
-    run_v25_watcher()
+    run_v26_spark()
