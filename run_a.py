@@ -22,15 +22,14 @@ def init_sheet():
     client = gspread.authorize(creds)
     doc = client.open_by_key(SS_KEY)
     try:
-        # 统一使用 V39 标签
         return doc.worksheet("A-Share V39-Titan")
     except:
         return doc.add_worksheet(title="A-Share V39-Titan", rows=1000, cols=20)
 
 # ==========================================
-# 🧠 2. V39.1 核心算法 (保持泰坦引擎)
+# 🧠 2. V39.2 统领算法引擎
 # ==========================================
-def analyze_v39_titan(df, rs_val, mkt_cap, m_regime):
+def analyze_v39_logic(df, rs_val, mkt_cap, m_regime):
     try:
         sub_df = df.tail(200).copy()
         c = sub_df['Close'].values; h = sub_df['High'].values; l = sub_df['Low'].values
@@ -59,7 +58,7 @@ def analyze_v39_titan(df, rs_val, mkt_cap, m_regime):
         curr_idx = np.searchsorted(bins, price * 1.01)
         overhead = v_hist[curr_idx:]
         target_p = bins[curr_idx + np.argmax(overhead)] if len(overhead) > 0 else price * 1.12
-        rr_ratio = (target_p - price) / (price - (price * 0.95)) # 简化的 R/R
+        rr_ratio = (target_p - price) / (price * 0.05 + 0.001)
 
         # 战法判定
         tag = "🛡️哨兵观察"
@@ -80,11 +79,14 @@ def analyze_v39_titan(df, rs_val, mkt_cap, m_regime):
         return "ERR", 0, 0, 0, 0
 
 # ==========================================
-# 🚀 3. 主扫描流程 (修正写入逻辑)
+# 🚀 3. 主扫描流程 (KeyError 修复版)
 # ==========================================
 def run_v39_sentinel():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 A股猎手 V39.1 Titan-Sentinel 启动...")
+    print(f"[{now_str}] 🚀 A股猎手 V39.2 Titan-Sentinel 启动 (KeyError 修复版)...")
+
+    # 定义统一列名，防止 KeyError
+    cols = ["Ticker", "Name", "泰坦分", "战术勋章", "黎明枢轴", "盈亏比", "目标价", "行业", "RS强度", "Price"]
 
     # 1. 大盘探测
     try:
@@ -92,9 +94,9 @@ def run_v39_sentinel():
         idx_c = idx['Close'].iloc[:, 0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close']
         m_regime = "UP" if idx_c.iloc[-1] > idx_c.rolling(50).mean().iloc[-1] else "DOWN"
         print(f" -> 🚦 当前大盘环境: {m_regime}")
-    except: return print("❌ 数据环境故障")
+    except: return print("❌ 指数获取失败")
 
-    # 2. TV 池子
+    # 2. TV 名册
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {"columns": ["name", "description", "market_cap_basic", "industry"],
                "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 80e8}],
@@ -104,26 +106,26 @@ def run_v39_sentinel():
         df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][3]} for d in raw_data])
     except: return print("❌ TV 接口异常")
 
-    # 3. 全息扫描
+    # 3. 扫描演算
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
     all_hits = []
     chunk_size = 60
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
-        print(f" -> 分析进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
+        print(f" -> 处理进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
         data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
         
         for t in chunk:
             try:
+                if t not in data.columns.get_level_values(0): continue
                 df_h = data[t].dropna()
                 if len(df_h) < 150: continue
                 p = df_h['Close'].iloc[-1]
                 rs_raw = (p / df_h['Close'].iloc[-120]) / (idx_c.iloc[-1] / idx_c.iloc[-120])
                 
                 c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
-                tag, score, pivot, target, rr = analyze_v39_titan(df_h, rs_raw, row_info['mkt'], m_regime)
+                tag, score, pivot, target, rr = analyze_v39_logic(df_h, rs_raw, row_info['mkt'], m_regime)
                 
-                # 记录所有数据，不在此处 continue，方便后续提取哨兵名单
                 all_hits.append({
                     "Ticker": c_code, "Name": row_info['name'], "泰坦分": score, "战术勋章": tag, 
                     "黎明枢轴": pivot, "盈亏比": rr, "目标价": target,
@@ -131,34 +133,44 @@ def run_v39_sentinel():
                 })
             except: continue
 
-    # 4. 筛选与兜底逻辑
+    # 4. 强制结构化处理
     sh = init_sheet(); sh.clear()
     
-    # 尝试按原标准筛选
-    threshold = 50 if m_regime == "DOWN" else 40
-    final_list = [h for h in all_hits if h['泰坦分'] >= threshold]
+    if not all_hits:
+        sh.update_acell("A1", f"⚠️ 诊断：无法获取个股数据，可能被 Yahoo 暂时拦截。 {now_str}")
+        return
 
-    if not final_list:
-        print("⚠️ 原标准无匹配，切换至【哨兵模式】：提取最强 RS 幸存者...")
-        # 按照 RS 强度强制取前 30 名
-        final_list = sorted(all_hits, key=lambda x: x['RS强度'], reverse=True)[:30]
-        for item in final_list: 
+    # 尝试按泰坦标准筛选
+    threshold = 50 if m_regime == "DOWN" else 40
+    final_hits = [h for h in all_hits if isinstance(h['泰坦分'], (int, float)) and h['泰坦分'] >= threshold]
+
+    if not final_hits:
+        print("⚠️ 原标准无匹配，切换至【哨兵模式】...")
+        final_hits = sorted(all_hits, key=lambda x: x['RS强度'], reverse=True)[:35]
+        for item in final_hits: 
             item['战术勋章'] = "🛡️逆势哨兵(火种)"
             item['泰坦分'] = "观察中"
-        diag_msg = f"🚦 大盘{m_regime}中，严控风险。当前为【哨兵观察名单】。"
+        diag_msg = f"🚦 大盘{m_regime}中。当前显示全市场 RS 相对强度最强的 35 个【哨兵】。"
     else:
-        diag_msg = f"✅ 发现 {len(final_list)} 个符合泰坦标准的优质目标。"
+        diag_msg = f"✅ 大盘{m_regime}中。发现 {len(final_hits)} 个泰坦级优质目标。"
 
-    # 5. 排序与写入
-    res_df = pd.DataFrame(final_list)
-    cols = ["Ticker", "Name", "泰坦分", "战术勋章", "黎明枢轴", "盈亏比", "目标价", "行业", "RS强度", "Price"]
-    sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
+    # 5. 安全写入 (解决 KeyError 核心)
+    res_df = pd.DataFrame(final_hits)
     
-    # 更新诊断栏和时间戳
-    sh.update_acell("L1", f"V39.1 状态: {diag_msg}")
-    sh.update_acell("L2", f"Last Update (BJ): {now_str}")
+    # 确保 res_df 包含所有列，缺失的填充空值
+    for col in cols:
+        if col not in res_df.columns:
+            res_df[col] = ""
+
+    # 按照定义的 cols 顺序重排
+    res_df = res_df[cols].fillna("")
+
+    # 写入表格
+    sh.update(range_name="A1", values=[cols] + res_df.values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("L1", diag_msg)
+    sh.update_acell("L2", f"Last Update: {now_str}")
     
-    print(f"🎉 V39.1 任务完成！已强行同步 {len(res_df)} 条战报。")
+    print(f"🎉 V39.2 扫描圆满成功！已写入 {len(res_df)} 条标的。")
 
 if __name__ == "__main__":
     run_v39_sentinel()
