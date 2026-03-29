@@ -14,123 +14,176 @@ from gspread_formatting import *
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置
+# 1. 核心配置 (保持精准锁定)
 # ==========================================
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 TARGET_GID = 665566258  
 CREDS_FILE = "credentials.json"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
-def init_v30_sheet():
+def init_v32_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
-    
-    # 诊断：列出机器人名下所有的文档
-    print(" -> 🔍 正在扫描机器人权限内的所有文档...")
-    all_files = client.openall()
-    for f in all_files:
-        print(f"    - 文档名: '{f.title}' | ID: {f.id}")
-        
     doc = client.open_by_key(SS_KEY)
-    print(f" -> 🎯 目标文档: '{doc.title}'")
-    
-    worksheets = doc.worksheets()
-    for ws in worksheets:
+    for ws in doc.worksheets():
         if ws.id == TARGET_GID:
-            print(f" -> ✅ 目标标签页: '{ws.title}' (GID: {ws.id})")
             return ws
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. 策略引擎 (保持你的列结构)
+# 🌐 2. 增强型数据工具 (腾讯汉化)
+# ==========================================
+def get_chinese_names(codes):
+    """通过腾讯接口极速汉化港股名称"""
+    mapping = {}
+    chunk_size = 50
+    for i in range(0, len(codes), chunk_size):
+        chunk = [f"hk{str(c).zfill(5)}" for c in codes[i:i+chunk_size]]
+        url = f"http://qt.gtimg.cn/q={','.join(chunk)}"
+        try:
+            r = requests.get(url, timeout=5)
+            matches = re.findall(r'v_hk(\d+)="[^~]+~([^~]+)', r.text)
+            for c, n in matches: mapping[str(c).lstrip('0')] = n
+        except: pass
+    return mapping
+
+# ==========================================
+# 🧠 3. V32 演算核心 (POC + RS Ranking)
 # ==========================================
 
-def calculate_v30_metrics(df_h, hsi_series):
-    if df_h.empty or len(df_h) < 250: return None
+def calculate_frvp_poc(highs, lows, vols, lookback=120):
+    if len(vols) < lookback: lookback = len(vols)
+    h_s, l_s, v_s = highs[-lookback:], lows[-lookback:], vols[-lookback:]
+    min_p, max_p = np.min(l_s), np.max(h_s)
+    if max_p == min_p: return min_p
+    bins = 50
+    bin_size = (max_p - min_p) / bins
+    profile = np.zeros(bins)
+    for i in range(lookback):
+        s_bin = max(0, int((l_s[i] - min_p) / bin_size))
+        e_bin = min(bins - 1, int((h_s[i] - min_p) / bin_size))
+        profile[s_bin:e_bin+1] += v_s[i] / (e_bin - s_bin + 1)
+    return min_p + (np.argmax(profile) + 0.5) * bin_size
+
+def analyze_v32(ticker, name, df_h, mkt_cap, turnover, tv_vwap, hsi_series):
+    if len(df_h) < 250: return None
     try:
-        # 数据对齐与提取
         c_raw = df_h['Close']
         close = c_raw.iloc[:, 0].values if isinstance(c_raw, pd.DataFrame) else c_raw.values
-        cp = close[-1]
-        
-        ma50 = np.mean(close[-50:])
-        ma200 = np.mean(close[-200:])
-        if cp < ma200: return None 
-
-        # 模拟你的列逻辑
-        ret_60d = (cp / close[-60] - 1) * 100
-        vol_ratio = df_h['Volume'].iloc[-1] / df_h['Volume'].iloc[-50:].mean()
-        
-        return {
-            "Ticker": "", "Name": "",
-            "Price": round(float(cp), 2),
-            "POC": round(float(ma50), 2),      # 模拟POC
-            "VWAP": round(float(cp * 0.98), 2), # 模拟VWAP
-            "Dist_POC": round(float((cp/ma50-1)*100), 2),
-            "60D_Ret": round(float(ret_60d), 2),
-            "RSI": 70, # 模拟
-            "Vol": round(float(vol_ratio), 2),
-            "Mkt": 100, # 模拟
-            "Turn": 10, # 模拟
-            "Trend": "🚀 经典多头",
-            "RS_Raw": cp / close[-250]
-        }
+        high = df_h['High'].iloc[:, 0].values if isinstance(df_h['High'], pd.DataFrame) else df_h['High'].values
+        low = df_h['Low'].iloc[:, 0].values if isinstance(df_h['Low'], pd.DataFrame) else df_h['Low'].values
+        vol = df_h['Volume'].iloc[:, 0].values if isinstance(df_h['Volume'], pd.DataFrame) else df_h['Volume'].values
     except: return None
 
+    cp = close[-1]
+    ma50, ma200 = np.mean(close[-50:]), np.mean(close[-200:])
+    
+    # 欧奈尔硬过滤：价格必须在200日线上方
+    if cp < ma200: return None
+
+    # POC 演算
+    poc_6m = calculate_frvp_poc(high, low, vol)
+    dist_poc = (cp / poc_6m - 1) * 100
+    
+    # 相对强度 (RS) 原始分：个股涨幅 / 恒指涨幅
+    stock_perf = cp / close[-250]
+    hsi_perf = hsi_series.iloc[-1] / hsi_series.iloc[-250]
+    rs_raw = stock_perf / hsi_perf
+
+    # 其他技术指标
+    avg_vol50 = np.mean(vol[-50:])
+    vol_ratio = vol[-1] / avg_vol50 if avg_vol50 > 0 else 0
+    ret_60d = (cp / close[-60] - 1) * 100
+    
+    delta = np.diff(close[-20:])
+    gain = np.mean(delta[delta > 0]) if any(delta > 0) else 0.001
+    loss = -np.mean(delta[delta < 0]) if any(delta < 0) else 0.001
+    rsi = 100 - (100 / (1 + gain/loss))
+
+    # 勋章逻辑
+    trend_tag = "📈經典多頭(逼近新高)"
+    if abs(cp - poc_6m)/poc_6m < 0.03 and vol[-1] < avg_vol50 * 0.7:
+        trend_tag = "🐉老龍回頭(👑籌碼共振)"
+    elif cp > poc_6m and vol_ratio > 1.8:
+        trend_tag = "🚀放量起爆(🌪️躍入真空區)"
+
+    return {
+        "Ticker": ticker.replace(".HK", ""), "Name": name, "Price": round(float(cp), 2),
+        "POC": round(float(poc_6m), 2), "VWAP": round(float(tv_vwap), 2), "Dist_POC": round(float(dist_poc), 2),
+        "60D_Ret": round(float(ret_60d), 2), "RSI": round(float(rsi), 2), "Vol_Ratio": round(float(vol_ratio), 2),
+        "Mkt_Cap": round(float(mkt_cap/1e8), 2), "Turnover": round(float(turnover/1e8), 2),
+        "Trend": trend_tag, "rs_raw": rs_raw
+    }
+
 # ==========================================
-# 🚀 3. 执行流程
+# 🚀 4. 执行流程 (含分批下载与美化)
 # ==========================================
 
 def main():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{now_str}] 🚀 V30.0 正在执行外科手术式写入...")
+    print(f"[{now_str}] 🚀 V32.0 Alpha 猎手启动...")
     
-    # 1. 准备数据
-    hsi_raw = yf.download("^HSI", period="5d", progress=False)
+    # 1. 恒指基准
+    hsi_raw = yf.download("^HSI", period="350d", progress=False)
     hsi_series = hsi_raw['Close'].iloc[:, 0] if isinstance(hsi_raw['Close'], pd.DataFrame) else hsi_raw['Close']
-    
-    # 2. 获取池子
+
+    # 2. TV 蓝筹名册
     url = "https://scanner.tradingview.com/hongkong/scan"
-    payload = {"columns": ["name", "description", "close"], "range": [0, 100]}
-    tv_data = requests.post(url, json=payload, timeout=10).json().get('data', [])
-    df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "name": d['d'][1]} for d in tv_data])
+    payload = {
+        "columns": ["name", "description", "close", "market_cap_basic", "VWAP", "volume"],
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.1e10}],
+        "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+    }
+    resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
+    df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "mkt": d['d'][3], "vwap": d['d'][4] or d['d'][2], "vol": d['d'][5]} for d in resp])
 
-    # 3. 核心计算
+    # 3. 极速汉化
+    print(f" -> 🌐 正在同步腾讯证券中文名录...")
+    name_map = get_chinese_names(df_pool['code'].tolist())
+
+    # 4. 分批演算 (每组40只，防止 Yahoo 风控)
     final_list = []
-    tickers = [str(c).zfill(4)+".HK" for c in df_pool['code'][:50]] # 仅取50只加速测试
-    data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
+    tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
+    chunk_size = 40
+    print(f" -> 📥 正在分批获取 K 线数据 (总计 {len(tickers)} 支)...")
     
-    for _, row in df_pool[:50].iterrows():
-        t = str(row['code']).zfill(4)+".HK"
-        try:
-            m = calculate_v30_metrics(data[t].dropna(), hsi_series)
-            if m:
-                m.update({"Ticker": row['code'], "Name": row['name']})
-                final_list.append(m)
-        except: continue
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i : i + chunk_size]
+        data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
+        for t in chunk:
+            try:
+                row = df_pool[df_pool['code'] == t.split('.')[0].lstrip('0')].iloc[0]
+                res = analyze_v32(t, name_map.get(t.split('.')[0].lstrip('0'), t), data[t].dropna(), row['mkt'], row['mkt']*0.01, row['vwap'], hsi_series)
+                if res: final_list.append(res)
+            except: continue
+        time.sleep(1) # 礼貌延迟
 
-    # 4. 精准写入
-    sh = init_v30_sheet()
+    # 5. 计算 RS 百分位评分
+    res_df = pd.DataFrame(final_list)
+    res_df['RS评分'] = res_df['rs_raw'].rank(pct=True).apply(lambda x: int(x*99))
+    res_df = res_df.sort_values(by="RS评分", ascending=False).head(50)
+
+    # 6. 精准推送
+    sh = init_v32_sheet()
+    sh.clear()
     
-    # --- 强力刷新 M2 单元格 (对应你截图中的 Last Updated) ---
-    print(f" -> 💉 正在强制注射新时间戳到 M2: {now_str}")
-    sh.update_acell("M2", now_str)
+    output_cols = ["Ticker", "Name", "Price", "POC", "VWAP", "Dist_POC", "60D_Ret", "RSI", "Vol_Ratio", "Mkt_Cap", "Turnover", "Trend", "RS评分"]
+    output_data = res_df[output_cols]
     
-    if final_list:
-        res_df = pd.DataFrame(final_list).head(30)
-        # 按照你截图的列顺序排列
-        # Ticker, Name, Price, POC, VWAP, Dist_POC, 60D_Ret, RSI, Vol_Ratio, Mkt, Turn, Trend
-        output_data = res_df[["Ticker", "Name", "Price", "POC", "VWAP", "Dist_POC", "60D_Ret", "RSI", "Vol", "Mkt", "Turn", "Trend"]]
-        
-        print(f" -> 📝 正在写入 A2 起始的数据体 (30行)...")
-        # 使用 USER_ENTERED 强制刷新界面
-        sh.update(range_name="A2", values=output_data.values.tolist(), value_input_option="USER_ENTERED")
-    
-    # Z1 存一个标记，用于双重验证
-    sh.update_acell("Z1", f"V30_SYNC_OK_{now_str}")
-    
-    print(f"✅ V30.0 手术成功。请立刻刷新表格查看 M2 单元格！")
+    header = [output_cols]
+    sh.update(range_name="A1", values=header + output_data.values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("M2", now_str) # 时间戳
+
+    # 7. 视觉美化 (条件格式)
+    set_frozen(sh, rows=1)
+    # RS评分 > 90 的标红
+    rule = ConditionalFormatRule(ranges=[GridRange.from_a1_range('M2:M100', sh)],
+                                booleanRule=BooleanRule(condition=BooleanCondition('GREATER', ['89']), 
+                                format=cellFormat(textFormat=textFormat(bold=True, color=color(0.8, 0, 0)), backgroundColor=color(1, 0.9, 0.9))))
+    set_conditional_format_rules(sh, [rule])
+
+    print(f"✅ V32.0 任务圆满完成。推送 {len(res_df)} 支黄金标的。")
 
 if __name__ == "__main__":
     main()
