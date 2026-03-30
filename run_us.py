@@ -20,7 +20,7 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 
 # ==========================================
-# 🛡️ 核心工具：数据净化 (100% 解决 JSON 兼容)
+# 🛡️ 核心工具：数据净化
 # ==========================================
 def robust_json_clean(val):
     try:
@@ -40,151 +40,160 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V100 核心演算逻辑 (Aegis Engine)
+# 2. V130 奇点核心算法
 # ==========================================
-def calculate_v100_metrics(df, spy_df):
+def calculate_v130_singularity(df, spy_df):
     try:
         close = df['Close']
         high, low, vol = df['High'], df['Low'], df['Volume']
         
-        # 1. 三周期趋势模板 (Trend Template)
+        # 1. 欧奈尔/米勒维尼 趋势模板 (Trend Template)
         ma50 = close.rolling(50).mean()
         ma150 = close.rolling(150).mean()
         ma200 = close.rolling(200).mean()
-        # 强制 Stage 2 逻辑
         is_stage_2 = bool(close.iloc[-1] > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1])
         
-        # 2. RS 综合强度 (3个月 + 6个月加权)
+        # 2. RS 奇点先行逻辑
         rs_line = (close / spy_df).fillna(method='ffill')
-        rs_3m = safe_div(rs_line.iloc[-1], rs_line.iloc[-63])
-        rs_6m = safe_div(rs_line.iloc[-1], rs_line.iloc[-126])
-        rs_score = (rs_3m * 0.7) + (rs_6m * 0.3)
+        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max()) # RS线创一年新高
+        price_nh = bool(close.iloc[-1] >= close.tail(252).max())
+        rs_stealth = rs_nh and not price_nh # RS先行：强度创新高但价格还没涨到位
         
-        # RS 加速度 (加速仰攻)
-        accel = safe_div(rs_line.iloc[-1] - rs_line.iloc[-10], rs_line.iloc[-10]) - \
-                safe_div(rs_line.iloc[-11] - rs_line.iloc[-20], rs_line.iloc[-20])
-        
-        # 3. 紧致度 (Tightness) 与 缩量感知 (V-Dry)
+        # 3. VCP 紧致度 (收缩)
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
-        avg_vol = vol.tail(10).mean()
-        is_vdry = bool(vol.iloc[-1] < avg_vol * 0.65) # 极度缩量
         
         # 4. 筹码中心 POC
         counts, bin_edges = np.histogram(close.tail(120).values, bins=50, weights=vol.tail(120).values)
         poc = (bin_edges[np.argmax(counts)] + bin_edges[np.argmax(counts)+1]) / 2
         
-        # 5. 动态止盈
-        atr = (high - low).rolling(14).mean().iloc[-1]
-        trailing_stop = close.iloc[-1] - (2.5 * (atr if math.isfinite(atr) else close.iloc[-1]*0.03))
+        # 5. 波动率目标
+        adr = ((high - low)/low).tail(20).mean() * 100
         
-        # 综合评分 (分值权重：相对强度 > 量能 > 紧致度)
-        total_score = (rs_score * 50) + (accel * 500) + (10 if is_vdry else 0)
+        # 综合评分
+        score = (2.0 if rs_nh else 1.0) * (1.5 if rs_stealth else 1.0) * safe_div(1, tightness)
         
         return {
-            "score": total_score, "is_stage_2": is_stage_2, "accel": accel,
-            "rs_rank": rs_score, "tightness": tightness, "v_dry": is_vdry,
-            "stop": trailing_stop, "poc": poc, "price": close.iloc[-1]
+            "score": score, "is_stage_2": is_stage_2, "rs_stealth": rs_stealth,
+            "tight": tightness, "poc": poc, "price": close.iloc[-1],
+            "adr": adr, "stock_dollar_vol": (vol.tail(5) * close.tail(5)).mean()
         }
     except: return None
 
 # ==========================================
-# 3. 选股扫描引擎
+# 3. 扫描引擎
 # ==========================================
-def run_v100_aegis():
-    print("📡 [1/3] 天基指挥部 V100：正在同步全球领袖与行业因子...")
+def run_v130_singularity():
+    print("📡 [1/3] 奇点哨兵：正在探测全市场‘主力扫货’信号...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 1. 获取标普 500 名册与板块映射
+    # 获取名册
     try:
-        sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
-        sp_df = sp_tables[0]
+        sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         ticker_sector_map = dict(zip(sp_df['Symbol'].str.replace('.', '-'), sp_df['GICS Sector']))
-        tickers = list(ticker_sector_map.keys()) + ["PR", "CF", "NTR", "NVDA", "GOOGL", "PLTR"]
+        tickers = list(ticker_sector_map.keys()) + ["NVDA", "GOOGL", "CF", "PR", "PLTR", "TSLA"]
     except:
-        tickers = ["NVDA", "GOOGL", "AAPL", "MSFT", "CF", "PR"]; ticker_sector_map = {}
+        tickers = ["NVDA", "GOOGL", "AAPL", "MSFT", "CF", "PR"]
 
-    # 2. 批量数据下载
     data = yf.download(list(set(tickers + ["SPY", "^VIX"])), period="2y", group_by='ticker', threads=True, progress=False)
     spy_df = data["SPY"]["Close"].dropna()
     vix = float(data["^VIX"]["Close"].dropna().iloc[-1]) if "^VIX" in data.columns else 20.0
 
-    # 3. 计算市场宽度 (MA50 上方占比)
-    above_50ma, valid_count = 0, 0
-    for t in tickers[:200]:
+    # 大盘宽度 (200MA)
+    above_200ma = 0
+    valid_count = 0
+    for t in tickers[:150]:
         if t in data.columns.levels[0]:
-            df = data[t]["Close"].dropna()
-            if len(df) > 50 and df.iloc[-1] > df.tail(50).mean(): above_50ma += 1
+            c = data[t]["Close"].dropna()
+            if len(c) > 200 and c.iloc[-1] > c.tail(200).mean(): above_200ma += 1
             valid_count += 1
-    breadth = (above_50ma / valid_count) * 100 if valid_count > 0 else 50
+    breadth = (above_200ma / valid_count) * 100 if valid_count > 0 else 50
 
-    print(f"🚀 [2/3] 执行‘Aegis 绝对防御’演算 (宽度: {breadth:.1f}%)...")
     candidates = []
+    print(f"🚀 [2/3] 执行‘奇点’演算 (长期牛股占比: {breadth:.1f}%)...")
     for t in tickers:
         try:
             if t not in data.columns.levels[0]: continue
             df = data[t].dropna()
-            if len(df) < 250: continue
+            if len(df) < 200: continue
             
-            v100 = calculate_v100_metrics(df, spy_df)
-            if not v100 or not v100['is_stage_2']: continue
+            v130 = calculate_v130_singularity(df, spy_df)
+            if not v130 or not v130['is_stage_2']: continue
             
-            # --- 动作分类判定 ---
-            action = "关注"
-            if v100['accel'] > 0.005 and v100['tightness'] < 1.5: action = "👁️暗盘先行"
-            elif v100['v_dry'] and v100['rs_rank'] > 1.1: action = "🐉缩量回踩"
-            elif v100['accel'] > 0.01: action = "🚀垂直爆破"
-            
-            if action == "关注": continue
-
-            candidates.append({
-                "Ticker": t, "Action": action, "Score": v100['score'], "Sector": ticker_sector_map.get(t, "Other"),
-                "Price": v100['price'], "止损位": v100['stop'], "POC支撑": v100['poc'],
-                "RS加速": "📈" if v100['accel'] > 0 else "-", "紧致度": v100['tightness']
-            })
+            # 过滤：必须具备 RS 强度或 极度紧致
+            if v130['score'] > 1.2 or v130['tight'] < 0.8:
+                candidates.append({
+                    "Ticker": t, "Score": v130['score'], "Sector": ticker_sector_map.get(t, "Other"),
+                    "Price": v130['price'], "POC支撑": v130['poc'], "紧致度": v130['tight'],
+                    "ADR%": v130['adr'], "Stock_Dollar_Vol": v130['stock_dollar_vol'],
+                    "信号": "👁️RS先行" if v130['rs_stealth'] else "🐉VCP挤压"
+                })
         except: continue
 
-    if not candidates:
-        final_output([], "⛈️ 风险", 0, vix); return
-
-    # --- 核心改进：行业配额过滤 (每个行业最多入选 2 个最高分) ---
+    if not candidates: final_output([], vix, breadth); return
     cand_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
     final_seeds = cand_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(8)
 
-    print(f"🔥 [3/3] 正在接入 Polygon 期权暗盘审计...")
+    print(f"🔥 [3/3] 审计‘真·异动’期权流量与财报冲击...")
     results = []
-    weather = "☀️ 极佳" if (breadth > 60 and vix < 21) else "⛈️ 严寒" if (breadth < 40 or vix > 28) else "☁️ 阴天"
+    weather = "☀️ 极佳" if (breadth > 60 and vix < 22) else "⛈️ 风险" if (breadth < 40 or vix > 28) else "☁️ 震荡"
 
     for _, row in final_seeds.iterrows():
-        opt_score, opt_size = get_sentiment(row['Ticker'])
+        # 1. 财报审计
         try:
             t_obj = yf.Ticker(row['Ticker'])
             cal = t_obj.calendar
-            eb_str = "⚠️临近" if (cal is not None and not cal.empty and (cal.iloc[0, 0].date() - datetime.date.today()).days <= 7) else "安全"
-        except: eb_str = "未知"
+            if cal is not None and not cal.empty:
+                e_date = cal.iloc[0, 0].date()
+                days = (e_date - datetime.date.today()).days
+                e_str = f"{e_date}({days}d)"
+                # 财报预期跳空 = ADR * 1.5
+                e_move = f"±{round(row['ADR%']*1.5, 1)}%"
+            else: e_str = "未知"; e_move = "N/A"
+        except: e_str = "未知"; e_move = "N/A"
 
+        # 2. 期权异动 (V/OI 比率审计)
+        uoa_status, call_pct, opt_vol = get_uoa_intel(row['Ticker'])
+        os_ratio = safe_div(opt_vol, row['Stock_Dollar_Vol'])
+        
         row_dict = row.to_dict()
         row_dict.update({
-            "财报": eb_str, "期权看涨%": opt_score, "期权规模": opt_size,
-            "评级": "💎SSS+" if (opt_score > 65 and weather == "☀️ 极佳") else "🔥强势"
+            "财报日": e_str, "预期跳空": e_move, "期权看涨%": call_pct,
+            "异动监控": uoa_status, "期现比": f"{round(os_ratio*100, 1)}%",
+            "评级": "💎SSS" if (call_pct > 60 and "🔥" in uoa_status and weather == "☀️ 极佳") else "🔥强势"
         })
         results.append(row_dict)
-        time.sleep(12.5) # 遵守 Polygon 免费版 5次/min 限制
+        time.sleep(12) 
 
-    final_output(results, weather, breadth, vix)
+    final_output(results, vix, breadth, weather)
 
-def get_sentiment(ticker):
+def get_uoa_intel(ticker):
+    """
+    Polygon 深度异动审计：成交量/未平仓量 (V/OI)
+    """
     try:
         snaps = client_poly.get_snapshot_options_chain(ticker)
-        bull, total = 0, 0
+        total_val, call_val = 0, 0
+        max_v_oi = 0
         for s in snaps:
-            val = (s.day.volume or 0) * (s.day.last or 0) * 100
-            if val > 50000:
-                total += val
-                if s.details.contract_type == 'call': bull += val
-        return round(safe_div(bull, total)*100, 1) if total > 0 else 50.0, f"${round(total/1e6, 2)}M"
-    except: return 50.0, "N/A"
+            vol = s.day.volume if s.day else 0
+            oi = s.open_interest if s.open_interest else 1
+            if vol > 100: # 过滤杂碎单
+                v_oi = vol / oi
+                max_v_oi = max(max_v_oi, v_oi)
+                
+                val = vol * (s.day.last or 0) * 100
+                total_val += val
+                if s.details.contract_type == 'call':
+                    call_val += val
+        
+        status = "正常"
+        if max_v_oi > 1.5: status = "🔥主力扫货"
+        elif max_v_oi > 0.8: status = "⚠️异常放量"
+        
+        return status, round(safe_div(call_val, total_val)*100, 1), total_val
+    except: return "N/A", 50.0, 0.0
 
-def final_output(res, weather, breadth, vix):
+def final_output(res, vix, breadth, weather):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
@@ -192,24 +201,25 @@ def final_output(res, weather, breadth, vix):
         sh.clear()
         
         header = [
-            ["🏰 [V100 天基指挥部 - 绝对防御版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
-            ["环境天气:", weather, "大盘宽度:", f"{round(breadth, 1)}%", "VIX:", round(vix, 2)],
-            ["防御策略:", "单一行业限额 2 只。强制 Stage 2 趋势过滤。优先关注【👁️暗盘先行】标的。"],
+            ["🏰 [V130 奇点哨兵 - 异动增强版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
+            ["环境天气:", weather, "200MA上方占比:", f"{round(breadth, 1)}%", "VIX:", round(vix, 2)],
+            ["异动逻辑:", "【🔥主力扫货】代表单份合约成交量 > 未平仓量，暗示有大户正在紧急建仓。"],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
-            cols = ["Ticker", "评级", "Action", "RS加速", "Price", "止损位", "POC支撑", "期权看涨%", "期权规模", "财报", "Sector", "紧致度"]
+            cols = ["Ticker", "评级", "信号", "异动监控", "Price", "POC支撑", "期权看涨%", "期现比", "紧致度", "财报日", "预期跳空", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             raw_data = [df.columns.tolist()] + df.values.tolist()
-            final_clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
-            sh.update(values=final_clean_matrix, range_name="A5")
+            clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
+            sh.update(values=clean_matrix, range_name="A5")
         else:
-            sh.update_acell("A5", "📭 今日环境严寒，未探测到符合 Aegis 准则的阿尔法奇点。")
+            sh.update_acell("A5", "📭 今日暂未发现机构级期权异动信号。")
             
-        print(f"🎉 V100 任务完成！当前天气：{weather}")
-    except Exception as e: print(f"❌ 最终写入失败: {e}")
+        print(f"🎉 V130 任务圆满完成。天气：{weather}")
+    except Exception as e: print(f"❌ 写入失败: {e}")
 
-if __name__ == "__main__": run_v100_aegis()
+if __name__ == "__main__":
+    run_v130_singularity()
