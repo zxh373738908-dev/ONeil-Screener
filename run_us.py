@@ -20,7 +20,6 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 ACCOUNT_SIZE = 10000  # 建议头寸计算基准：1万美元
 
-# 行业 ETF 映射表
 SECTOR_MAP = {
     "Information Technology": "XLK", "Health Care": "XLV", "Financials": "XLF",
     "Consumer Discretionary": "XLY", "Communication Services": "XLC",
@@ -29,7 +28,7 @@ SECTOR_MAP = {
 }
 
 # ==========================================
-# 🛡️ 核心工具：数据净化
+# 🛡️ 核心工具：数据净化 (解决 Series Ambiguous 报错)
 # ==========================================
 def robust_json_clean(val):
     try:
@@ -49,73 +48,73 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V600 天枢核心引擎
+# 2. V650 核心演算逻辑
 # ==========================================
-def calculate_v600_apex_engine(df, spy_df, sector_etf_df, dxy_down):
+def calculate_v650_resilience_engine(df, spy_df, sector_etf_df, dxy_down, vix):
     try:
         close = df['Close']
         high, low, vol = df['High'], df['Low'], df['Volume']
         
-        # --- [1] 趋势对齐 (Stage 2) ---
-        ma50, ma200 = close.rolling(50).mean(), close.rolling(200).mean()
+        # 1. 均线对齐与多头结构
+        ma50, ma150, ma200 = close.rolling(50).mean(), close.rolling(150).mean(), close.rolling(200).mean()
         is_stage_2 = bool(close.iloc[-1] > ma50.iloc[-1] > ma200.iloc[-1])
         
-        # --- [2] 双重强度验证 (Relative Strength vs SPY & Sector) ---
+        # 2. 相对强度监控
         rs_spy = (close / spy_df).fillna(method='ffill')
         rs_sector = (close / sector_etf_df).fillna(method='ffill')
-        # 强于大盘且强于行业 ETF
         is_double_strong = bool(rs_spy.iloc[-1] > rs_spy.tail(20).mean() and rs_sector.iloc[-1] > rs_sector.tail(20).mean())
-        rs_nh = bool(rs_spy.iloc[-1] >= rs_spy.tail(252).max())
         
-        # --- [3] 阻力区与紧致度 ---
-        dist_from_high = safe_div(df['High'].tail(252).max() - close.iloc[-1], close.iloc[-1])
+        # 3. 恐慌韧性判定 (VIX > 28 时的核心指标)
+        # 跌幅对比：最近5天个股表现 vs 大盘表现
+        stock_5d_ret = safe_div(close.iloc[-1] - close.iloc[-5], close.iloc[-5])
+        spy_5d_ret = safe_div(spy_df.iloc[-1] - spy_df.iloc[-5], spy_df.iloc[-5])
+        is_resilient = bool(stock_5d_ret > spy_5d_ret and close.iloc[-1] > ma50.iloc[-1])
+        
+        # 4. 紧致度与量能
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
-        
-        # --- [4] 量能异动 (Pocket Pivot / V-Dry) ---
         avg_vol = vol.tail(20).mean()
-        v_dry = bool(vol.iloc[-1] < avg_vol * 0.7)
-        max_dn_vol = vol[close < close.shift(1)].tail(10).max()
-        is_pocket = bool(close.iloc[-1] > close.iloc[-2] and vol.iloc[-1] > max_dn_vol)
+        v_dry = bool(vol.iloc[-1] < avg_vol * 0.75)
         
-        # --- [5] 动作逻辑标记 ---
-        if rs_nh and dist_from_high < 0.03: action = "👁️ 奇点先行(V600)"
-        elif is_stage_2 and dist_from_high < 0.02 and v_dry: action = "🐉 老龙回头"
-        elif is_pocket and tightness < 1.5: action = "🚀 口袋爆发"
-        elif is_stage_2 and is_double_strong: action = "💎 行业领袖"
-        else: action = "观察"
-        
-        # --- [6] 风险头寸计算 ---
-        adr = ((high - low)/low).tail(20).mean()
+        # --- 动作标记逻辑 ---
+        if vix > 28:
+            if is_resilient and is_double_strong: action = "🛡️ 恐慌锚点(Resilient)"
+            elif is_stage_2 and v_dry: action = "🐉 老龙回头"
+            else: action = "观察"
+        else:
+            if rs_spy.iloc[-1] >= rs_spy.tail(252).max() and tightness < 1.5: action = "👁️ 奇点先行"
+            elif is_double_strong and is_stage_2: action = "💎 行业领袖"
+            else: action = "观察"
+            
+        # --- 风控与头寸计算 ---
         atr = (high - low).rolling(14).mean().iloc[-1]
-        stop_price = close.iloc[-1] - (2.2 * atr)
-        risk_per_share = close.iloc[-1] - stop_loss_price if (close.iloc[-1] - stop_price) > 0 else (close.iloc[-1] * 0.05)
-        # 每笔交易风险账户 1% 的头寸建议
-        suggested_shares = math.floor((ACCOUNT_SIZE * 0.01) / (close.iloc[-1] - stop_price)) if (close.iloc[-1] - stop_price) > 0 else 0
-
-        score = (rs_spy.iloc[-1]/rs_spy.iloc[-63]) * (1.3 if is_double_strong else 1.0) * (1.2 if dxy_down else 1.0)
+        stop_price = close.iloc[-1] - (2.3 * atr)
+        risk_per_share = close.iloc[-1] - stop_price
+        
+        # 计算建议股数 (每笔交易风险 1% 的账户资金)
+        suggested_shares = math.floor((ACCOUNT_SIZE * 0.01) / risk_per_share) if risk_per_share > 0 else 0
+        
+        score = safe_div(close.iloc[-1], close.iloc[-63]) * (1.2 if dxy_down else 1.0)
         
         return {
-            "score": score, "action": action, "tight": tightness, "price": close.iloc[-1],
-            "stop": stop_price, "shares": suggested_shares, "adr": adr * 100, "rs_nh": rs_nh,
-            "dollar_vol": (vol.tail(5) * close.tail(5)).mean(), "double_strong": is_double_strong
+            "score": score, "action": action, "price": close.iloc[-1],
+            "stop": stop_price, "shares": suggested_shares, "adr": safe_div(high.iloc[-1]-low.iloc[-1], low.iloc[-1])*100,
+            "resilience": is_resilient, "dollar_vol": (vol.tail(5) * close.tail(5)).mean()
         }
     except: return None
 
 # ==========================================
-# 3. 巅峰指挥流程
+# 3. 自动化流程
 # ==========================================
-def run_v600_apex_command():
-    print(f"📡 [1/3] V600 天枢巅峰：同步全市场行业 ETF 与宏观共振...")
+def run_v650_resilience():
+    print(f"📡 [1/3] V650 启动：同步宏观背景与行业 ETF...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 宏观与行业 ETF 下载
     macro_symbols = ["SPY", "DX-Y.NYB", "^VIX"] + list(SECTOR_MAP.values())
     m_data = yf.download(macro_symbols, period="2y", progress=False)['Close']
     spy_df = m_data["SPY"].dropna()
     dxy_down = bool(m_data["DX-Y.NYB"].iloc[-1] < m_data["DX-Y.NYB"].iloc[0])
     vix = float(m_data["^VIX"].iloc[-1])
 
-    # 名册审计
     try:
         sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         ticker_sector_map = dict(zip(sp_df['Symbol'].str.replace('.', '-'), sp_df['GICS Sector']))
@@ -125,7 +124,7 @@ def run_v600_apex_command():
 
     data = yf.download(tickers, period="2y", group_by='ticker', threads=True, progress=False)
 
-    print(f"🚀 [2/3] 执行天枢机群演算 (头寸基准: ${ACCOUNT_SIZE})...")
+    print(f"🚀 [2/3] 执行韧性演算 (当前 VIX: {vix:.2f})...")
     candidates = []
     for t in tickers:
         try:
@@ -134,34 +133,29 @@ def run_v600_apex_command():
             if len(df) < 200: continue
             
             sector_name = ticker_sector_map.get(t, "Other")
-            sector_etf_ticker = SECTOR_MAP.get(sector_name, "SPY")
-            sector_etf_df = m_data[sector_etf_ticker].dropna() if sector_etf_ticker in m_data.columns else spy_df
+            sector_etf_df = m_data[SECTOR_MAP.get(sector_name, "SPY")].dropna()
             
-            v600 = calculate_v600_apex_engine(df, spy_df, sector_etf_df, dxy_down)
-            if not v600 or v600['action'] == "观察": continue
-            
-            # 环境熔断：VIX极高时只保留防守性强的动作
-            if vix > 30 and v600['action'] != "🐉 老龙回头": continue
+            v650 = calculate_v650_resilience_engine(df, spy_df, sector_etf_df, dxy_down, vix)
+            if not v650 or v650['action'] == "观察": continue
 
             candidates.append({
-                "Ticker": t, "Action": v600['action'], "Score": v600['score'], 
-                "Sector": sector_name, "Price": v600['price'],
-                "建议买入": v600['shares'], "止损位": v600['stop'], 
-                "ADR%": v600['adr'], "行业领袖": "💎" if v600['double_strong'] else "-",
-                "Stock_Dollar_Vol": v600['dollar_vol']
+                "Ticker": t, "Action": v650['action'], "Score": v650['score'], 
+                "Sector": sector_name, "Price": v650['price'],
+                "建议买入": v650['shares'], "止损位": v650['stop'], 
+                "ADR%": v650['adr'], "抗跌": "✅" if v650['resilience'] else "-",
+                "Stock_Dollar_Vol": v650['dollar_vol']
             })
         except: continue
 
     if not candidates: final_output([], vix, dxy_down); return
     
-    # 行业配额与评分排序
     cand_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
     final_seeds = cand_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(10)
 
-    print(f"🔥 [3/3] 哨兵审计：机构期权头寸穿透...")
+    print(f"🔥 [3/3] 审计异动头寸审计...")
     results = []
     for _, row in final_seeds.iterrows():
-        uoa_status, call_pct, opt_vol = get_v600_option_intel(row['Ticker'])
+        uoa_status, call_pct, opt_vol = get_v650_option_intel(row['Ticker'])
         os_ratio = safe_div(opt_vol, row['Stock_Dollar_Vol'])
         
         try:
@@ -172,16 +166,16 @@ def run_v600_apex_command():
 
         row_dict = row.to_dict()
         row_dict.update({
-            "财报日": e_str, "期权看涨%": call_pct, "期权异动": uoa_status, 
+            "财报日": e_str, "期权看涨%": call_pct, "异动监控": uoa_status, 
             "期现比": f"{round(os_ratio*100, 1)}%",
-            "评级": "💎SSS" if (call_pct > 64 and "🔥" in uoa_status and vix < 24) else "🔥强势"
+            "评级": "💎SSS" if (call_pct > 64 and vix < 26) else "🔥强势"
         })
         results.append(row_dict)
         time.sleep(12) 
 
     final_output(results, vix, dxy_down)
 
-def get_v600_option_intel(ticker):
+def get_v650_option_intel(ticker):
     try:
         snaps = client_poly.get_snapshot_options_chain(ticker)
         total_val, call_val, max_v_oi = 0, 0, 0
@@ -206,25 +200,26 @@ def final_output(res, vix, dxy_down):
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         sh.clear()
         
+        status = "⛈️ 恐慌避险" if vix > 30 else "☁️ 震荡防御" if vix > 22 else "☀️ 进攻多头"
         header = [
-            ["🏰 [V600 天枢巅峰 - 机构头寸版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
-            ["宏观环境:", "顺风" if dxy_down else "逆风", "VIX指数:", round(vix, 2), "美元顺风:", "✅" if dxy_down else "-"],
-            ["作战指令:", "系统已根据 ATR 止损距离计算建议买入股数(基于$10k账户)。"],
+            [robust_json_clean("🏰 [V650 哨兵版 - 抗跌韧性系统]"), "", robust_json_clean("Update:"), robust_json_clean(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))],
+            [robust_json_clean("市场状态:"), robust_json_clean(status), robust_json_clean("VIX指数:"), robust_json_clean(vix)],
+            [robust_json_clean("作战指令:"), robust_json_clean("VIX极高时，系统自动切换为【恐慌锚点】模式，寻找真正抗跌的核心资产。")],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
-            cols = ["Ticker", "评级", "Action", "建议买入", "止损位", "行业领袖", "期权异动", "Price", "期权看涨%", "期现比", "ADR%", "财报日", "Sector"]
+            cols = ["Ticker", "评级", "Action", "建议买入", "止损位", "抗跌", "期权异动", "Price", "期权看涨%", "期现比", "ADR%", "财报日", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             raw_data = [df.columns.tolist()] + df.values.tolist()
             clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
             sh.update(values=clean_matrix, range_name="A5")
         else:
-            sh.update_acell("A5", "📭 天枢演算完成：当前未探测到符合 Apex 机构级准则的信号。")
-        print(f"🎉 V600 任务成功。VIX: {vix}")
-    except Exception as e: print(f"❌ 最终写入失败: {e}")
+            sh.update_acell("A5", "📭 恐慌审计完成：当前环境未探测到具备阿尔法韧性的避险标的。")
+        print(f"🎉 V650 任务成功。VIX: {vix:.2f}")
+    except Exception as e: print(f"❌ 写入失败: {e}")
 
 if __name__ == "__main__":
-    run_v600_apex_command()
+    run_v650_resilience()
