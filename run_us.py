@@ -6,6 +6,7 @@ from google.oauth2.service_account import Credentials
 import datetime
 import warnings
 import time
+import json
 from polygon import RESTClient
 
 warnings.filterwarnings('ignore')
@@ -19,7 +20,7 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 
 # ==========================================
-# 2. V50 核心算法库 (增加鲁棒性)
+# 2. V50 核心算法库 (高强度防错版)
 # ==========================================
 def calculate_v50_metrics(df, spy_df):
     try:
@@ -27,26 +28,30 @@ def calculate_v50_metrics(df, spy_df):
         vol = df['Volume']
         
         # 1. 垂直加速度 (Verticality)
-        rs_line = close / spy_df['Close']
-        # 增加 fillna(0) 防止 inf
-        slope_now = (rs_line.iloc[-1] - rs_line.iloc[-6]) / (rs_line.iloc[-6] if rs_line.iloc[-6] != 0 else 0.001)
-        slope_prev = (rs_line.iloc[-7] - rs_line.iloc[-12]) / (rs_line.iloc[-12] if rs_line.iloc[-12] != 0 else 0.001)
+        rs_line = (close / spy_df['Close']).fillna(method='ffill')
+        
+        # 判定分母，确保不为零
+        def safe_div(n, d):
+            return n / d if d != 0 and not np.isnan(d) else 0
+
+        slope_now = safe_div(rs_line.iloc[-1] - rs_line.iloc[-6], rs_line.iloc[-6])
+        slope_prev = safe_div(rs_line.iloc[-7] - rs_line.iloc[-12], rs_line.iloc[-12])
         acceleration = slope_now - slope_prev
         
         # 2. 紧致度 (Tightness)
-        t_val = close.tail(10).std() / close.tail(10).mean()
-        tightness = t_val if not np.isnan(t_val) else 0.05
+        tightness = close.tail(10).std() / close.tail(10).mean()
         
         # 3. U/D 量能比
         up_v = vol[df['Close'] > df['Open']].tail(40).sum()
         dn_v = vol[df['Close'] < df['Open']].tail(40).sum()
-        ud_ratio = up_v / (dn_v if dn_v > 0 else 1)
+        ud_ratio = safe_div(up_v, dn_v)
         
         # 4. ATR 动态移动止盈
-        high_low = df['High'] - df['Low']
-        high_pc = (df['High'] - close.shift(1)).abs()
-        low_pc = (df['Low'] - close.shift(1)).abs()
-        tr = pd.concat([high_low, high_pc, low_pc], axis=1).max(axis=1)
+        tr = pd.concat([
+            (df['High'] - df['Low']), 
+            (df['High'] - close.shift(1)).abs(), 
+            (df['Low'] - close.shift(1)).abs()
+        ], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         trailing_stop = close.iloc[-1] - (2.5 * (atr if not np.isnan(atr) else close.iloc[-1]*0.03))
         
@@ -55,7 +60,7 @@ def calculate_v50_metrics(df, spy_df):
         poc = (bin_edges[np.argmax(counts)] + bin_edges[np.argmax(counts)+1]) / 2
         
         # 6. 综合强度
-        rs_raw = (close.iloc[-1] / close.iloc[-63]) / (spy_df['Close'].iloc[-1] / spy_df['Close'].iloc[-63])
+        rs_raw = safe_div(close.iloc[-1] / close.iloc[-63], spy_df['Close'].iloc[-1] / spy_df['Close'].iloc[-63])
         score = rs_raw * ud_ratio * (1 / (tightness * 100 if tightness > 0 else 1))
         
         return {
@@ -64,37 +69,35 @@ def calculate_v50_metrics(df, spy_df):
             "poc": round(poc, 2), "rs_raw": round(rs_raw, 2),
             "dist_high": (close.iloc[-1] - df['High'].max()) / df['High'].max()
         }
-    except Exception:
+    except:
         return None
 
 # ==========================================
-# 3. 选股扫描引擎
+# 3. 核心扫描引擎
 # ==========================================
 def run_v50_citadel():
     print("📡 [1/3] 天基指挥部启动：正在执行全球宏观共振与加速度分析...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
-        sp500_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
-        raw_tickers = sp500_df['Symbol'].tolist()
-        # 修复 Yahoo Finance 的符号格式 (. 变 -)
+        sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
+        raw_tickers = sp_tables[0]['Symbol'].tolist()
+        # 修复符号格式
         tickers = [t.replace('.', '-') for t in raw_tickers]
         tickers = list(set(tickers + ["PR", "CF", "NTR", "FANG", "NVDA", "GOOGL"]))
-        ticker_to_sector = dict(zip(tickers, sp500_df['GICS Sector'].tolist() + ["Energy"]*6))
     except:
-        print("❌ 获取名册失败，请检查网络。")
+        print("❌ 无法获取名册")
         return
 
     # 宏观环境
     env = yf.download(["DX-Y.NYB", "^VIX", "SPY"], period="5d", progress=False)['Close']
-    vix = env["^VIX"].iloc[-1] if not env["^VIX"].empty else 20
+    vix = env["^VIX"].iloc[-1] if not env.empty and "^VIX" in env.columns else 20
     
     data = yf.download(tickers + ["SPY"], period="2y", group_by='ticker', threads=True, progress=False)
     spy_df = data["SPY"].dropna()
 
     pre_candidates = []
     sector_cluster = {}
-    ma50_count = 0
 
     print(f"🚀 [2/3] 正在演算 {len(tickers)} 个目标的【垂直加速度】...")
     
@@ -106,49 +109,45 @@ def run_v50_citadel():
             
             close = df['Close'].iloc[-1]
             if close < df['Close'].tail(200).mean(): continue
-            if close > df['Close'].tail(50).mean(): ma50_count += 1
             
             v50 = calculate_v50_metrics(df, spy_df)
             if not v50: continue
             
+            # 判断逻辑
             is_explosion = (v50['dist_high'] >= -0.05) and (v50['acceleration'] > 0)
             is_dip = (0 <= (close - v50['poc'])/v50['poc'] <= 0.06) and (v50['rs_raw'] > 1.1)
             
             if is_explosion or is_dip:
-                sec = ticker_to_sector.get(t, "Other")
-                sector_cluster[sec] = sector_cluster.get(sec, 0) + 1
                 pre_candidates.append({
                     "Ticker": t, "Action": "🚀垂直爆破" if is_explosion else "🐉支撑回踩",
-                    "Sector": sec, "总分": v50['score'], "加速": "仰攻📈" if v50['acceleration'] > 0 else "走平",
+                    "总分": v50['score'], "加速": "仰攻📈" if v50['acceleration'] > 0 else "走平",
                     "紧致度": v50['tightness'], "U/D比": v50['ud_ratio'], "移动止盈": v50['trailing_stop'],
                     "POC": v50['poc'], "Price": round(close, 2)
                 })
         except: continue
 
-    breadth = ma50_count / len(tickers) if len(tickers) > 0 else 0
+    # 简单大盘宽度
+    ma50_up = sum(1 for t in tickers if t in data.columns.levels[0] and data[t]['Close'].iloc[-1] > data[t]['Close'].tail(50).mean().iloc[-1])
+    breadth = ma50_up / len(tickers)
     weather = "☀️ 极佳" if (breadth > 0.6 and vix < 22) else "⛈️ 风险" if (breadth < 0.4 or vix > 28) else "☁️ 震荡"
 
-    for c in pre_candidates: c['共振数'] = sector_cluster.get(c['Sector'], 0)
-    seeds = sorted(pre_candidates, key=lambda x: (x['共振数'] >= 3, x['总分']), reverse=True)[:5]
+    # 排序筛选前 5
+    seeds = sorted(pre_candidates, key=lambda x: x['总分'], reverse=True)[:5]
 
-    print(f"🔥 [3/3] 调动期权雷达执行最终核验...")
+    print(f"🔥 [3/3] 调动期权雷达执行核验...")
     results = []
     for item in seeds:
         opt_score, opt_desc = get_sentiment_v50(item['Ticker'])
         try:
             t_obj = yf.Ticker(item['Ticker'])
-            # 强化财报抓取鲁棒性
             cal = t_obj.calendar
-            if cal is not None and not cal.empty:
-                days_to_e = (cal.iloc[0, 0].date() - datetime.date.today()).days
-                eb_str = "⚠️临近" if 0 <= days_to_e <= 7 else f"{days_to_e}天后"
-            else:
-                eb_str = "未知"
+            days_to_e = (cal.iloc[0, 0].date() - datetime.date.today()).days if cal is not None and not cal.empty else 99
+            eb_str = "⚠️临近" if 0 <= days_to_e <= 7 else f"{days_to_e}天后"
         except: eb_str = "未知"
         
         item.update({
-            "评级": "💎SSS+" if (opt_score > 65 and item['共振数'] >= 3) else "🔥强势",
-            "财报": eb_str, "期权": f"{opt_score}% Call", "规模": opt_desc, "共振": f"{item['共振数']}家"
+            "评级": "💎SSS+" if (opt_score > 65) else "🔥强势",
+            "财报": eb_str, "期权": f"{opt_score}% Call", "规模": opt_desc
         })
         results.append(item)
         time.sleep(13)
@@ -167,6 +166,21 @@ def get_sentiment_v50(ticker):
         return round((bull/total)*100, 1) if total > 0 else 50, f"${round(total/1e6, 2)}M"
     except: return 50, "N/A"
 
+# ==========================================
+# 🛡 数据清洗核心：强制 JSON 兼容
+# ==========================================
+def sanitize_data(val):
+    """递归清洗数据中的 inf 和 nan"""
+    if isinstance(val, float):
+        if np.isinf(val) or np.isnan(val):
+            return 0
+        return round(val, 3) # 限制小数位数也能减小 JSON 压力
+    if isinstance(val, dict):
+        return {k: sanitize_data(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [sanitize_data(v) for v in val]
+    return val
+
 def output_v50_to_sheets(res, weather, breadth, vix):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
@@ -180,19 +194,30 @@ def output_v50_to_sheets(res, weather, breadth, vix):
             ["操作指令:", "移动止盈是生命线。不破该位，死抱盈利！"],
             ["", "", "", ""]
         ]
-        sh.update(values=header, range_name="A1")
+        
         if res:
             df = pd.DataFrame(res)
-            # --- 关键修复：清洗所有 inf 和 NaN ---
-            df = df.replace([np.inf, -np.inf], np.nan)
-            df = df.fillna(0) # 将所有无法解析的数值转为 0
-            
-            cols = ["Ticker", "评级", "Action", "共振", "加速", "移动止盈", "POC", "财报", "Price", "期权", "规模", "紧致度"]
+            # 定义显示的列
+            cols = ["Ticker", "评级", "Action", "加速", "移动止盈", "POC", "财报", "Price", "期权", "规模", "紧致度"]
             df = df[cols]
-            sh.update(values=[df.columns.tolist()] + df.values.tolist(), range_name="A5")
-        print("🎉 V50 天基任务执行完毕，情报已送达！")
+            
+            # --- 彻底的数据清洗流程 ---
+            # 1. 转为字典列表
+            raw_data = df.values.tolist()
+            # 2. 加上表头
+            final_matrix = [df.columns.tolist()] + raw_data
+            # 3. 递归清洗非标准浮点数
+            clean_matrix = sanitize_data(final_matrix)
+            
+            sh.update(values=header, range_name="A1")
+            sh.update(values=clean_matrix, range_name="A5")
+        else:
+            sh.update(values=header, range_name="A1")
+            sh.update_acell("A5", "今日无符合信号标的。")
+            
+        print("🎉 V50 任务圆满完成！")
     except Exception as e:
-        print(f"❌ 写入失败: {e}")
+        print(f"❌ 最终写入失败: {e}")
 
 if __name__ == "__main__":
     run_v50_citadel()
