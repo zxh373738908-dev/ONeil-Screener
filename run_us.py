@@ -18,9 +18,15 @@ POLYGON_API_KEY = "您的_API_KEY"
 client_poly = RESTClient(POLYGON_API_KEY)
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
+ACCOUNT_SIZE = 10000  # 建议头寸计算基准：1万美元
 
-# [核心领袖名单] - 确保在爬虫失效时依然有最强标的
-MASTER_LIST = ["NVDA", "GOOGL", "CF", "PR", "TSLA", "PLTR", "NTR", "AAPL", "MSFT", "AMZN", "META", "AVGO", "COST", "LLY"]
+# 行业 ETF 映射表
+SECTOR_MAP = {
+    "Information Technology": "XLK", "Health Care": "XLV", "Financials": "XLF",
+    "Consumer Discretionary": "XLY", "Communication Services": "XLC",
+    "Industrials": "XLI", "Consumer Staples": "XLP", "Energy": "XLE",
+    "Real Estate": "XLRE", "Materials": "XLB", "Utilities": "XLU"
+}
 
 # ==========================================
 # 🛡️ 核心工具：数据净化
@@ -43,146 +49,139 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V350 阿尔法核心演算引擎
+# 2. V600 天枢核心引擎
 # ==========================================
-def calculate_v350_metrics(df, spy_df, dxy_down):
+def calculate_v600_apex_engine(df, spy_df, sector_etf_df, dxy_down):
     try:
         close = df['Close']
         high, low, vol = df['High'], df['Low'], df['Volume']
         
-        # 1. 均线对齐 (Trend Template)
-        ma50, ma150, ma200 = close.rolling(50).mean(), close.rolling(150).mean(), close.rolling(200).mean()
+        # --- [1] 趋势对齐 (Stage 2) ---
+        ma50, ma200 = close.rolling(50).mean(), close.rolling(200).mean()
         is_stage_2 = bool(close.iloc[-1] > ma50.iloc[-1] > ma200.iloc[-1])
         
-        # 2. RS 巅峰评分 (RS Percentile Concept)
-        rs_line = (close / spy_df).fillna(method='ffill')
-        rs_score = safe_div(rs_line.iloc[-1], rs_line.iloc[-126]) # 半年强度
-        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max()) # 一年RS新高
+        # --- [2] 双重强度验证 (Relative Strength vs SPY & Sector) ---
+        rs_spy = (close / spy_df).fillna(method='ffill')
+        rs_sector = (close / sector_etf_df).fillna(method='ffill')
+        # 强于大盘且强于行业 ETF
+        is_double_strong = bool(rs_spy.iloc[-1] > rs_spy.tail(20).mean() and rs_sector.iloc[-1] > rs_sector.tail(20).mean())
+        rs_nh = bool(rs_spy.iloc[-1] >= rs_spy.tail(252).max())
         
-        # 3. 紧致度 & 奇点判定 (VCP)
+        # --- [3] 阻力区与紧致度 ---
+        dist_from_high = safe_div(df['High'].tail(252).max() - close.iloc[-1], close.iloc[-1])
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
-        rs_stealth = bool(rs_nh and close.iloc[-1] < close.tail(15).max()) # 典型的 GOOGL 起爆前兆
         
-        # 4. 老龙回头 & 异动量
+        # --- [4] 量能异动 (Pocket Pivot / V-Dry) ---
         avg_vol = vol.tail(20).mean()
-        v_dry = bool(vol.iloc[-1] < avg_vol * 0.65)
-        dist_ma50 = safe_div(abs(close.iloc[-1] - ma50.iloc[-1]), ma50.iloc[-1])
-        is_pullback = bool(is_stage_2 and dist_ma50 < 0.025 and v_dry)
+        v_dry = bool(vol.iloc[-1] < avg_vol * 0.7)
+        max_dn_vol = vol[close < close.shift(1)].tail(10).max()
+        is_pocket = bool(close.iloc[-1] > close.iloc[-2] and vol.iloc[-1] > max_dn_vol)
         
-        # 5. 动态 ADR 止损 (更符合个股波性)
-        adr = ((high - low)/low).tail(20).mean() # 平均日波幅
-        stop = close.iloc[-1] * (1 - adr * 2.0) # 2倍ADR止损
-        
-        # 6. 综合指令
-        if rs_stealth and tightness < 1.1: action = "👁️奇点先行(GOOGL)"
-        elif is_pullback: action = "🐉老龙回头(V20)"
-        elif is_stage_2 and rs_nh: action = "💎双重共振"
-        elif is_stage_2: action = "👑趋势领袖"
+        # --- [5] 动作逻辑标记 ---
+        if rs_nh and dist_from_high < 0.03: action = "👁️ 奇点先行(V600)"
+        elif is_stage_2 and dist_from_high < 0.02 and v_dry: action = "🐉 老龙回头"
+        elif is_pocket and tightness < 1.5: action = "🚀 口袋爆发"
+        elif is_stage_2 and is_double_strong: action = "💎 行业领袖"
         else: action = "观察"
         
-        # 宏观加成 (美元走弱加分)
-        final_score = rs_score * (1.2 if dxy_down else 1.0) * (2.0 if rs_nh else 1.0)
+        # --- [6] 风险头寸计算 ---
+        adr = ((high - low)/low).tail(20).mean()
+        atr = (high - low).rolling(14).mean().iloc[-1]
+        stop_price = close.iloc[-1] - (2.2 * atr)
+        risk_per_share = close.iloc[-1] - stop_loss_price if (close.iloc[-1] - stop_price) > 0 else (close.iloc[-1] * 0.05)
+        # 每笔交易风险账户 1% 的头寸建议
+        suggested_shares = math.floor((ACCOUNT_SIZE * 0.01) / (close.iloc[-1] - stop_price)) if (close.iloc[-1] - stop_price) > 0 else 0
 
+        score = (rs_spy.iloc[-1]/rs_spy.iloc[-63]) * (1.3 if is_double_strong else 1.0) * (1.2 if dxy_down else 1.0)
+        
         return {
-            "score": final_score, "action": action, "is_stage_2": is_stage_2,
-            "tight": tightness, "price": close.iloc[-1], "stop": stop, 
-            "adr": adr * 100, "dollar_vol": (vol.tail(5) * close.tail(5)).mean()
+            "score": score, "action": action, "tight": tightness, "price": close.iloc[-1],
+            "stop": stop_price, "shares": suggested_shares, "adr": adr * 100, "rs_nh": rs_nh,
+            "dollar_vol": (vol.tail(5) * close.tail(5)).mean(), "double_strong": is_double_strong
         }
     except: return None
 
 # ==========================================
-# 3. 哨兵扫描主程序
+# 3. 巅峰指挥流程
 # ==========================================
-def run_v350_apex():
-    print("📡 [1/3] V350 哨兵巅峰：正在分析宏观天气与名册...")
+def run_v600_apex_command():
+    print(f"📡 [1/3] V600 天枢巅峰：同步全市场行业 ETF 与宏观共振...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # [宏观探测]
-    macro = yf.download(["DX-Y.NYB", "^VIX", "SPY"], period="5d", progress=False)['Close']
-    dxy_down = bool(macro["DX-Y.NYB"].iloc[-1] < macro["DX-Y.NYB"].iloc[0])
-    vix = float(macro["^VIX"].iloc[-1])
-    
-    # [名册获取 - 双重保障]
+    # 宏观与行业 ETF 下载
+    macro_symbols = ["SPY", "DX-Y.NYB", "^VIX"] + list(SECTOR_MAP.values())
+    m_data = yf.download(macro_symbols, period="2y", progress=False)['Close']
+    spy_df = m_data["SPY"].dropna()
+    dxy_down = bool(m_data["DX-Y.NYB"].iloc[-1] < m_data["DX-Y.NYB"].iloc[0])
+    vix = float(m_data["^VIX"].iloc[-1])
+
+    # 名册审计
     try:
         sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
-        sp_list = sp_df['Symbol'].str.replace('.', '-').tolist()
         ticker_sector_map = dict(zip(sp_df['Symbol'].str.replace('.', '-'), sp_df['GICS Sector']))
-        tickers = list(set(sp_list + MASTER_LIST))
+        tickers = list(ticker_sector_map.keys()) + ["NVDA", "GOOGL", "CF", "PR", "PLTR", "TSLA"]
     except:
-        print("⚠️ 爬虫被封，启用 MASTER_LIST 核心防御模式..."); tickers = MASTER_LIST
-        ticker_sector_map = {t: "Leaders" for t in tickers}
+        tickers = ["NVDA", "GOOGL", "CF", "PR"]; ticker_sector_map = {}
 
-    # [数据下载 - 针对性优化]
-    data = yf.download(list(set(tickers + ["SPY"])), period="2y", group_by='ticker', threads=True, progress=False)
-    spy_df = data["SPY"]["Close"].dropna()
+    data = yf.download(tickers, period="2y", group_by='ticker', threads=True, progress=False)
 
-    # [市场宽度审计]
-    valid_tickers = [t for t in tickers if t in data.columns.levels[0]]
-    breadth_count = 0
-    for t in valid_tickers[:200]:
-        c = data[t]["Close"].dropna()
-        if len(c) > 50 and c.iloc[-1] > c.tail(50).mean(): breadth_count += 1
-    breadth = (breadth_count / 200) * 100 if len(valid_tickers) > 0 else 50
-
-    print(f"🚀 [2/3] 执行核心演算 (宽度: {breadth:.1f}% / 美元顺风: {dxy_down})...")
+    print(f"🚀 [2/3] 执行天枢机群演算 (头寸基准: ${ACCOUNT_SIZE})...")
     candidates = []
-    for t in valid_tickers:
+    for t in tickers:
         try:
+            if t not in data.columns.levels[0]: continue
             df = data[t].dropna()
-            if len(df) < 150: continue
+            if len(df) < 200: continue
             
-            v350 = calculate_v350_metrics(df, spy_df, dxy_down)
-            if not v350 or v350['action'] == "观察": continue
+            sector_name = ticker_sector_map.get(t, "Other")
+            sector_etf_ticker = SECTOR_MAP.get(sector_name, "SPY")
+            sector_etf_df = m_data[sector_etf_ticker].dropna() if sector_etf_ticker in m_data.columns else spy_df
             
-            # 环境熔断逻辑
-            if vix > 27 and "🐉" not in v350['action']: continue
+            v600 = calculate_v600_apex_engine(df, spy_df, sector_etf_df, dxy_down)
+            if not v600 or v600['action'] == "观察": continue
+            
+            # 环境熔断：VIX极高时只保留防守性强的动作
+            if vix > 30 and v600['action'] != "🐉 老龙回头": continue
 
             candidates.append({
-                "Ticker": t, "Action": v300_action_logic(v350), "Score": v350['score'], 
-                "Sector": ticker_sector_map.get(t, "Other"), "Price": v350['price'],
-                "止损位": v350['stop'], "ADR%": v350['adr'], "Stock_Dollar_Vol": v350['dollar_vol']
+                "Ticker": t, "Action": v600['action'], "Score": v600['score'], 
+                "Sector": sector_name, "Price": v600['price'],
+                "建议买入": v600['shares'], "止损位": v600['stop'], 
+                "ADR%": v600['adr'], "行业领袖": "💎" if v600['double_strong'] else "-",
+                "Stock_Dollar_Vol": v600['dollar_vol']
             })
         except: continue
 
-    if not candidates: final_output([], vix, breadth, dxy_down); return
+    if not candidates: final_output([], vix, dxy_down); return
     
-    # [行业配额制 + 分数排序]
+    # 行业配额与评分排序
     cand_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
     final_seeds = cand_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(10)
 
-    print(f"🔥 [3/3] 哨兵终审：正在执行【V/OI 异动】与【财报风险】审计...")
+    print(f"🔥 [3/3] 哨兵审计：机构期权头寸穿透...")
     results = []
-    weather = "☀️ 极佳" if (breadth > 60 and vix < 21) else "⛈️ 风险" if (breadth < 40 or vix > 28) else "☁️ 震荡"
-
     for _, row in final_seeds.iterrows():
-        # 财报日
+        uoa_status, call_pct, opt_vol = get_v600_option_intel(row['Ticker'])
+        os_ratio = safe_div(opt_vol, row['Stock_Dollar_Vol'])
+        
         try:
             t_obj = yf.Ticker(row['Ticker'])
             cal = t_obj.calendar
             e_str = cal.iloc[0, 0].date().strftime('%m-%d') if (cal is not None and not cal.empty) else "未知"
         except: e_str = "未知"
 
-        # 期权 V/OI 异动探测
-        uoa_status, call_pct, opt_vol = get_apex_option_intel(row['Ticker'])
-        os_ratio = safe_div(opt_vol, row['Stock_Dollar_Vol'])
-        
         row_dict = row.to_dict()
         row_dict.update({
-            "财报日": e_str, "期权看涨%": call_pct, "异动监控": uoa_status, 
+            "财报日": e_str, "期权看涨%": call_pct, "期权异动": uoa_status, 
             "期现比": f"{round(os_ratio*100, 1)}%",
-            "评级": "💎SSS" if (call_pct > 63 and "🔥" in uoa_status and weather != "⛈️ 风险") else "🔥强势"
+            "评级": "💎SSS" if (call_pct > 64 and "🔥" in uoa_status and vix < 24) else "🔥强势"
         })
         results.append(row_dict)
-        time.sleep(12.5) 
+        time.sleep(12) 
 
-    final_output(results, vix, breadth, dxy_down, weather)
+    final_output(results, vix, dxy_down)
 
-def v300_action_logic(v):
-    # 为特殊个股打标签
-    if v['price'] > 50 and v['score'] > 2.0: return v['action']
-    return v['action']
-
-def get_apex_option_intel(ticker):
+def get_v600_option_intel(ticker):
     try:
         snaps = client_poly.get_snapshot_options_chain(ticker)
         total_val, call_val, max_v_oi = 0, 0, 0
@@ -196,12 +195,11 @@ def get_apex_option_intel(ticker):
                 total_val += val
                 if s.details.contract_type == 'call': call_val += val
         
-        # 真正的异动审计：成交量/未平仓量比率
-        status = "🔥主力扫货" if max_v_oi > 1.4 else "⚠️放量" if max_v_oi > 0.8 else "平稳"
+        status = "🔥主力扫货" if max_v_oi > 1.4 else "⚠️放量" if max_v_oi > 0.9 else "平稳"
         return status, round(safe_div(call_val, total_val)*100, 1), total_val
     except: return "N/A", 50.0, 0.0
 
-def final_output(res, vix, breadth, dxy_down, weather):
+def final_output(res, vix, dxy_down):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
@@ -209,25 +207,24 @@ def final_output(res, vix, breadth, dxy_down, weather):
         sh.clear()
         
         header = [
-            ["🏰 [V350 哨兵巅峰版 - Sentinel Apex]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
-            ["环境天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX:", round(vix, 2), "美元顺风:", "✅" if dxy_down else "-"],
-            ["作战指令:", "关注【👁️奇点先行】捕获GOOGL/NVDA，【🐉老龙回头】捕获CF/PR回踩。"],
+            ["🏰 [V600 天枢巅峰 - 机构头寸版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
+            ["宏观环境:", "顺风" if dxy_down else "逆风", "VIX指数:", round(vix, 2), "美元顺风:", "✅" if dxy_down else "-"],
+            ["作战指令:", "系统已根据 ATR 止损距离计算建议买入股数(基于$10k账户)。"],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
-            cols = ["Ticker", "评级", "Action", "异动监控", "Price", "止损位", "期权看涨%", "期现比", "ADR%", "财报日", "Sector"]
+            cols = ["Ticker", "评级", "Action", "建议买入", "止损位", "行业领袖", "期权异动", "Price", "期权看涨%", "期现比", "ADR%", "财报日", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             raw_data = [df.columns.tolist()] + df.values.tolist()
             clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
             sh.update(values=clean_matrix, range_name="A5")
         else:
-            sh.update_acell("A5", "📭 今日无泰坦级信号，建议维持现金防御。")
-            
-        print(f"🎉 V350 任务圆满完成。天气：{weather}")
-    except Exception as e: print(f"❌ 写入失败: {e}")
+            sh.update_acell("A5", "📭 天枢演算完成：当前未探测到符合 Apex 机构级准则的信号。")
+        print(f"🎉 V600 任务成功。VIX: {vix}")
+    except Exception as e: print(f"❌ 最终写入失败: {e}")
 
 if __name__ == "__main__":
-    run_v350_apex()
+    run_v600_apex_command()
