@@ -40,74 +40,77 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 3. V11.0 涅槃演算核心
+# 3. V12 核心算法：老龙回头 + 奇点感知
 # ==========================================
-def calculate_v11_nexus_metrics(df, spy_df):
+def calculate_v12_oracle_metrics(df, spy_df):
     try:
         close = df['Close']
         high, low, vol = df['High'], df['Low'], df['Volume']
         
-        # 1. 趋势过滤 (Stage 2)
+        # 1. 均线系统 (O'Neil Stage 2)
         ma50, ma150, ma200 = close.rolling(50).mean(), close.rolling(150).mean(), close.rolling(200).mean()
-        # 严格 Stage 2：收盘 > 150MA > 200MA，且 200MA 向上
-        in_stage_2 = bool(close.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
+        is_stage_2 = bool(close.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1])
         
-        # 2. 量价积累确认 (U/D Ratio)
-        # 计算过去 50 天：上涨日成交量之和 / 下跌日成交量之和
-        up_days_vol = vol[close > close.shift(1)].tail(50).sum()
-        dn_days_vol = vol[close < close.shift(1)].tail(50).sum()
-        ud_ratio = safe_div(up_days_vol, dn_days_vol)
-        
-        # 3. 波动率挤压 (Squeeze)
-        ma20 = close.rolling(20).mean()
-        std20 = close.rolling(20).std()
-        upper_bb, lower_bb = ma20 + (2 * std20), ma20 - (2 * std20)
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        atr20 = tr.rolling(20).mean()
-        upper_kc, lower_kc = ma20 + (1.5 * atr20), ma20 - (1.5 * atr20)
-        is_squeezing = bool(upper_bb.iloc[-1] < upper_kc.iloc[-1] and lower_bb.iloc[-1] > lower_kc.iloc[-1])
-        
-        # 4. 相对强度与乖离
+        # 2. 相对强度线 (RS Line) - 感知 GOOGL 奇点
         rs_line = (close / spy_df).fillna(method='ffill')
-        rs_score = safe_div(rs_line.iloc[-1], rs_line.iloc[-252]) # 一年相对强度
-        adr_val = float(((high - low) / low).tail(20).mean())
-        ext_pct = safe_div(close.iloc[-1] - ma20.iloc[-1], ma20.iloc[-1]) * 100
+        # RS 先行信号：RS线创21日新高，但价格还没突破
+        rs_stealth = bool(rs_line.iloc[-1] >= rs_line.tail(21).max() and close.iloc[-1] < close.tail(21).max())
         
-        # 5. 风险收益比
-        stop_loss = close.iloc[-1] - (1.5 * atr20.iloc[-1])
-        target_price = close.iloc[-1] + (close.iloc[-1] * adr_val * 3)
-        rr_ratio = safe_div(target_price - close.iloc[-1], close.iloc[-1] - stop_loss)
+        # 3. 紧致度 (Tightness / VCP)
+        tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
         
-        # 综合评分
-        score = (rs_score * 2.0) + (ud_ratio * 1.5) + (1.0 if is_squeezing else 0)
+        # 4. 成交量枯竭 (Volume Dry-up)
+        v_dry = bool(vol.iloc[-1] < vol.tail(10).mean() * 0.85)
+        
+        # 5. 老龙回头逻辑 (Leader Pullback)
+        # 条件：1年内RS极强(这里简化为rs_line斜率)，回踩50MA或150MA附近，且量缩
+        dist_to_50ma = safe_div(abs(close.iloc[-1] - ma50.iloc[-1]), ma50.iloc[-1])
+        is_pullback = bool(dist_to_50ma < 0.03 and v_dry and is_stage_2)
+        
+        # 6. U/D Ratio (积累/派发)
+        up_v = vol[close > close.shift(1)].tail(50).sum()
+        dn_v = vol[close < close.shift(1)].tail(50).sum()
+        ud_ratio = safe_div(up_v, dn_v)
+        
+        # 7. 综合决策
+        action = "未知"
+        if rs_stealth and tightness < 1.2: action = "👁️暗盘先行(GOOGL)"
+        elif is_pullback: action = "🐉老龙回头(回踩)"
+        elif close.iloc[-1] >= close.tail(50).max() and ud_ratio > 1.2: action = "🚀垂直爆破"
+        
+        # 盈亏比计算
+        atr = (high - low).rolling(14).mean().iloc[-1]
+        stop_loss = close.iloc[-1] - (1.5 * atr)
+        target = close.iloc[-1] + (3.0 * atr)
+        
+        score = (ud_ratio * 2.0) + (1.5 if rs_stealth else 0) + (1.2 if is_pullback else 0)
         
         return {
-            "Score": score, "ud_ratio": ud_ratio, "rr": rr_ratio, "is_squeeze": "🔥挤压" if is_squeezing else "释放",
-            "in_stage_2": in_stage_2, "ext": ext_pct, "adr": adr_val * 100, "stop": stop_loss, "target": target_price
+            "Score": score, "Action": action, "UD": ud_ratio, "Tight": tightness,
+            "RS_NH": rs_stealth, "In_Stage2": is_stage_2, "Stop": stop_loss, "Target": target
         }
     except: return None
 
 # ==========================================
 # 4. 自动化引擎
 # ==========================================
-def run_v11_nexus():
-    print(f"📡 [1/4] V11.0 涅槃系统启动：正在同步全市场宽度...")
+def run_v12_oracle_system():
+    print(f"📡 [1/4] V12 天眼系统：正在同步全球领袖名册...")
     
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         ticker_sector_map = dict(zip(sp_df['Symbol'].str.replace('.', '-'), sp_df['GICS Sector']))
-        tickers = list(ticker_sector_map.keys()) + ["NVDA", "GOOGL", "CF", "PR", "TSLA"]
+        tickers = list(ticker_sector_map.keys()) + ["NVDA", "GOOGL", "CF", "PR", "NTR", "PLTR"]
     except:
-        print("⚠️ 爬虫受限，启用备用核心池..."); tickers = ["AAPL","MSFT","NVDA","GOOGL","AMZN","TSLA","META","AVGO","LLY","COST"]
-        ticker_sector_map = {t: "Core" for t in tickers}
+        tickers = ["AAPL","MSFT","NVDA","GOOGL","AMZN","TSLA","META","AVGO","CF","PR"]
+        ticker_sector_map = {t: "Leaders" for t in tickers}
 
-    # 批量下载 (252天数据以计算200MA)
     data = yf.download(list(set(tickers + ["SPY"])), period="2y", group_by='ticker', threads=True, progress=False)
     spy_df = data["SPY"]["Close"].dropna()
     vix = float(yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1])
 
-    # 精准宽度计算 (采样 250 只)
+    # 宽度计算 (250只采样)
     above_50ma, valid_count = 0, 0
     for t in tickers[:250]:
         if t in data.columns.levels[0]:
@@ -116,7 +119,7 @@ def run_v11_nexus():
             valid_count += 1
     breadth = (above_50ma / valid_count) * 100 if valid_count > 0 else 50
 
-    print(f"🚀 [2/4] 执行行业配额演算 (宽度: {breadth:.1f}%)...")
+    print(f"🚀 [2/4] 执行‘奇点’感知演算 (宽度: {breadth:.1f}%)...")
     candidates = []
     for t in tickers:
         try:
@@ -124,47 +127,41 @@ def run_v11_nexus():
             df = data[t].dropna()
             if len(df) < 200: continue
             
-            v11 = calculate_v11_nexus_metrics(df, spy_df)
-            if not v11: continue
-            
-            # --- V11 强力过滤器 ---
-            if not v11['in_stage_2']: continue      # 必须在上升第二阶段
-            if v11['ud_ratio'] < 1.05: continue     # 必须有明显的机构吸筹量
-            if v11['ext'] > (5.0 + v11['adr']*0.5): continue # 动态乖离限制
-            if v11['rr'] < 1.8: continue            # 盈亏比门槛
+            v12 = calculate_v12_oracle_metrics(df, spy_df)
+            if not v12 or v12['Action'] == "未知": continue
+            if not v12['In_Stage2']: continue
             
             candidates.append({
-                "Ticker": t, "Sector": ticker_sector_map.get(t, "Other"), "Score": v11['Score'],
-                "Price": float(df['Close'].iloc[-1]), "R:R": v11['rr'], "U/D": v11['ud_ratio'],
-                "状态": v11['is_squeeze'], "止损位": v11['stop'], "目标位": v11['target'], "ADR": v11['adr']
+                "Ticker": t, "Action": v12['Action'], "Score": v12['Score'],
+                "Sector": ticker_sector_map.get(t, "Other"), "Price": float(df['Close'].iloc[-1]),
+                "U/D比": v12['UD'], "紧致度": v12['Tight'], "止损位": v12['Stop'], "目标位": v12['Target']
             })
         except: continue
 
-    # --- 核心改进：行业分散化处理 ---
     if not candidates:
         final_output([], vix, breadth); return
 
-    # 先按分数排，然后每个行业最多取 2 个
-    nexus_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
-    final_seeds = nexus_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(8)
+    # 排序与行业去重 (每个行业最多2个)
+    oracle_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
+    final_seeds = oracle_df.groupby("Sector").head(2).head(8)
 
-    print(f"🔥 [3/4] 涅槃审计：期权与财报联防...")
+    print(f"🔥 [3/4] 哨兵审计：正在接入 Polygon 期权暗盘...")
     results = []
     for _, row in final_seeds.iterrows():
+        opt_score, opt_size = get_sentiment(row['Ticker'])
         try:
             t_obj = yf.Ticker(row['Ticker'])
             cal = t_obj.calendar
-            days = (cal.iloc[0, 0].date() - datetime.date.today()).days if (cal is not None and not cal.empty) else 99
-        except: days = 99
-        
-        opt_score, opt_size = get_sentiment(row['Ticker'])
+            eb_str = "⚠️临近" if (cal is not None and not cal.empty and (cal.iloc[0, 0].date() - datetime.date.today()).days <= 7) else "安全"
+        except: eb_str = "未知"
+
         row_dict = row.to_dict()
         row_dict.update({
-            '财报': f"{days}d" if days < 15 else "安全", '期权看涨%': opt_score, '大单规模': opt_size,
-            '评级': "💎SSS" if (opt_score > 60 and breadth > 60 and row['状态'] == "🔥挤压") else "🔥强势"
+            '财报': eb_str, '期权看涨%': opt_score, '大单规模': opt_size,
+            '评级': "💎SSS+" if (opt_score > 65 and breadth > 60 and "👁️" in row['Action']) else "🔥强势"
         })
         results.append(row_dict)
-        time.sleep(12) # Polygon 限速
+        time.sleep(12) # 遵守 Polygon 频率限制
 
     final_output(results, vix, breadth)
 
@@ -191,25 +188,25 @@ def final_output(res, vix, breadth):
         weather = "☀️ 极佳" if (breadth > 60 and vix < 21) else "⛈️ 严寒" if (breadth < 40 or vix > 28) else "☁️ 阴天"
         
         header = [
-            [robust_json_clean("🏰 [V11.0 涅槃系统 - 行业均衡版]"), "", robust_json_clean("Update:"), robust_json_clean(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))],
+            [robust_json_clean("🏰 [V12 天眼系统 - 奇点感知版]"), "", robust_json_clean("Update:"), robust_json_clean(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))],
             [robust_json_clean("市场天气:"), robust_json_clean(weather), robust_json_clean("市场宽度:"), f"{robust_json_clean(breadth)}%"],
-            [robust_json_clean("风险控制:"), robust_json_clean("单一行业配额上限: 2 只"), robust_json_clean("VIX指数:"), robust_json_clean(vix)],
+            [robust_json_clean("策略核心:"), robust_json_clean("👁️暗盘先行(GOOGL型) / 🐉老龙回头(强势回踩)"), robust_json_clean("VIX指数:"), robust_json_clean(vix)],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
-            cols = ["Ticker", "评级", "状态", "Price", "止损位", "目标位", "R:R", "U/D", "ADR", "财报", "期权看涨%", "大单规模", "Sector"]
+            cols = ["Ticker", "评级", "Action", "Price", "止损位", "目标位", "U/D比", "紧致度", "期权看涨%", "大单规模", "财报", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             raw_data = [df.columns.tolist()] + df.values.tolist()
             clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
             sh.update(values=clean_matrix, range_name="A5")
         else:
-            sh.update_acell("A5", "📭 今日无符合 Nexus 涅槃准则的信号。")
+            sh.update_acell("A5", "📭 今日无奇点信号或老龙回踩标的。")
             
-        print(f"🎉 V11.0 涅槃任务圆满完成。天气：{weather}")
-    except Exception as e: print(f"❌ 写入崩溃: {e}")
+        print(f"🎉 V12 任务圆满完成。天气：{weather}")
+    except Exception as e: print(f"❌ 写入失败: {e}")
 
 if __name__ == "__main__":
-    run_v11_nexus()
+    run_v12_oracle_system()
