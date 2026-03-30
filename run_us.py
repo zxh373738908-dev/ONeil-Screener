@@ -9,13 +9,6 @@ import time
 import math
 from polygon import RESTClient
 
-# 禁用 yfinance 的本地数据库缓存，防止 OperationalError: database is locked
-import yfinance.utils as yf_utils
-try:
-    yf.set_tz_cache_location(None)
-except:
-    pass
-
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -27,67 +20,65 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 
 # ==========================================
-# 🛡️ 核心：绝对零度清洗 (彻底根治 JSON 兼容问题)
+# 🛡️ 核心工具：数据脱壳净化 (解决 JSON 报错)
 # ==========================================
-def absolute_zero_clean(val):
+def robust_json_clean(val):
     """
-    终极清洗：强制切断所有与 Numpy/Pandas 的联系
+    终极净化：确保所有数据类型均为 Python 原生，且无 NaN/Inf
     """
     try:
-        # 如果是 Numpy 的数字类型
-        if isinstance(val, (np.floating, np.integer)):
-            val = val.item() # 转换为 Python 原生数字
-        
-        if isinstance(val, float):
-            if math.isnan(val) or math.isinf(val):
+        # 处理 Numpy 数值对象
+        if hasattr(val, 'item'):
+            val = val.item()
+            
+        if isinstance(val, (float, int)):
+            if not math.isfinite(val):
                 return 0.0
-            return float(round(val, 3))
-        
-        if isinstance(val, int):
-            return int(val)
+            return float(round(val, 3)) if isinstance(val, float) else int(val)
         
         if val is None:
             return ""
-            
+        
         return str(val)
     except:
         return str(val)
 
 def safe_div(n, d):
     try:
-        n_val = float(n)
-        d_val = float(d)
-        if d_val == 0 or not math.isfinite(d_val) or not math.isfinite(n_val):
+        n_f, d_f = float(n), float(d)
+        if d_f == 0 or not math.isfinite(d_f) or not math.isfinite(n_f):
             return 0.0
-        return n_val / d_val
+        return n_f / d_f
     except:
         return 0.0
 
 # ==========================================
-# 2. V55 核心演算逻辑
+# 2. V60 核心算法库 (感知 GOOGL/CF/PR)
 # ==========================================
-def calculate_v55_metrics(df, spy_df):
+def calculate_v60_metrics(df, spy_df):
     try:
         close = df['Close']
         vol = df['Volume']
         
-        # 1. 垂直加速度 (感知 CF/PR 的点火)
+        # 1. 垂直加速度 (感知 CF/PR 的点火瞬间)
         rs_line = (close / spy_df['Close']).fillna(method='ffill')
+        # RS线创20日新高判定 (暗盘先行信号)
         rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(20).max())
         
+        # 二阶导：加速度
         slope_now = safe_div(rs_line.iloc[-1] - rs_line.iloc[-6], rs_line.iloc[-6])
         slope_prev = safe_div(rs_line.iloc[-7] - rs_line.iloc[-12], rs_line.iloc[-12])
         acceleration = slope_now - slope_prev
         
-        # 2. 紧致度 (感知 GOOGL 的蓄势)
+        # 2. 紧致度 (感知 GOOGL 起爆前的收缩)
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean())
         
-        # 3. U/D 量能比
+        # 3. 量能 U/D 比
         up_v = vol[df['Close'] > df['Open']].tail(40).sum()
         dn_v = vol[df['Close'] < df['Open']].tail(40).sum()
         ud_ratio = safe_div(up_v, dn_v)
         
-        # 4. ATR 动态止盈
+        # 4. ATR 动态移动止盈
         tr = pd.concat([(df['High']-df['Low']), (df['High']-close.shift(1)).abs(), (df['Low']-close.shift(1)).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         atr_val = float(atr) if math.isfinite(atr) else float(close.iloc[-1] * 0.03)
@@ -97,10 +88,8 @@ def calculate_v55_metrics(df, spy_df):
         counts, bin_edges = np.histogram(close.tail(120).values, bins=50, weights=vol.tail(120).values)
         poc = (bin_edges[np.argmax(counts)] + bin_edges[np.argmax(counts)+1]) / 2
         
-        # 6. 综合评分
-        stock_ret = safe_div(close.iloc[-1], close.iloc[-63])
-        spy_ret = safe_div(spy_df['Close'].iloc[-1], spy_df['Close'].iloc[-63])
-        rs_raw = safe_div(stock_ret, spy_ret)
+        # 6. 综合评分 (奇点得分)
+        rs_raw = safe_div(close.iloc[-1]/close.iloc[-63], spy_df['Close'].iloc[-1]/spy_df['Close'].iloc[-63])
         score = rs_raw * ud_ratio * safe_div(1, (tightness * 100))
         
         return {
@@ -113,29 +102,32 @@ def calculate_v55_metrics(df, spy_df):
         return None
 
 # ==========================================
-# 3. 执行引擎
+# 3. 选股扫描引擎
 # ==========================================
-def run_v55_citadel():
-    print("📡 [1/3] 天基指挥部启动：正在执行全球同步扫描...")
+def run_v60_citadel():
+    print("📡 [1/3] 天基指挥部：正在同步核心指数与宏观因子...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
+    # 强制下载关键指数 (不使用多线程，防止锁定)
+    idx_data = yf.download(["SPY", "^VIX", "DX-Y.NYB"], period="10d", threads=False, progress=False)['Close']
+    if "SPY" not in idx_data.columns or idx_data["SPY"].dropna().empty:
+        print("❌ 核心数据 SPY 缺失，系统熔断。")
+        return
+    
+    spy_latest = idx_data["SPY"].dropna()
+    vix_val = float(idx_data["^VIX"].iloc[-1]) if "^VIX" in idx_data.columns else 20.0
+    
+    # 获取全名册
     try:
         sp_tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)
         raw_list = sp_tables[0]['Symbol'].tolist()
         tickers = list(set([t.replace('.', '-') for t in raw_list] + ["PR", "CF", "NTR", "NVDA", "GOOGL"]))
-    except Exception as e:
-        print(f"❌ 无法获取名册: {e}")
+    except:
+        print("❌ 无法获取 Ticker 名册。")
         return
 
-    # 关键：SPY 和宏观数据禁用多线程，确保下载成功
-    env = yf.download(["DX-Y.NYB", "^VIX", "SPY"], period="5d", progress=False, threads=False)['Close']
-    if "SPY" not in env.columns or env["SPY"].isnull().all():
-        print("❌ SPY 数据下载失败，无法计算相对强度，系统熔断。")
-        return
-        
-    vix = float(env["^VIX"].iloc[-1]) if "^VIX" in env.columns and not env["^VIX"].isnull().all() else 20.0
-    
-    # 大批量个股下载
+    # 批量下载个股
+    print(f"🚀 [2/3] 执行‘奇点感知’演算 (共 {len(tickers)} 只)...")
     data = yf.download(tickers + ["SPY"], period="2y", group_by='ticker', threads=True, progress=False)
     spy_df = data["SPY"].dropna()
 
@@ -143,8 +135,6 @@ def run_v55_citadel():
     ma50_up_count = 0
     total_valid = 0
 
-    print(f"🚀 [2/3] 执行‘天基感知’演算 (共 {len(tickers)} 只)...")
-    
     for t in tickers:
         try:
             if t not in data.columns.levels[0]: continue
@@ -153,41 +143,47 @@ def run_v55_citadel():
             
             total_valid += 1
             close = float(df['Close'].iloc[-1])
-            ma50_val = float(df['Close'].tail(50).mean())
-            if close > ma50_val: ma50_up_count += 1
+            ma50_v = float(df['Close'].tail(50).mean())
+            if close > ma50_v: ma50_up_count += 1
+            
+            # 二阶段趋势过滤
             if close < float(df['Close'].tail(200).mean()): continue 
             
-            v55 = calculate_v55_metrics(df, spy_df)
-            if not v55: continue
+            v60 = calculate_v60_metrics(df, spy_df)
+            if not v60: continue
             
-            # 感知判定
-            is_explosion = (v55['dist_high'] >= -0.05) and (v55['acceleration'] > 0)
-            is_stealth = v55['rs_nh'] and (v55['tightness'] < 1.0)
-            is_dip = (0 <= (close - v55['poc'])/v55['poc'] <= 0.06) and (v55['rs_raw'] > 1.1)
+            # --- 提早感知逻辑 ---
+            # 模式 A: 垂直爆破 (捕捉 CF/PR)
+            is_explosion = (v60['dist_high'] >= -0.05) and (v60['acceleration'] > 0)
+            # 模式 B: 暗盘先行 (捕捉 GOOGL)
+            is_stealth = v60['rs_nh'] and (v60['tightness'] < 1.0)
+            # 模式 C: 经典回踩
+            is_dip = (0 <= (close - v60['poc'])/v60['poc'] <= 0.06) and (v60['rs_raw'] > 1.1)
             
             if is_explosion or is_stealth or is_dip:
                 action = "🚀垂直爆破" if is_explosion else "👁️暗盘先行" if is_stealth else "🐉支撑回踩"
                 pre_candidates.append({
-                    "Ticker": t, "Action": action, "总分": v55['score'], 
-                    "RS线": "🌟先行" if v55['rs_nh'] else "-", "加速": "仰攻📈" if v55['acceleration'] > 0 else "平稳",
-                    "移动止盈": v55['trailing_stop'], "POC支撑": v55['poc'], "Price": close, "紧致度": v55['tightness']
+                    "Ticker": t, "Action": action, "总分": v60['score'], 
+                    "RS线": "🌟先行" if v60['rs_nh'] else "-", "加速": "仰攻📈" if v60['acceleration'] > 0 else "平稳",
+                    "移动止盈": v60['trailing_stop'], "POC支撑": v60['poc'], "Price": close, "紧致度": v60['tightness']
                 })
         except: continue
 
+    # 天气系统
     breadth = ma50_up_count / total_valid if total_valid > 0 else 0
-    weather = "☀️ 极佳" if (breadth > 0.6 and vix < 22) else "⛈️ 风险" if (breadth < 0.4 or vix > 28) else "☁️ 震荡"
+    weather = "☀️ 极佳" if (breadth > 0.6 and vix_val < 22) else "⛈️ 风险" if (breadth < 0.4 or vix_val > 28) else "☁️ 震荡"
 
+    # 排序前 5
     seeds = sorted(pre_candidates, key=lambda x: x['总分'], reverse=True)[:5]
 
-    print(f"🔥 [3/3] 期权哨兵核验中...")
+    print(f"🔥 [3/3] 期权哨兵终审中...")
     results = []
     for item in seeds:
-        opt_score, opt_desc = get_sentiment_v55(item['Ticker'])
+        opt_score, opt_desc = get_sentiment(item['Ticker'])
         try:
             t_obj = yf.Ticker(item['Ticker'])
             cal = t_obj.calendar
-            days_to_e = (cal.iloc[0, 0].date() - datetime.date.today()).days if cal is not None and not cal.empty else 99
-            eb_str = "⚠️临近" if 0 <= days_to_e <= 7 else "安全"
+            eb_str = "⚠️临近" if (cal is not None and not cal.empty and (cal.iloc[0, 0].date() - datetime.date.today()).days <= 7) else "安全"
         except: eb_str = "未知"
         
         item.update({
@@ -197,9 +193,9 @@ def run_v55_citadel():
         results.append(item)
         time.sleep(13)
 
-    final_output(results, weather, breadth, vix)
+    final_output(results, weather, breadth, vix_val)
 
-def get_sentiment_v55(ticker):
+def get_sentiment(ticker):
     try:
         snaps = client_poly.get_snapshot_options_chain(ticker)
         bull, total = 0, 0
@@ -219,30 +215,29 @@ def final_output(res, weather, breadth, vix):
         sh.clear()
         
         header = [
-            ["🏰 [V55 天基指挥部 - 绝对零度版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
+            ["🏰 [V60 天基指挥部 - 不坏金身版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
             ["环境天气:", weather, "大盘宽度:", f"{round(breadth*100, 1)}%", "VIX:", round(vix, 2)],
-            ["战术逻辑:", "【👁️暗盘先行】感知权重股调仓，【🚀垂直爆破】感知CF/PR起爆。"],
+            ["操作指令:", "关注【👁️暗盘先行】感知GOOGL调仓，关注【🚀垂直爆破】感知CF/PR起爆。"],
             ["", "", "", ""]
         ]
+        sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
             cols = ["Ticker", "评级", "Action", "RS线", "加速", "移动止盈", "POC支撑", "财报", "Price", "期权看涨%", "期权规模", "紧致度"]
             df = df[cols]
             
-            # --- 绝对零度环节：强制类型脱壳 ---
-            raw_matrix = [df.columns.tolist()] + df.values.tolist()
-            final_clean_matrix = [[absolute_zero_clean(cell) for cell in row] for row in raw_matrix]
+            # --- 终极环节：脱离 Numpy 依赖的列表解析 ---
+            raw_data = [df.columns.tolist()] + df.values.tolist()
+            final_clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
             
-            sh.update(values=header, range_name="A1")
             sh.update(values=final_clean_matrix, range_name="A5")
         else:
-            sh.update(values=header, range_name="A1")
-            sh.update_acell("A5", "今日无符合天基信号的目标。")
+            sh.update_acell("A5", "今日无符合天基信号。")
             
-        print("🎉 V55 任务圆满完成！数据已强制净化。")
+        print(f"🎉 V60 指令已下达！大盘状态：{weather}")
     except Exception as e:
-        print(f"❌ 写入失败: {e}")
+        print(f"❌ 最终写入失败: {e}")
 
 if __name__ == "__main__":
-    run_v55_citadel()
+    run_v60_citadel()
