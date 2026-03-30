@@ -27,17 +27,28 @@ SECTOR_ETF = {
 }
 
 # ==========================================
-# 2. 核心脱壳工具
+# 2. 核心脱壳工具 (防御增强版)
 # ==========================================
 def robust_json_clean(val):
+    """确保任何数据进入 JSON/Google Sheets 前都是安全的标量类型"""
     try:
-        if val is None or (isinstance(val, float) and math.isnan(val)) or pd.isna(val): return ""
-        if hasattr(val, 'item'): val = val.item()
+        # 如果是 Pandas Series 或 Numpy Array，取其第一个元素
+        if isinstance(val, (pd.Series, np.ndarray)):
+            val = val.item() if val.size == 1 else str(val.tolist())
+            
+        if val is None: return ""
+        
+        # 检查是否为 NaN 或 Inf
         if isinstance(val, (float, int, np.floating, np.integer)):
             if not math.isfinite(val): return 0.0
             return float(round(val, 3)) if isinstance(val, float) else int(val)
+        
+        # 处理 pandas 的空值对象
+        if pd.isna(val): return ""
+        
         return str(val)
-    except: return ""
+    except:
+        return str(val)
 
 def safe_div(n, d):
     try:
@@ -46,14 +57,15 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 3. V91 哨兵算法引擎
+# 3. V92 哨兵演算引擎
 # ==========================================
-def calculate_v91_metrics(df, spy_df, sector_df):
+def calculate_v92_metrics(df, spy_df, sector_df):
     try:
+        # 确保全部为 Series 格式
         close = df['Close']
         high, low, vol = df['High'], df['Low'], df['Volume']
         
-        # 1. 波动率挤压识别
+        # 1. 波动率挤压
         ma20 = close.rolling(20).mean()
         std20 = close.rolling(20).std()
         upper_bb = ma20 + (2 * std20)
@@ -64,58 +76,56 @@ def calculate_v91_metrics(df, spy_df, sector_df):
         upper_kc = ma20 + (1.5 * atr20)
         lower_kc = ma20 - (1.5 * atr20)
         
-        is_squeezing = upper_bb.iloc[-1] < upper_kc.iloc[-1] and lower_bb.iloc[-1] > lower_kc.iloc[-1]
+        is_squeezing = bool(upper_bb.iloc[-1] < upper_kc.iloc[-1] and lower_bb.iloc[-1] > lower_kc.iloc[-1])
         
         # 2. 强度校验
         rs_spy = (close / spy_df).fillna(method='ffill')
-        rs_nh = rs_spy.iloc[-1] >= rs_spy.tail(30).max()
-        rvol = safe_div(vol.iloc[-1], vol.tail(20).mean())
+        rs_nh = bool(rs_spy.iloc[-1] >= rs_spy.tail(30).max())
+        rvol = float(safe_div(vol.iloc[-1], vol.tail(20).mean()))
         
         # 3. 盈亏比与目标
-        current_price = close.iloc[-1]
-        adr_val = ( (high - low) / low ).tail(20).mean()
-        stop_loss = current_price - (1.5 * atr20.iloc[-1])
-        target_price = current_price + (current_price * adr_val * 2.5)
+        current_price = float(close.iloc[-1])
+        adr_val = float(( (high - low) / low ).tail(20).mean())
+        stop_loss = float(current_price - (1.5 * atr20.iloc[-1]))
+        target_price = float(current_price + (current_price * adr_val * 2.5))
         
         risk = current_price - stop_loss
         reward = target_price - current_price
-        rr_ratio = safe_div(reward, risk)
+        rr_ratio = float(safe_div(reward, risk))
         
         # 4. 最终评分
-        score = (2.0 if rs_nh else 1.0) + (1.5 if is_squeezing else 0) + (rvol * 0.5)
+        score = float((2.0 if rs_nh else 1.0) + (1.5 if is_squeezing else 0) + (rvol * 0.5))
         
         return {
             "Score": score, "rr_ratio": rr_ratio, "is_squeeze": "🔥挤压中" if is_squeezing else "释放",
             "rvol": rvol, "stop": stop_loss, "target": target_price, "adr": adr_val * 100,
-            "rs_nh": rs_nh, "extension": safe_div(current_price - ma20.iloc[-1], ma20.iloc[-1]) * 100
+            "rs_nh": rs_nh, "extension": float(safe_div(current_price - ma20.iloc[-1], ma20.iloc[-1]) * 100)
         }
     except: return None
 
 # ==========================================
 # 4. 自动化主流程
 # ==========================================
-def run_v91_sentinel():
-    print(f"📡 [1/4] V9.1 哨兵启动：正在同步全市场数据...")
+def run_v92_sentinel():
+    print(f"📡 [1/4] V9.2 哨兵启动：同步市场数据...")
     
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
         sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
         ticker_sector_map = dict(zip(sp_df['Symbol'].str.replace('.', '-'), sp_df['GICS Sector']))
         tickers = list(ticker_sector_map.keys()) + ["NVDA", "GOOGL", "CF", "PR", "TSLA", "MSFT"]
-    except Exception as e:
-        print(f"❌ 无法加载标的名册: {e}"); return
+    except:
+        print("❌ 板块名册加载失败"); return
 
     all_symbols = list(set(tickers + ["SPY"] + list(SECTOR_ETF.values())))
     data = yf.download(all_symbols, period="1y", group_by='ticker', threads=True, progress=False)
     
-    if data.empty:
-        print("❌ 未下载到任何行情数据"); return
-
     spy_df = data["SPY"]["Close"].dropna()
-    vix_data = yf.download("^VIX", period="5d", progress=False)['Close']
-    vix = vix_data.iloc[-1] if not vix_data.empty else 20.0
+    vix_raw = yf.download("^VIX", period="5d", progress=False)['Close']
+    # 核心修复：强制转为 float 标量
+    vix = float(vix_raw.iloc[-1]) if not vix_raw.empty else 20.0
 
-    print(f"🚀 [2/4] 执行阿尔法演算 (严苛模式)...")
+    print(f"🚀 [2/4] 阿尔法演算 (严苛模式)...")
     pre_candidates = []
     
     for t in tickers:
@@ -127,16 +137,14 @@ def run_v91_sentinel():
             sector_name = ticker_sector_map.get(t, "Other")
             sector_df = data[SECTOR_ETF.get(sector_name, "SPY")]["Close"].dropna()
             
-            v91 = calculate_v91_metrics(df, spy_df, sector_df)
-            if not v91: continue
+            v92 = calculate_v92_metrics(df, spy_df, sector_df)
+            if not v92: continue
             
-            # --- V9.1 严苛过滤逻辑 ---
-            if v91['rr_ratio'] < 1.6: continue      # 盈亏比稍微放宽至 1.6 增加信号量
-            if v91['extension'] > 7.5: continue     # 乖离放宽至 7.5
-            if v91['rvol'] < 1.05: continue         # 量能异动
-            if not v91['rs_nh']: continue           # 必须相对强度新高
+            # --- 过滤器 ---
+            if v92['rr_ratio'] < 1.5: continue 
+            if v92['extension'] > 8.0: continue
+            if not v92['rs_nh']: continue
             
-            # 财报检查
             try:
                 t_obj = yf.Ticker(t)
                 cal = t_obj.calendar
@@ -145,30 +153,31 @@ def run_v91_sentinel():
             if 0 <= days_to_earn <= 3: continue 
 
             pre_candidates.append({
-                "Ticker": t, "Sector": sector_name, "Score": v91['Score'],
-                "Price": float(df['Close'].iloc[-1]), "R:R": v91['rr_ratio'],
-                "状态": v91['is_squeeze'], "止损位": v91['stop'], "目标位": v91['target'],
-                "RVOL": v91['rvol'], "ADR": v91['adr'], "财报": days_to_earn
+                "Ticker": t, "Sector": sector_name, "Score": v92['Score'],
+                "Price": float(df['Close'].iloc[-1]), "R:R": v92['rr_ratio'],
+                "状态": v92['is_squeeze'], "止损位": v92['stop'], "目标位": v92['target'],
+                "RVOL": v92['rvol'], "ADR": v92['adr'], "财报": days_to_earn
             })
         except: continue
 
-    # --- 关键修复：检查是否有结果 ---
     if not pre_candidates:
-        print("📭 今日市场无符合‘哨兵阿尔法’条件的标的。")
+        print("📭 今日无符合条件信号。")
         final_output([], vix)
         return
 
     final_seeds = pd.DataFrame(pre_candidates).sort_values(by="Score", ascending=False).head(6)
 
-    print(f"🔥 [3/4] 期权暗盘审计 (Polygon Limit)...")
+    print(f"🔥 [3/4] 审计入选标的 (Polygon)...")
     results = []
     for _, row in final_seeds.iterrows():
-        print(f"  审计 {row['Ticker']}...")
         opt_score, opt_size = get_sentiment(row['Ticker'])
-        row['期权看涨%'] = opt_score
-        row['大单规模'] = opt_size
-        row['评级'] = "💎SSS" if (opt_score > 60 and row['状态'] == "🔥挤压中") else "🔥强势"
-        results.append(row.to_dict())
+        row_dict = row.to_dict()
+        row_dict.update({
+            '期权看涨%': opt_score,
+            '大单规模': opt_size,
+            '评级': "💎SSS" if (opt_score > 60 and row['状态'] == "🔥挤压中") else "🔥强势"
+        })
+        results.append(row_dict)
         time.sleep(12) 
 
     final_output(results, vix)
@@ -193,10 +202,11 @@ def final_output(res, vix):
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         sh.clear()
         
+        # 修复：确保 header 里的每一项都经过净化，不再包含 Series
         header = [
-            ["🏰 [V9.1 哨兵阿尔法 - 健壮修复版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
-            ["VIX指数:", round(vix, 2), "系统环境:", "☀️ 激进" if vix < 21 else "⛈️ 防御"],
-            ["运行状态:", "扫描完成。如果下方无数据，说明今日无符合高胜率条件的标的。"],
+            [robust_json_clean("🏰 [V9.2 哨兵阿尔法 - 稳定版]"), "", robust_json_clean("Update:"), robust_json_clean(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))],
+            [robust_json_clean("VIX指数:"), robust_json_clean(vix), robust_json_clean("市场环境:"), robust_json_clean("☀️ 激进" if vix < 21 else "⛈️ 防御")],
+            [robust_json_clean("交易原则:"), robust_json_clean("R:R < 1.5 舍弃。优先【🔥挤压中】标的。")],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
@@ -205,15 +215,17 @@ def final_output(res, vix):
             df = pd.DataFrame(res)
             cols = ["Ticker", "评级", "状态", "Price", "止损位", "目标位", "R:R", "RVOL", "ADR", "财报", "期权看涨%", "大单规模", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
+            
             raw_data = [df.columns.tolist()] + df.values.tolist()
+            # 深度净化矩阵
             clean_matrix = [[robust_json_clean(cell) for cell in row] for row in raw_data]
             sh.update(values=clean_matrix, range_name="A5")
         else:
-            sh.update_acell("A5", "📭 今日信号：零符合。建议持币观望或检查市场宽度。")
+            sh.update_acell("A5", "📭 今日无符合高胜率条件的信号。")
             
-        print("🎉 V9.1 任务安全结束。")
+        print("🎉 V9.2 运行成功，数据已上传。")
     except Exception as e:
         print(f"❌ 最终写入失败: {e}")
 
 if __name__ == "__main__":
-    run_v91_sentinel()
+    run_v92_sentinel()
