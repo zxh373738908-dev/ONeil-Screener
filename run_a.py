@@ -2,10 +2,11 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread_formatting import *
 import datetime, time, warnings, logging, requests, os, math
 import yfinance as yf
 
-# --- [修复核心] 尝试导入美化插件 ---
+# 尝试导入美化插件
 try:
     from gspread_formatting import *
     HAS_FORMATTING = True
@@ -30,86 +31,88 @@ def init_sheet():
     client = gspread.authorize(creds)
     doc = client.open_by_key(SS_KEY)
     try:
-        # 统一使用 V47 表名
-        return doc.worksheet("A-Share V47-Supreme")
+        return doc.worksheet("A-Share V49-Galaxy")
     except:
-        return doc.add_worksheet(title="A-Share V47-Supreme", rows=1000, cols=20)
+        return doc.add_worksheet(title="A-Share V49-Galaxy", rows=1000, cols=20)
 
 # ==========================================
-# 🧠 2. V47.1 巅峰统领引擎 (针对白马反转优化)
+# 🧠 2. V49.0 统领审计引擎 (RHC + Sector Pulse + Spring)
 # ==========================================
-def calculate_supreme_engine(df, index_series, mkt_cap):
+def calculate_galaxy_engine(df, index_series, mkt_cap):
     try:
         if len(df) < 150: return None
-        # 强制降维防止 Series 歧义
-        c = df['Close'].astype(float)
-        h = df['High'].astype(float)
-        l = df['Low'].astype(float)
-        v = df['Volume'].astype(float)
-        o = df['Open'].astype(float)
+        # 数据净化，防止 ValueError
+        c = df['Close'].astype(float); h = df['High'].astype(float); l = df['Low'].astype(float)
+        v = df['Volume'].astype(float); o = df['Open'].astype(float)
         price = float(c.iloc[-1])
         
-        # --- A. 均线与趋势模板 ---
-        ma20 = c.rolling(20).mean().iloc[-1]
-        ma50 = c.rolling(50).mean().iloc[-1]
-        ma200 = c.rolling(200).mean().iloc[-1]
-        is_stage_2 = price > ma50 > ma200
+        # --- A. 趋势模板与弹簧容错 ---
+        ma50, ma150, ma200 = c.rolling(50).mean(), c.rolling(150).mean(), c.rolling(200).mean()
+        # 标准 Stage 2 或 针对大票的 Spring (回踩 MA50 企稳)
+        is_stage_2 = price > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1]
+        is_bluechip_spring = mkt_cap > 1000e8 and abs(price/ma50.iloc[-1]-1) < 0.03 and price > o.iloc[-1]
         
-        # --- B. 相对强度 (IBD加权模式) ---
-        # 计算 120 日相对大盘强度
-        rs_val = (price / c.iloc[-min(120, len(c))]) / (index_series.iloc[-1] / index_series.iloc[-min(120, len(index_series))])
+        # --- B. 收盘位置强度 (RHC) - A股防骗炮核心 ---
+        rhc = (price - l.iloc[-1]) / (h.iloc[-1] - l.iloc[-1] + 0.001)
         
-        # --- C. 机构吸筹 (OBV) 与 紧致度 ---
-        obv = (np.sign(c.diff()) * v).fillna(0).cumsum()
-        is_obv_up = obv.iloc[-1] > obv.tail(10).mean()
-        tightness = (c.tail(10).std() / c.tail(10).mean()) * 100
+        # --- C. 相对强度与 Stealth (奇点先行) ---
+        rs_line = (c / index_series).fillna(method='ffill')
+        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
+        rs_score = (price / c.iloc[-min(21, len(c))] * 4) + (price / c.iloc[-min(63, len(c))] * 2) # 短期加权
         
-        # --- D. 涨停/脉冲基因 ---
-        has_limit_up = any(c.tail(10).pct_change() > 0.09)
+        is_rs_stealth = rs_nh and (price < c.tail(20).max() * 1.015)
         
-        # --- E. 止损位计算 (ADR动态) ---
+        # --- D. 机构吸筹 (U/D & OBV) ---
+        up_vol = v[c > c.shift(1)].tail(50).sum()
+        dn_vol = v[c < c.shift(1)].tail(50).sum()
+        ud_ratio = up_vol / (dn_vol + 1)
+        obv_up = v.iloc[-1] > v.tail(10).mean() and price > o.iloc[-1] # 今日放量收阳
+        
+        # --- E. ADR 动态止损 ---
         adr = ((h - l) / l).tail(20).mean()
         stop_p = price * (1 - adr * 1.8)
 
         # ==========================================
-        # ⚔️ 指令决策树 (600519 提前选出逻辑)
+        # ⚔️ 决策勋章
         # ==========================================
         action = "观察"
-        # 1. 🐉 黄金支点 (专抓茅台反转)
-        # 逻辑：大市值 + 站稳MA20 + 资金流(OBV)先行
-        if mkt_cap > 1000e8 and price > ma20 and is_obv_up:
-            action = "🐉 黄金支点(白马归来)"
-        # 2. 🚀 龙抬头 (题材强力回踩)
-        elif has_limit_up and tightness < 2.5 and v.iloc[-1] < v.tail(5).mean():
-            action = "🐲 龙回头(V-Dry)"
-        # 3. ✨ 动量突破
-        elif price > ma50 and price >= c.tail(120).max() * 0.98:
-            action = "🚀 动量突破(Breakout)"
+        # 1. 👁️ 奇点先行 (针对 600519 这种大盘股初动)
+        if is_rs_stealth and rhc > 0.6:
+            action = "👁️ 奇点先行(Stealth)"
+        # 2. 🐉 黄金支点 (白马反转)
+        elif is_bluechip_spring and ud_ratio > 1.1:
+            action = "🐉 黄金支点(Pivot)"
+        # 3. 🚀 动量爆发 (主升浪)
+        elif rs_nh and price >= c.tail(120).max() * 0.98 and rhc > 0.8:
+            action = "🚀 动量爆发(Breakout)"
+        # 4. ✨ 极速紧缩 (VCP)
+        elif is_stage_2 and (h.tail(5).max() - l.tail(5).min()) / l.tail(5).min() < 0.04:
+            action = "✨ 极速紧缩(VCP)"
 
         return {
-            "action": action, "rs_raw": rs_val, "tight": round(tightness, 2), 
-            "obv": "✅" if is_obv_up else "❌", "adr": round(adr*100, 2), 
-            "stop": round(stop_p, 2), "limit": "⚡" if has_limit_up else "-"
+            "action": action, "rs_raw": rs_score, "rhc": round(rhc, 2), 
+            "ud": round(ud_ratio, 2), "rs_nh": "🌟" if rs_nh else "-",
+            "stop": round(stop_p, 2), "adr": round(adr*100, 2), "obv_up": obv_up
         }
     except: return None
 
 # ==========================================
-# 🚀 3. 主扫描流程
+# 🚀 3. 主扫描流程 (板块军团集成)
 # ==========================================
-def run_v47_supreme():
+def run_v49_galaxy():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    print(f"[{now_str}] 🚀 A股 V47.1 统领指挥部：正在全域扫描...")
+    print(f"[{now_str}] 🚀 A股 V49.0 银河·统领启动：正在执行军团级审计...")
 
-    # 1. 获取基准 (沪深300)
+    # 1. 基准
     idx_raw = yf.download("000300.SS", period="300d", progress=False)
     idx_close = idx_raw['Close'].iloc[:, 0] if isinstance(idx_raw['Close'], pd.DataFrame) else idx_raw['Close']
     
-    # 2. TV 云端筛选 (市值 > 65 亿)
+    # 2. TV 筛选 (市值 > 65 亿)
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {
         "columns": ["name", "description", "market_cap_basic", "volume", "industry", "close", "change"],
         "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 65e8}],
-        "range": [0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+        "range": [0, 850], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
     }
     try:
         resp = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
@@ -117,78 +120,75 @@ def run_v47_supreme():
             {"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][4], "price": d['d'][5], "chg": d['d'][6]} 
             for d in resp
         ])
-    except: return print("❌ TV 接口响应异常")
+    except: return print("❌ TV 接口故障")
 
-    # 3. 执行演算
+    # 3. 扫描个股
     all_hits = []
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
     chunk_size = 40
     
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i : i + chunk_size]
+        print(f" -> 扫描进度: {i+1} ~ {min(i+chunk_size, len(tickers))}...")
         data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
         
         for t in chunk:
             try:
                 if t not in data.columns.get_level_values(0): continue
                 df_h = data[t].dropna()
-                if df_h.empty: continue
-                
                 c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
-                res = calculate_supreme_engine(df_h, idx_close, row_info['mkt'])
                 
+                res = calculate_galaxy_engine(df_h, idx_close, row_info['mkt'])
                 if not res or res['action'] == "观察": continue
 
                 all_hits.append({
                     "Ticker": c_code, "Name": row_info['name'], "指令": res['action'], 
-                    "RS_Raw": res['rs_raw'], "行业": row_info['industry'], "板块热力": 0,
-                    "OBV支撑": res['obv'], "涨停基因": res['limit'], "紧致度": res['tight'],
-                    "ADR%": res['adr'], "止损价": res['stop'], "现价": row_info['price']
+                    "RS排名": res['rs_raw'], "收盘强度": res['rhc'], "U/D比": res['ud'],
+                    "ADR%": res['adr'], "止损价": res['stop'], "行业": row_info['industry'], 
+                    "现价": row_info['price'], "板块热力": 0
                 })
             except: continue
 
-    if not all_hits: return print("⚠️ 全场无共振信号")
+    if not all_hits: return print("⚠️ 暂无共振标的")
 
-    # 4. 🔥 集群加权逻辑
+    # 4. 🔥 军团共振逻辑 (Galaxy Sector Pulse)
     res_df = pd.DataFrame(all_hits)
     industry_counts = res_df['行业'].value_counts()
     
-    def supreme_boost(row):
+    def galaxy_boost(row):
         count = industry_counts[row['行业']]
         if count >= 3:
             row['指令'] = f"👑 统领 | {row['指令']}"
-            row['RS_Raw'] *= 1.1 # 板块加成
+            row['RS排名'] *= 1.2 # 板块加成
         row['板块热力'] = count
         return row
 
-    res_df = res_df.apply(supreme_boost, axis=1)
+    res_df = res_df.apply(galaxy_boost, axis=1)
     
     # 5. 排序与写入
-    res_df['RS评级'] = res_df['RS_Raw'].rank(pct=True).apply(lambda x: int(x*99))
+    res_df['RS评级'] = res_df['RS排名'].rank(pct=True).apply(lambda x: int(x*99))
     res_df = res_df.sort_values(by="RS评级", ascending=False).head(60)
 
     sh = init_sheet(); sh.clear()
-    cols = ["Ticker", "Name", "指令", "RS评级", "板块热力", "行业", "OBV支撑", "涨停基因", "紧致度", "ADR%", "止损价", "现价"]
-    # 确保列对齐
-    final_data = res_df[cols].fillna("-")
-    sh.update(range_name="A1", values=[cols] + final_data.values.tolist(), value_input_option="USER_ENTERED")
-    sh.update_acell("M1", f"V47.1 Supreme | RESILIENT MODE | {now_str}")
+    cols = ["Ticker", "Name", "指令", "RS评级", "板块热力", "收盘强度", "U/D比", "ADR%", "止损价", "行业", "现价"]
+    sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("L1", f"V49.0 Galaxy-Commander | RHC Filter Active | {now_str}")
 
-    # 6. 视觉美化 (安全调用修复)
+    # 6. 视觉美化
     if HAS_FORMATTING:
         try:
             set_frozen(sh, rows=1)
             fmt_rules = get_conditional_format_rules(sh)
+            # 统领级军团标金
             rule_cmd = ConditionalFormatRule(
                 ranges=[GridRange.from_a1_range('C2:C65', sh)],
                 booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['👑']),
                     format=cellFormat(backgroundColor=color(1, 0.9, 0.6), textFormat=textFormat(bold=True, foregroundColor=color(0.5, 0.2, 0))))
             )
             fmt_rules.append(rule_cmd); fmt_rules.save()
-        except Exception as e:
-            print(f"⚠️ 美化插件应用失败: {e}")
+        except: pass
 
-    print(f"🎉 V47.1 统领任务圆满完成！数据已同步。")
+    print(f"✅ V49.0 银河·统领审计大功告成！")
 
 if __name__ == "__main__":
-    run_v47_supreme()
+    run_v49_galaxy()
