@@ -43,23 +43,30 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V750 阿尔法核心引擎
+# 2. V750 阿尔法核心引擎 (加入流动性护城河)
 # ==========================================
 def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
     try:
         close, high, low, vol = df['Close'], df['High'], df['Low'], df['Volume']
         
+        # 🟢 1. 机构级流动性与价格护城河 (前置拦截，加速运算)
+        current_price = close.iloc[-1]
+        dollar_vol = (vol.tail(5) * close.tail(5)).mean()
+        
+        if current_price < 10.0 or dollar_vol < 10_000_000:
+            return None # 剔除毛票和缺乏流动性的股票
+
         ma20 = close.rolling(20).mean()
         ma50 = close.rolling(50).mean()
         ma150 = close.rolling(150).mean()
         ma200 = close.rolling(200).mean()
         vol_ma20 = vol.rolling(20).mean()
         
-        is_stage_2 = bool(close.iloc[-1] > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
+        is_stage_2 = bool(current_price > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
         
         rs_line = (close / spy_df).fillna(method='ffill')
-        rs_3m = safe_div(close.iloc[-1], close.iloc[-63])
-        rs_score = (rs_3m * 2) + safe_div(close.iloc[-1], close.iloc[-126]) + safe_div(close.iloc[-1], close.iloc[-252])
+        rs_3m = safe_div(current_price, close.iloc[-63])
+        rs_score = (rs_3m * 2) + safe_div(current_price, close.iloc[-126]) + safe_div(current_price, close.iloc[-252])
         rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
         
         up_vol = vol[close > close.shift(1)].tail(50).sum()
@@ -69,39 +76,42 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
         
         daily_range = high.iloc[-1] - low.iloc[-1]
-        close_quality = safe_div(close.iloc[-1] - low.iloc[-1], daily_range)
+        close_quality = safe_div(current_price - low.iloc[-1], daily_range)
         is_good_close = bool(close_quality > 0.55 or daily_range == 0)
 
+        dist_ma50_pct = safe_div(current_price - ma50.iloc[-1], ma50.iloc[-1])
+
+        # 潜龙早鸣：不追高 + 均线确认
         is_early_bird = bool(
             spy_is_healthy and 
             is_good_close and  
-            close.iloc[-1] > ma50.iloc[-1] and 
-            close.iloc[-1] > ma20.iloc[-1] and
+            current_price > ma50.iloc[-1] and 
+            dist_ma50_pct < 0.12 and            
+            ma20.iloc[-1] > ma50.iloc[-1] * 0.98 and 
             vol.iloc[-1] > vol_ma20.iloc[-1] * 1.6 and 
             rs_3m > 1.05 and 
             ud_ratio > 1.15
         )
         
         action = "观察"
-        rs_stealth = bool(rs_nh and close.iloc[-1] < close.tail(20).max() * 1.02)
-        dist_ma50 = safe_div(abs(close.iloc[-1] - ma50.iloc[-1]), ma50.iloc[-1])
+        rs_stealth = bool(rs_nh and current_price < close.tail(20).max() * 1.02)
         v_dry = bool(vol.iloc[-1] < vol.tail(10).mean() * 0.7)
         
-        if is_early_bird and not is_stage_2: action = "🐣 潜龙早鸣(高质量起爆)"
+        if is_early_bird and not is_stage_2: action = "🐣 潜龙早鸣(防追高)"
         elif rs_stealth and tightness < 1.5: action = "👁️ 奇点先行(RS Stealth)"
-        elif is_stage_2 and dist_ma50 < 0.025 and v_dry: action = "🐉 老龙回头(V-Dry)"
-        elif rs_nh and close.iloc[-1] >= close.tail(252).max(): action = "🚀 动量爆发(Breakout)"
+        elif is_stage_2 and abs(dist_ma50_pct) < 0.025 and v_dry: action = "🐉 老龙回头(V-Dry)"
+        elif rs_nh and current_price >= close.tail(252).max(): action = "🚀 动量爆发(Breakout)"
         elif is_stage_2 and rs_nh: action = "💎 双重共振(Leader)"
         
         adr = ((high - low)/low).tail(20).mean() 
-        stop_price = close.iloc[-1] * (1 - adr * 1.8)
-        risk_per_share = close.iloc[-1] - stop_price
+        stop_price = current_price * (1 - adr * 1.8)
+        risk_per_share = current_price - stop_price
         shares = math.floor((ACCOUNT_SIZE * 0.01) / risk_per_share) if risk_per_share > 0 else 0
 
         return {
-            "score": rs_score, "action": action, "tight": tightness, "price": close.iloc[-1],
+            "score": rs_score, "action": action, "tight": tightness, "price": current_price,
             "stop": stop_price, "shares": shares, "ud": ud_ratio, "rs_nh": rs_nh,
-            "adr": adr * 100, "dollar_vol": (vol.tail(5) * close.tail(5)).mean(), 
+            "adr": adr * 100, "dollar_vol": dollar_vol, 
             "is_stage_2": is_stage_2, "is_early_bird": is_early_bird
         }
     except: return None
@@ -113,7 +123,6 @@ def run_v750_apex_sentinel():
     print(f"📡 [1/3] V750 巅峰指挥部：正在探测...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # [防崩优化1] 安全获取宏观数据
     try:
         macro = yf.download(["SPY", "^VIX", "DX-Y.NYB"], period="1y", progress=False)['Close']
         vix_series = macro["^VIX"].dropna()
@@ -142,7 +151,6 @@ def run_v750_apex_sentinel():
         print("❌ 无法获取 SPY 参照数据，程序终止。")
         return
 
-    # [防崩优化2] 安全计算宽度，替代会报错的海象操作符 :=
     valid_ts = [t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else ["SPY"]
     breadth_c = 0
     valid_count = 0
@@ -233,9 +241,9 @@ def final_output(res, vix, breadth, weather):
         bj_time_str = datetime.datetime.now(beijing_tz).strftime('%Y-%m-%d %H:%M')
 
         header = [
-            ["🏰 [V750 哨兵巅峰 - 终极早鸟版]", "", "Update(北京时间):", bj_time_str],
+            ["🏰 [V750 哨兵巅峰 - 机构纯净版]", "", "Update(北京时间):", bj_time_str],
             ["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],
-            ["大师指令:", "新增K线质量过滤与大盘风控。坚决抵制长上影线假突破！"],
+            ["大师指令:", "已开启机构护城河：过滤 $10 以下及日均成交额不足千万美元的弱流动性标的。"],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
@@ -251,7 +259,6 @@ def final_output(res, vix, breadth, weather):
     except Exception as e: 
         print(f"❌ 写入失败: {e}")
 
-# [防崩优化3] 全局抛出真实报错日志，而不是直接 Exit Code 1
 if __name__ == "__main__":
     try:
         run_v750_apex_sentinel()
