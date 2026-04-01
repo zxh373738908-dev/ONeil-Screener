@@ -16,18 +16,27 @@ warnings.filterwarnings('ignore')
 # 1. 配置中心
 # ==========================================
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
-TARGET_GID = 665566258  
+TARGET_SHEET_NAME = "HKv7-Share Screener"  # <--- 指定工作表名称
 CREDS_FILE = "credentials.json"
-ACCOUNT_SIZE = 500000 # 假设 50 万港币总仓位
-MAX_RISK_PER_TRADE = 0.008 # 单笔损失控制在总仓位 0.8%
+ACCOUNT_SIZE = 500000 
+MAX_RISK_PER_TRADE = 0.008 
 
 def init_sheet():
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    creds = Credentials.from_service_account_file(
+        CREDS_FILE, 
+        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    )
     client = gspread.authorize(creds)
     doc = client.open_by_key(SS_KEY)
-    for ws in doc.worksheets():
-        if str(ws.id) == str(TARGET_GID): return ws
-    return doc.get_worksheet(0)
+    
+    try:
+        # 尝试通过名称打开工作表
+        ws = doc.worksheet(TARGET_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        # 如果不存在，则新建一个
+        ws = doc.add_worksheet(title=TARGET_SHEET_NAME, rows="1000", cols="20")
+    
+    return ws
 
 # ==========================================
 # 🧠 2. V750 增强演算引擎
@@ -48,20 +57,19 @@ def calculate_advanced_v750(df, hsi_series):
         ma200 = np.mean(close[-200:])
         is_stage_2 = (cp > ma50 > ma200) and (ma200 > np.mean(close[-220:-200]))
 
-        # 2. RS 加速度 (IBD 模拟)
+        # 2. RS 加速度
         hsi_val = hsi_series.reindex(df.index).ffill().values
         rs_line = close / hsi_val
-        # RS 线不仅看新高，看斜率 (近10日涨幅)
         rs_velocity = (rs_line[-1] - rs_line[-10]) / rs_line[-10] * 100
         rs_nh = rs_line[-1] >= np.max(rs_line[-252:])
 
-        # 3. VCP 紧致度 (极致收缩判断)
+        # 3. VCP 紧致度
         tightness = (np.std(close[-10:]) / np.mean(close[-10:])) * 100
         
-        # 4. 机构能量 (成交额爆发比)
+        # 4. 机构能量
         avg_vol20 = np.mean(vol[-20:])
         vol_surge = vol[-1] / avg_vol20
-        vdu = vol[-1] < avg_vol20 * 0.55 # 成交量枯竭
+        vdu = vol[-1] < avg_vol20 * 0.55 
 
         # 5. 综合战法判定
         action = "观察"
@@ -75,14 +83,13 @@ def calculate_advanced_v750(df, hsi_series):
         elif is_stage_2 and rs_nh and rs_velocity > 0:
             action, prio = "💎 雙重共振(Leader)", 88
 
-        # 6. 多重结构止损 (取 MA50 与 ADR 止损的科学平衡)
+        # 6. 止损平衡
         adr_20 = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
         adr_stop = cp * (1 - adr_20 * 0.01 * 1.6)
-        # 结构止损：跌破 MA50 下方 1%
         struct_stop = ma50 * 0.99
-        final_stop = max(adr_stop, struct_stop) # 哪个近用哪个，保护利润
+        final_stop = max(adr_stop, struct_stop)
 
-        # 7. 建议仓位 (Risk Parity 模型)
+        # 7. 建议仓位
         risk_per_share = cp - final_stop
         suggested_shares = 0
         if risk_per_share > 0:
@@ -98,11 +105,11 @@ def calculate_advanced_v750(df, hsi_series):
     except: return None
 
 # ==========================================
-# 🚀 3. 执行流程 (包含板块配额与量子评分)
+# 🚀 3. 执行流程
 # ==========================================
 def main():
     now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%m-%d %H:%M')
-    print(f"[{now_str}] 🚀 V45-V750 Pro Max 启动...")
+    print(f"[{now_str}] 🚀 正在扫描并输出至 {TARGET_SHEET_NAME}...")
     
     # 1. 抓取基准
     hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
@@ -134,20 +141,28 @@ def main():
                 final_list.append(res)
         except: continue
 
-    if not final_list: return
+    if not final_list: 
+        print("❌ 未发现符合条件的标的。")
+        return
+        
     res_df = pd.DataFrame(final_list)
 
-    # 4. 板块配额与排名：每个板块只展示前 4 强，防止风险集中
+    # 4. 板块配额与排名
     res_df['Final_Score'] = res_df['Score'] + res_df['rs_raw'].rank(pct=True)*20
     top_picks = res_df.sort_values(by="Final_Score", ascending=False).groupby('Sector').head(4)
-    top_picks = top_picks.head(60) # 总榜前60
+    top_picks = top_picks.head(60)
 
     # 5. 写入与可视化
     sh = init_sheet()
-    sh.clear()
+    sh.clear() # 清除内容
+    
+    # 清除旧的条件格式规则，防止堆叠
+    rules = get_conditional_format_rules(sh)
+    rules.clear()
+    rules.save()
     
     weather = "☀️ 激进" if hsi_p > hsi_ma50 else "❄️ 观望"
-    header = [[f"🏰 V45-V750 量子领袖版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8% / 板块配额制"]]
+    header = [[f"🏰 V45-V750 量子领袖版", f"环境: {weather}", f"刷新: {now_str}", f"目标表: {TARGET_SHEET_NAME}"]]
     sh.update(range_name="A1", values=header)
     
     cols = ["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "ADR", "Sector"]
@@ -157,8 +172,9 @@ def main():
     set_frozen(sh, rows=3)
     format_cell_range(sh, 'A3:K3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
     
+    # 重新添加条件格式
     rules = get_conditional_format_rules(sh)
-    # 奇点先行 - 紫色高亮 (机构最爱)
+    # 奇点先行 - 紫色高亮
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('B4:B100', sh)],
         booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['👁️']),
                                 format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True)))))
@@ -167,7 +183,7 @@ def main():
         booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['0']),
                                 format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.5, 0))))))
     rules.save()
-    print(f"✅ 任务完成。成功捕捉 {len(top_picks)} 只量子领袖股。")
+    print(f"✅ 任务完成。成功更新至 '{TARGET_SHEET_NAME}'。")
 
 if __name__ == "__main__":
     main()
