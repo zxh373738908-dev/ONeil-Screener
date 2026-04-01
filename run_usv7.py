@@ -1,89 +1,109 @@
 import yfinance as yf
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
 import datetime
+import requests
+import json
 import time
-import math
+import numpy as np
 
 # ==========================================
-# 1. 核心配置
+# 1. 核心配置 (已绑定你的专属 URL)
 # ==========================================
-SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
-TARGET_SHEET_NAME = "us Screener" 
-CREDS_FILE = "credentials.json"
-CORE_TICKERS = ["NVDA", "TSLA", "PLTR", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD", "CF", "PR", "MSTR", "U", "COIN", "MARA"]
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyVyClySDklAPrx30URWZOGyb423Vb_5Dzt7WCKQ6WJwcNb7HLqwD0ckiMYm5sTwnLz/exec"
+
+# 扫描池：包含你关注的重点标的
+CORE_TICKERS = [
+    "NVDA", "TSLA", "PLTR", "CF", "PR", "GOOGL", "AAPL", "MSFT", "META", 
+    "AMZN", "AMD", "MSTR", "COIN", "MARA", "SMCI", "AVGO", "LLY"
+]
+
+def clean_for_json(val):
+    """确保所有数据都能被 Google 识别，处理 NaN 和 Numpy 类型"""
+    if pd.isna(val) or val is None: return ""
+    if isinstance(val, (np.floating, float)): return float(round(val, 2))
+    if isinstance(val, (np.integer, int)): return int(val)
+    return str(val)
 
 # ==========================================
-# 2. 增强型同步引擎 (解决 Char 1 报错)
+# 2. 闪电执行引擎
 # ==========================================
-def sync_to_sheets_final_solution(matrix):
-    print("📤 准备上传数据...")
-    # 强制在写之前停顿 3 秒，让 Google API 冷却
-    time.sleep(3)
-    
-    try:
-        creds = Credentials.from_service_account_file(
-            CREDS_FILE, 
-            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        )
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_key(SHEET_ID).worksheet(TARGET_SHEET_NAME)
-        
-        # --- 策略调整 ---
-        # 不使用 clear()，因为 clear 会多产生一次 API 请求，容易触发 Char 1
-        # 我们直接用一个巨大的空矩阵“覆盖”旧数据，合并为一个请求
-        padding = [["" for _ in range(10)] for _ in range(30)] # 准备 30 行空数据
-        # 把实际数据放入空矩阵顶部
-        for i, row in enumerate(matrix):
-            for j, val in enumerate(row):
-                padding[i][j] = str(val)
-
-        # 只发送一次 update 请求
-        sh.update('A1:J30', padding)
-        return True
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "char 1" in error_msg:
-            print("⚠️ 仍然触发 Google 防火墙，正在执行强制物理退避...")
-            time.sleep(10) # 遇到 char 1 必须死等
-            # 最后一次尝试，直接写入，不覆盖
-            try:
-                sh.update('A1', matrix)
-                return True
-            except:
-                return False
-        print(f"❌ 错误详情: {e}")
-        return False
-
-# ==========================================
-# 3. 主程序
-# ==========================================
-def run():
+def run_v1000_bridge():
+    print(f"🚀 [V1000] 桥接系统启动...")
     start_time = time.time()
-    print(f"🚀 系统启动...")
 
-    # 快速抓取
+    # 1. 批量获取数据 (约 5-8 秒)
+    print("📥 正在同步市场数据...")
+    try:
+        # 下载 100 天数据以计算均线
+        data = yf.download(CORE_TICKERS, period="100d", group_by='ticker', threads=True, progress=False)
+        spy = yf.download("SPY", period="100d", progress=False)['Close']
+    except Exception as e:
+        print(f"❌ 下载失败: {e}"); return
+
     candidates = []
+    print(f"🔍 正在执行枢纽算法...")
+
     for t in CORE_TICKERS:
         try:
-            df = yf.Ticker(t).history(period="20d")
-            if not df.empty and df['Close'].iloc[-1] > df['Close'].rolling(5).mean().iloc[-1]:
-                candidates.append([t, "✅多头", round(df['Close'].iloc[-1], 2)])
-                if len(candidates) >= 10: break # 只抓前10个，确保速度
+            df = data[t].dropna()
+            if len(df) < 50: continue
+            
+            close = df['Close']
+            curr = close.iloc[-1]
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma50 = close.rolling(50).mean().iloc[-1]
+            
+            # 简单有效的枢纽逻辑：价格在均线上方 + 近期走势强于大盘
+            # 计算 20 日涨幅
+            perf_20d = (curr / close.iloc[-20] - 1) * 100
+            
+            # 信号判定
+            signal = ""
+            if curr > ma20 and curr > ma50:
+                if curr > close.tail(60).max() * 0.98:
+                    signal = "🚀巅峰突破"
+                elif close.tail(10).std() / close.tail(10).mean() < 0.015:
+                    signal = "👁️奇点先行"
+                else:
+                    signal = "✅多头趋势"
+
+            if signal:
+                candidates.append([
+                    t, 
+                    signal, 
+                    clean_for_json(curr), 
+                    f"{clean_for_json(perf_20d)}%",
+                    "强于大盘" if perf_20d > 5 else "跟随"
+                ])
         except: continue
 
-    # 构造矩阵
-    bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%H:%M:%S')
-    header = [["🏰 V1000 最终版", "Time:", bj_now], ["代码", "状态", "价格"]]
-    matrix = header + candidates
+    # 2. 构造发送矩阵
+    bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 表头设计
+    header = [
+        ["🏰 V1000 终极枢纽 (桥接版)", "", "最后更新(北京):", bj_now, ""],
+        ["-"*10, "-"*10, "-"*10, "-"*10, "-"*10],
+        ["代码 (Ticker)", "扫描信号", "现价 (Price)", "20日表现", "相对强度"]
+    ]
+    
+    # 合并数据
+    matrix = header + candidates if candidates else header + [["📭 暂时没有符合信号的股票"]]
 
-    # 写入
-    if sync_to_sheets_final_solution(matrix):
-        print(f"🎉 成功！总耗时: {round(time.time() - start_time, 2)}秒")
-    else:
-        print("❌ 最终尝试失败。建议：1. 检查 API 是否启用；2. 换个网络环境或代理。")
+    # 3. 发送至 Google Apps Script (约 2-3 秒)
+    print(f"📤 正在通过加密隧道传输至 Google Sheets...")
+    try:
+        # 设置超时，防止网络卡死
+        response = requests.post(WEBAPP_URL, data=json.dumps(matrix), timeout=15)
+        
+        if response.text == "Success":
+            print(f"🎉 同步达成！数据已更新至 'us Screener' 标签页。")
+        else:
+            print(f"⚠️ 响应异常: {response.text}")
+    except Exception as e:
+        print(f"❌ 传输失败，请检查网络: {e}")
+
+    print(f"🏁 任务完成。总耗时: {round(time.time() - start_time, 2)} 秒")
 
 if __name__ == "__main__":
-    run()
+    run_v1000_bridge()
