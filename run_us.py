@@ -7,6 +7,7 @@ import datetime
 import warnings
 import time
 import math
+import traceback
 from polygon import RESTClient
 
 warnings.filterwarnings('ignore')
@@ -42,7 +43,7 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V750 阿尔法核心引擎 (加入K线与大盘过滤)
+# 2. V750 阿尔法核心引擎
 # ==========================================
 def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
     try:
@@ -54,31 +55,26 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
         ma200 = close.rolling(200).mean()
         vol_ma20 = vol.rolling(20).mean()
         
-        # 1. Stage 2 经典多头
         is_stage_2 = bool(close.iloc[-1] > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
         
-        # 2. RS 评分
         rs_line = (close / spy_df).fillna(method='ffill')
         rs_3m = safe_div(close.iloc[-1], close.iloc[-63])
         rs_score = (rs_3m * 2) + safe_div(close.iloc[-1], close.iloc[-126]) + safe_div(close.iloc[-1], close.iloc[-252])
         rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
         
-        # 3. U/D 成交量积累比
         up_vol = vol[close > close.shift(1)].tail(50).sum()
         dn_vol = vol[close < close.shift(1)].tail(50).sum()
         ud_ratio = safe_div(up_vol, dn_vol)
 
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
         
-        # 🟢 终极过滤：日内收盘质量 (必须收在日内高点的前 45%)
         daily_range = high.iloc[-1] - low.iloc[-1]
         close_quality = safe_div(close.iloc[-1] - low.iloc[-1], daily_range)
         is_good_close = bool(close_quality > 0.55 or daily_range == 0)
 
-        # 🟢 优化后的潜龙早鸣 (结合大盘风控 + 收盘质量)
         is_early_bird = bool(
-            spy_is_healthy and  # 大盘必须健康
-            is_good_close and   # 拒绝长上影线
+            spy_is_healthy and 
+            is_good_close and  
             close.iloc[-1] > ma50.iloc[-1] and 
             close.iloc[-1] > ma20.iloc[-1] and
             vol.iloc[-1] > vol_ma20.iloc[-1] * 1.6 and 
@@ -86,7 +82,6 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
             ud_ratio > 1.15
         )
         
-        # 4. 决策标签
         action = "观察"
         rs_stealth = bool(rs_nh and close.iloc[-1] < close.tail(20).max() * 1.02)
         dist_ma50 = safe_div(abs(close.iloc[-1] - ma50.iloc[-1]), ma50.iloc[-1])
@@ -98,7 +93,6 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
         elif rs_nh and close.iloc[-1] >= close.tail(252).max(): action = "🚀 动量爆发(Breakout)"
         elif is_stage_2 and rs_nh: action = "💎 双重共振(Leader)"
         
-        # 止损与头寸
         adr = ((high - low)/low).tail(20).mean() 
         stop_price = close.iloc[-1] * (1 - adr * 1.8)
         risk_per_share = close.iloc[-1] - stop_price
@@ -119,12 +113,18 @@ def run_v750_apex_sentinel():
     print(f"📡 [1/3] V750 巅峰指挥部：正在探测...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    macro = yf.download(["SPY", "^VIX", "DX-Y.NYB"], period="1y", progress=False)['Close']
-    vix = float(macro["^VIX"].iloc[-1])
-    
-    # 🟢 大盘健康度判断 (SPY > 50MA)
-    spy_macro = macro["SPY"].dropna()
-    spy_is_healthy = bool(spy_macro.iloc[-1] > spy_macro.tail(50).mean())
+    # [防崩优化1] 安全获取宏观数据
+    try:
+        macro = yf.download(["SPY", "^VIX", "DX-Y.NYB"], period="1y", progress=False)['Close']
+        vix_series = macro["^VIX"].dropna()
+        vix = float(vix_series.iloc[-1]) if len(vix_series) > 0 else 20.0
+        
+        spy_macro = macro["SPY"].dropna()
+        spy_is_healthy = bool(spy_macro.iloc[-1] > spy_macro.tail(50).mean()) if len(spy_macro) > 50 else True
+    except Exception as e:
+        print(f"⚠️ 宏观数据获取失败，使用默认值: {e}")
+        vix = 20.0
+        spy_is_healthy = True
 
     try:
         sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
@@ -135,11 +135,26 @@ def run_v750_apex_sentinel():
         tickers = CORE_LEADERS; ticker_sector_map = {t: "Leaders" for t in tickers}
 
     data = yf.download(list(set(tickers + ["SPY"])), period="2y", group_by='ticker', threads=True, progress=False)
-    spy_df = data["SPY"]["Close"].dropna()
+    
+    try:
+        spy_df = data["SPY"]["Close"].dropna()
+    except:
+        print("❌ 无法获取 SPY 参照数据，程序终止。")
+        return
 
-    valid_ts = [t for t in tickers if t in data.columns.levels[0]]
-    breadth_c = sum(1 for t in valid_ts[:250] if (c := data[t]["Close"].dropna()) is not None and len(c) > 50 and c.iloc[-1] > c.tail(50).mean())
-    breadth = (breadth_c / min(len(valid_ts), 250)) * 100 if len(valid_ts) > 0 else 50
+    # [防崩优化2] 安全计算宽度，替代会报错的海象操作符 :=
+    valid_ts = [t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else ["SPY"]
+    breadth_c = 0
+    valid_count = 0
+    for t in valid_ts[:250]:
+        try:
+            c = data[t]["Close"].dropna()
+            if len(c) > 50:
+                valid_count += 1
+                if float(c.iloc[-1]) > float(c.tail(50).mean()):
+                    breadth_c += 1
+        except: continue
+    breadth = (breadth_c / valid_count * 100) if valid_count > 0 else 50.0
 
     print(f"🚀 [2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
     candidates = []
@@ -233,7 +248,13 @@ def final_output(res, vix, breadth, weather):
         else:
             sh.update_acell("A5", "📭 全域审计完成：当前环境未探测到符合形态的信号。")
         print(f"🎉 V750 巅峰指令下达！(北京时间: {bj_time_str})")
-    except Exception as e: print(f"❌ 写入失败: {e}")
+    except Exception as e: 
+        print(f"❌ 写入失败: {e}")
 
+# [防崩优化3] 全局抛出真实报错日志，而不是直接 Exit Code 1
 if __name__ == "__main__":
-    run_v750_apex_sentinel()
+    try:
+        run_v750_apex_sentinel()
+    except Exception as e:
+        print(f"🚨 程序遭遇致命错误崩溃: {e}")
+        traceback.print_exc()
