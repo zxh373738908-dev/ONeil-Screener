@@ -1,0 +1,31 @@
+name: USv7 Stocks Screener
+
+on:
+  schedule:
+    # 每天 UTC 时间 22:00 运行 (北京时间早上 6:00, 完美避开 A股时间)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: 
+
+jobs:
+  run-us-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create credentials.json
+        run: |
+          echo '${{ secrets.GCP_CREDENTIALS }}' > credentials.json
+
+      - name: Run US Screener
+        run: python run_usv7.py
+      - name: Create credentials.json
+        run: echo '${{ secrets.GCP_SA_JSON }}' > credentials.json
