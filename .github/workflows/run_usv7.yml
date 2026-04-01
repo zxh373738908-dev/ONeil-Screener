@@ -2,7 +2,7 @@ name: USv7 Stocks Screener
 
 on:
   schedule:
-    # 每天 UTC 时间 22:00 运行 (北京时间早上 6:00, 完美避开 A股时间)
+    # 每天 UTC 时间 22:00 运行 (北京时间早上 6:00)
     - cron: '0 22 * * 1-5'
   workflow_dispatch: 
 
@@ -19,13 +19,13 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install yfinance pandas numpy gspread google-auth polygon-api-client lxml
 
       - name: Create credentials.json
+        # 🛡️ 核心修正：只使用一个确定的 Secret。建议在 GitHub Secrets 里统一命名为 GCP_SA_JSON
         run: |
-          echo '${{ secrets.GCP_CREDENTIALS }}' > credentials.json
+          echo '${{ secrets.GCP_SA_JSON }}' > credentials.json
 
       - name: Run US Screener
         run: python run_usv7.py
-      - name: Create credentials.json
-        run: echo '${{ secrets.GCP_SA_JSON }}' > credentials.json
