@@ -37,46 +37,49 @@ SECTOR_MAP = {
 def clean_val(v):
     if v is None: return ""
     try:
-        # 如果是 Series 或 array，取最后一个元素并转为 float
-        if hasattr(v, 'iloc'): v = v.iloc[-1]
-        if hasattr(v, 'item'): v = v.item()
+        if isinstance(v, (pd.Series, np.ndarray)):
+            v = v.iloc[-1] if len(v) > 0 else 0.0
+        if hasattr(v, 'item'): 
+            v = v.item()
         v = float(v)
         return round(v, 2) if math.isfinite(v) else ""
     except:
         return str(v)
 
 # ==========================================
-# 3. V1000 领袖演算法 (修复逻辑)
+# 3. V1000 领袖演算法
 # ==========================================
 def calculate_hk_commander(df, bench_series):
     try:
         if len(df) < 150: return None
         
-        # 提取 Series 并确保是 1D
-        close = df['Close'].fillna(method='ffill')
-        high = df['High'].fillna(method='ffill')
-        low = df['Low'].fillna(method='ffill')
+        # 提取数据并填补缺失值
+        close = df['Close'].ffill()
+        high = df['High'].ffill()
+        low = df['Low'].ffill()
         
         cp = float(close.iloc[-1])
         
-        # A. 趋势状态
+        # A. 趋势状态 (Stage 2)
         ma50 = float(close.rolling(50).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1])
-        is_bull = cp > ma50 and ma50 > ma200
+        is_bull = bool(cp > ma50 and ma50 > ma200)
         
-        # B. VCP 紧致度
+        # B. VCP 紧致度 (10日波动)
         tightness = float((close.tail(10).std() / close.tail(10).mean()) * 100)
         
-        # C. RS 相对强度 (修正对齐逻辑)
-        # 计算个股 60 日表现
+        # C. RS 相对强度 (计算 60 日收益差)
         stock_ret = cp / float(close.iloc[-60])
-        # 计算基准 60 日表现 (确保 bench_series 是单列)
         bench_ret = float(bench_series.iloc[-1]) / float(bench_series.iloc[-60])
         rs_score = float(stock_ret - bench_ret)
         
-        # 判断 RS 是否创 20 日新高 (对比指数)
-        rs_line = close / bench_series.reindex(close.index).ffill()
-        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(20).max())
+        # 判断 RS 是否创 20 日新高
+        # 对齐索引防止日期错位
+        bench_aligned = bench_series.reindex(close.index).ffill()
+        rs_line = close / bench_aligned
+        # 使用 .max() 并确保返回标量
+        rs_max_20 = float(rs_line.tail(20).max())
+        rs_nh = bool(float(rs_line.iloc[-1]) >= rs_max_20)
         
         # D. 信号决策
         signals = []
@@ -102,8 +105,7 @@ def calculate_hk_commander(df, bench_series):
             "Weight": int(weight),
             "RS_NH": rs_nh
         }
-    except Exception as e:
-        # print(f"Calc error: {e}")
+    except Exception:
         return None
 
 # ==========================================
@@ -111,21 +113,20 @@ def calculate_hk_commander(df, bench_series):
 # ==========================================
 def run_hk_commander():
     start_t = time.time()
-    # 强制不使用 yfinance 缓存以防 database locked 错误
-    yf.set_tz_cache(False)
     
+    # 强制获取北京时间
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
     print(f"🚀 [{bj_now}] 开始港股领袖审计...")
 
     try:
-        # 下载数据 (基准使用恒生指数)
-        data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', progress=False)
-        bench_raw = yf.download("^HSI", period="2y", progress=False)
-        # 确保 bench_series 是单一 Series
-        if isinstance(bench_raw['Close'], pd.DataFrame):
-            bench_series = bench_raw['Close'].iloc[:, 0].dropna()
-        else:
-            bench_series = bench_raw['Close'].dropna()
+        # threads=False 彻底解决 "database is locked" 错误
+        data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', progress=False, threads=False)
+        bench_raw = yf.download("^HSI", period="2y", progress=False, threads=False)
+        
+        # 确保 bench_series 是单一 Series (使用 squeeze)
+        bench_series = bench_raw['Close'].squeeze()
+        if isinstance(bench_series, pd.DataFrame): # 如果 squeeze 失败
+            bench_series = bench_series.iloc[:, 0]
             
         hsi_vol = float(bench_series.pct_change().tail(20).std() * math.sqrt(252) * 100)
     except Exception as e:
@@ -136,24 +137,24 @@ def run_hk_commander():
         try:
             if t not in data.columns.levels[0]: continue
             df_t = data[t].dropna()
-            if df_t.empty: continue
+            if len(df_t) < 100: continue
             
             res = calculate_hk_commander(df_t, bench_series)
             if res:
-                # 过滤：必须是多头或者有特殊信号
+                # 过滤条件
                 if res["MA_Status"] == "多头排布" or res["Weight"] > 0:
                     res["Ticker"] = t.replace(".HK", "")
                     res["Sector"] = SECTOR_MAP.get(t, "核心蓝筹")
                     candidates.append(res)
         except: continue
 
-    # 排序逻辑修复：显式转换为基础类型排序
-    candidates.sort(key=lambda x: (float(x['Weight']), float(x['RS_Score'])), reverse=True)
+    # 排序：确保所有比较对象都是基础 Python 类型
+    candidates.sort(key=lambda x: (int(x['Weight']), float(x['RS_Score'])), reverse=True)
     sorted_res = candidates[:15]
 
     # 构造写入矩阵
     matrix = [
-        ["🏰 V1000 统帅版", "同步状态:", "✅ 连通", "更新时间(BJ):", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
+        ["🏰 V1000 统帅版", "状态:", "✅ 连通", "更新(BJ):", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
         ["代码", "评级", "核心信号", "现价", "紧致度(VCP)", "RS相对强度", "50MA趋势", "ADR(20d)", "板块", "RS新高"]
     ]
 
@@ -171,17 +172,18 @@ def run_hk_commander():
             "★" if item.get("RS_NH") else "-"
         ])
 
-    # 发送请求
+    # 最终净化并发送
     try:
-        # 彻底净化整个矩阵
-        clean_matrix = [[str(cell) if not isinstance(cell, (int, float)) else cell for cell in row] for row in matrix]
-        # 再次确保数字不为 NaN
-        final_matrix = [[clean_val(c) if isinstance(c, (float, int)) else c for c in r] for r in clean_matrix]
-        
-        resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=25)
+        # 再次强制转换为 JSON 友好格式
+        clean_matrix = []
+        for row in matrix:
+            clean_row = [clean_val(c) if isinstance(c, (float, int, np.float64, np.int64)) else str(c) for c in row]
+            clean_matrix.append(clean_row)
+            
+        resp = requests.post(WEBAPP_URL, json=clean_matrix, timeout=25)
         print(f"DEBUG: 服务器返回 -> {resp.text}")
         if "Success" in resp.text:
-            print(f"🎉 港股同步成功！共审计 {len(sorted_res)} 只标的")
+            print(f"🎉 港股同步成功！已捕捉标的写入表格。")
     except Exception as e:
         print(f"❌ 网络同步失败: {e}")
 
