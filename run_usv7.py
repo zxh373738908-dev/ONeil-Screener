@@ -12,90 +12,78 @@ import math
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 TARGET_SHEET_NAME = "us Screener" 
 CREDS_FILE = "credentials.json"
-
-# 缩减到 15 只最核心股票，确保 100% 下载成功
 CORE_TICKERS = ["NVDA", "TSLA", "PLTR", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD", "CF", "PR", "MSTR", "U", "COIN", "MARA"]
 
-def sync_to_sheets_ultra_stable(matrix):
-    """极简写入逻辑，专门对抗 char 1 错误"""
+# ==========================================
+# 2. 增强型同步引擎 (解决 Char 1 报错)
+# ==========================================
+def sync_to_sheets_final_solution(matrix):
+    print("📤 准备上传数据...")
+    # 强制在写之前停顿 3 秒，让 Google API 冷却
+    time.sleep(3)
+    
     try:
-        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+        creds = Credentials.from_service_account_file(
+            CREDS_FILE, 
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        )
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(SHEET_ID).worksheet(TARGET_SHEET_NAME)
         
-        # 使用最原始的 update 方式
-        sh.clear()
-        time.sleep(1) # 强制停顿，等 Google 响应
-        sh.update('A1', matrix)
+        # --- 策略调整 ---
+        # 不使用 clear()，因为 clear 会多产生一次 API 请求，容易触发 Char 1
+        # 我们直接用一个巨大的空矩阵“覆盖”旧数据，合并为一个请求
+        padding = [["" for _ in range(10)] for _ in range(30)] # 准备 30 行空数据
+        # 把实际数据放入空矩阵顶部
+        for i, row in enumerate(matrix):
+            for j, val in enumerate(row):
+                padding[i][j] = str(val)
+
+        # 只发送一次 update 请求
+        sh.update('A1:J30', padding)
         return True
+        
     except Exception as e:
-        print(f"❌ Google Sheets 写入失败: {e}")
+        error_msg = str(e)
+        if "char 1" in error_msg:
+            print("⚠️ 仍然触发 Google 防火墙，正在执行强制物理退避...")
+            time.sleep(10) # 遇到 char 1 必须死等
+            # 最后一次尝试，直接写入，不覆盖
+            try:
+                sh.update('A1', matrix)
+                return True
+            except:
+                return False
+        print(f"❌ 错误详情: {e}")
         return False
 
 # ==========================================
-# 2. 执行引擎
+# 3. 主程序
 # ==========================================
-def run_debug_scan():
-    print(f"🚀 系统启动...")
+def run():
     start_time = time.time()
+    print(f"🚀 系统启动...")
 
-    # 1. 下载 SPY (大盘参考)
-    print("📥 正在获取大盘数据...")
-    spy = yf.Ticker("SPY").history(period="100d")
-    if spy.empty:
-        print("❌ 无法获取 SPY 数据，检查网络")
-        return
-    spy_close = spy['Close'].iloc[-1]
-    
-    # 2. 逐个下载股票 (虽然慢一点点，但比批量下载更稳，不容易被封)
+    # 快速抓取
     candidates = []
-    print(f"🔍 扫描核心池 (共 {len(CORE_TICKERS)} 只)...")
-    
     for t in CORE_TICKERS:
         try:
-            ticker_obj = yf.Ticker(t)
-            df = ticker_obj.history(period="100d")
-            if df.empty or len(df) < 50:
-                continue
-            
-            # 极简逻辑：只要 5 日均线在 20 日均线上方就抓取 (确保一定有结果)
-            ma5 = df['Close'].rolling(5).mean().iloc[-1]
-            ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            curr = df['Close'].iloc[-1]
-            
-            if ma5 > ma20:
-                candidates.append([
-                    t, 
-                    "🔥多头" if curr > ma5 else "✅观察", 
-                    f"{round(curr, 2)}",
-                    f"{round(((curr/df['Close'].iloc[-20])-1)*100, 2)}%"
-                ])
-                print(f"  + 发现信号: {t}")
-        except:
-            continue
+            df = yf.Ticker(t).history(period="20d")
+            if not df.empty and df['Close'].iloc[-1] > df['Close'].rolling(5).mean().iloc[-1]:
+                candidates.append([t, "✅多头", round(df['Close'].iloc[-1], 2)])
+                if len(candidates) >= 10: break # 只抓前10个，确保速度
+        except: continue
 
-    # 3. 构造数据矩阵
+    # 构造矩阵
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%H:%M:%S')
-    
-    header = [
-        ["🏰 V1000 调试版", "Time:", bj_now, "SPY:", round(spy_close, 2)],
-        ["代码", "状态", "现价", "20日涨幅"]
-    ]
-    
-    if not candidates:
-        matrix = header + [["⚠️ 暂无满足多头逻辑的股票"]]
-    else:
-        matrix = header + candidates
+    header = [["🏰 V1000 最终版", "Time:", bj_now], ["代码", "状态", "价格"]]
+    matrix = header + candidates
 
-    # 4. 写入
-    print("📤 正在同步至 Google Sheets...")
-    success = sync_to_sheets_ultra_stable(matrix)
-    
-    total_time = time.time() - start_time
-    if success:
-        print(f"✅ 运行成功！耗时: {round(total_time, 2)}秒")
+    # 写入
+    if sync_to_sheets_final_solution(matrix):
+        print(f"🎉 成功！总耗时: {round(time.time() - start_time, 2)}秒")
     else:
-        print(f"❌ 运行失败，请检查 Credentials.json 是否有效或 API 是否开启")
+        print("❌ 最终尝试失败。建议：1. 检查 API 是否启用；2. 换个网络环境或代理。")
 
 if __name__ == "__main__":
-    run_debug_scan()
+    run()
