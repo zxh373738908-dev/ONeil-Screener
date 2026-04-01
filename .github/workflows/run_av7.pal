@@ -1,0 +1,35 @@
+name: AV7-Share Screener
+
+on:
+  schedule:
+    # 每天 UTC 时间 08:30 运行 (北京时间下午 4:30)
+    - cron: '30 8 * * 1-5'
+  workflow_dispatch:
+
+# 消除 Node.js 20 老化警告的关键配置！👇
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  run-a-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+         python -m pip install --upgrade pip
+         pip install pandas numpy yfinance requests gspread gspread-formatting
+
+      - name: Create credentials.json
+        run: |
+          echo '${{ secrets.GCP_CREDENTIALS }}' > credentials.json
+
+      - name: Run Av7-Share Screener
+        run: python run_v7a.py
