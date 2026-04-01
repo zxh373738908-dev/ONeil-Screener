@@ -215,8 +215,12 @@ def final_output(res, vix, breadth, weather):
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         sh.clear()
         
+        # 🟢 获取北京时间 (UTC+8)
+        beijing_tz = datetime.timezone(datetime.timedelta(hours=8))
+        bj_time_str = datetime.datetime.now(beijing_tz).strftime('%Y-%m-%d %H:%M')
+
         header = [
-            ["🏰 [V750 哨兵巅峰 - 大师形态版]", "", "Update:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M')],
+            ["🏰 [V750 哨兵巅峰 - 大师形态版]", "", "Update:", bj_time_str], # 🟢 替换为北京时间
             ["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],
             ["大师指令:", "关注【👁️奇点先行】感知机构偷跑，关注【🐉老龙回头】捕捉极致缩量买点。"],
             ["", "", "", ""]
@@ -232,8 +236,5 @@ def final_output(res, vix, breadth, weather):
             sh.update(values=clean_matrix, range_name="A5")
         else:
             sh.update_acell("A5", "📭 全域审计完成：当前环境未探测到符合 V750 大师形态的信号。")
-        print(f"🎉 V750 巅峰指令下达！状态：{weather}")
+        print(f"🎉 V750 巅峰指令下达！状态：{weather} (北京时间: {bj_time_str})")
     except Exception as e: print(f"❌ 最终写入失败: {e}")
-
-if __name__ == "__main__":
-    run_v750_apex_sentinel()
