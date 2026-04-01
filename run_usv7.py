@@ -2,18 +2,17 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import datetime
-import time  # <--- 修复此处的导入
+import time
 import requests
 import json
 import math
 import warnings
 from polygon import RESTClient
 
-# 屏蔽干扰
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (请确保填入你的 Key 和 URL)
+# 1. 配置中心
 # ==========================================
 POLYGON_API_KEY = "您的_POLYGON_API_KEY"
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyVyClySDklAPrx30URWZOGyb423Vb_5Dzt7WCKQ6WJwcNb7HLqwD0ckiMYm5sTwnLz/exec"
@@ -34,61 +33,48 @@ SECTOR_MAP = {
 }
 
 # ==========================================
-# 2. 核心算法逻辑
+# 2. 核心算法逻辑 (降门槛版)
 # ==========================================
 def calculate_v1000_nexus(df, spy_df):
     try:
-        if len(df) < 150: return None
+        if len(df) < 60: return None # 只要有 60 天数据就能算
         close, vol, high, low = df['Close'], df['Volume'], df['High'], df['Low']
         curr_price = close.iloc[-1]
-        ma50 = close.rolling(50).mean().iloc[-1]
-        vol_ma50 = vol.rolling(50).mean().iloc[-1]
-
-        rs_line = close / spy_df
-        rs_nh_20 = rs_line.iloc[-1] >= rs_line.tail(20).max()
+        
+        # 1. 相对强度 (RS)
+        rs_line = (close / spy_df.reindex(close.index).ffill()).dropna()
+        rs_nh_20 = rs_line.iloc[-1] >= rs_line.tail(20).max() if not rs_line.empty else False
+        
+        # 2. 紧致度 (VCP)
         tightness = (close.tail(10).std() / close.tail(10).mean()) * 100
         
-        def get_perf(d): return (curr_price - close.iloc[-d]) / close.iloc[-d]
-        rs_score = (get_perf(63)*2.5 + get_perf(126)*1.5 + get_perf(250))
+        # 3. RS 性能评分 (加权：最近 3个月表现最重要)
+        def get_perf(d): 
+            if len(close) < d: return 0
+            return (curr_price - close.iloc[-d]) / close.iloc[-d]
+        
+        rs_score = (get_perf(63)*3 + get_perf(126)*2 + get_perf(250))
 
         signals, base_res = [], 0
-        if rs_nh_20:
-            if tightness < 1.6:
-                signals.append("👁️奇點")
-                base_res += 4
-            else:
-                signals.append("📈趋势")
-                base_res += 1
-                
-        high_52w = high.tail(252).max()
-        if curr_price >= high_52w * 0.97:
-            if vol.iloc[-1] > vol_ma50:
-                signals.append("🚀突破")
-                base_res += 3
-            else:
-                signals.append("🔭临界")
-                base_res += 1
-                
-        if rs_score > 0.4 and abs(curr_price - ma50)/ma50 < 0.04:
-            signals.append("🐉回頭")
-            base_res += 2
-
-        if rs_score < -0.1: return None 
+        if rs_nh_20 and tightness < 2.0: signals.append("👁️奇點"); base_res += 4
+        if curr_price >= high.tail(100).max() * 0.95: signals.append("🚀高位"); base_res += 2
         
         adr = ((high - low) / low).tail(20).mean() * 100
+        
         return {
             "RS_Score": rs_score, "Signals": signals, "Base_Res": base_res, 
             "Price": curr_price, "Tightness": tightness, "ADR": adr
         }
-    except: return None
+    except Exception as e:
+        return None
 
 def get_option_audit(ticker):
     try:
         snaps = client_poly.get_snapshot_options_chain(ticker)
         c_val, p_val = 0, 0
-        for s in snaps[:80]:
+        for s in snaps[:60]:
             v = s.day.volume if s.day else 0
-            if v < 50: continue
+            if v < 30: continue
             val = v * (s.day.last or 0) * 100
             if s.details.contract_type == 'call': c_val += val
             else: p_val += val
@@ -100,23 +86,26 @@ def get_option_audit(ticker):
 # ==========================================
 def run_v1000_final():
     start_time = time.time()
-    print("🚀 V1000 枢纽系统 [9.2完整版] 启动...")
+    print("🚀 V1000 [9.3必出结果版] 启动...")
 
     try:
-        data = yf.download(CORE_TICKERS, period="1y", group_by='ticker', threads=True, progress=False)
-        spy_df = yf.download("SPY", period="1y", progress=False)['Close'].dropna()
-        vix_df = yf.download("^VIX", period="5d", progress=False)['Close']
-        vix = vix_df.iloc[-1] if not vix_df.empty else 20.0
+        # 下载数据 (增加 period 以确保数据充足)
+        data = yf.download(CORE_TICKERS, period="2y", group_by='ticker', threads=True, progress=False)
+        spy_df = yf.download("SPY", period="2y", progress=False)['Close'].dropna()
+        vix = yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1]
     except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
+        print(f"❌ 基础数据下载失败: {e}"); return
 
     candidates = []
     sector_cluster = {}
     
+    print(f"🔍 演算中...")
     for t in CORE_TICKERS:
         try:
-            df_t = data[t].dropna()
-            if df_t.empty: continue
+            # 兼容 yfinance 不同的返回格式
+            df_t = data[t].dropna() if t in data.columns.levels[0] else pd.DataFrame()
+            if df_t.empty or len(df_t) < 10: continue
+            
             res = calculate_v1000_nexus(df_t, spy_df)
             if res:
                 res["Ticker"] = t
@@ -126,32 +115,33 @@ def run_v1000_final():
         except: continue
 
     if not candidates:
-        print("📭 未发现符合多头条件的标的。")
+        print("⚠️ 仍然没数据？正在检查下载数据...")
+        print(f"下载到的代码: {list(data.columns.levels[0]) if hasattr(data.columns, 'levels') else 'None'}")
         return
 
+    # 排序：无论有没有信号，都按 RS_Score 选出最强的 12 个
     sorted_df = pd.DataFrame(candidates).sort_values(by=["Base_Res", "RS_Score"], ascending=False).head(12)
-    final_list = []
     
-    print(f"🔥 处理 {len(sorted_df)} 只多头候选...")
+    final_list = []
+    print(f"✅ 找到 {len(sorted_df)} 只标的，正在同步...")
+    
     for i, row in sorted_df.reset_index().iterrows():
         cluster_count = sector_cluster.get(row['Sector'], 1)
-        total_score = row['Base_Res'] + (1 if cluster_count >= 2 else 0)
-        
         opt_call = "N/A"
-        if i < 2 and total_score >= 1:
+        if i < 2: # 仅审计前2名
             opt_call = get_option_audit(row['Ticker'])
             time.sleep(0.5)
 
-        if total_score >= 5: rating = "💎SSS 共振"
-        elif total_score >= 3: rating = "🔥强势"
-        elif row['RS_Score'] > 0.5: rating = "🚀高动能"
+        # 动态评级
+        if row['Base_Res'] >= 4: rating = "💎SSS 共振"
+        elif row['RS_Score'] > 0.5: rating = "🔥强势"
         else: rating = "✅监控"
         
         final_list.append([
             row['Ticker'],
             rating,
-            " + ".join(row['Signals']) if row['Signals'] else "📊 蓄势中",
-            f"{cluster_count}只异动",
+            " + ".join(row['Signals']) if row['Signals'] else "📈 趋势保持",
+            f"{cluster_count}只活跃",
             opt_call,
             round(row['Price'], 2),
             f"{round(row['Tightness'], 2)}%",
@@ -162,12 +152,12 @@ def run_v1000_final():
 
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%H:%M:%S')
     header = [
-        ["🏰 V1000 终极枢纽 (9.2版)", "Update:", bj_now, "VIX:", round(vix, 2), "", "", "", "", ""],
+        ["🏰 V1000 终极枢纽 (9.3版)", "Update:", bj_now, "VIX:", round(vix, 2), "", "", "", "", ""],
         ["代码", "评级", "枢纽信号", "板块集群", "看涨% (Top2)", "现价", "紧致度", "RS强度", "ADR", "板块"]
     ]
     
     try:
-        requests.post(WEBAPP_URL, data=json.dumps(header + final_list), headers={'Content-Type': 'application/json'}, timeout=15)
+        resp = requests.post(WEBAPP_URL, data=json.dumps(header + final_list), headers={'Content-Type': 'application/json'}, timeout=15)
         print(f"🎉 同步完成！耗时: {round(time.time() - start_time, 2)}s")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
