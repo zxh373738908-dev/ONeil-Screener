@@ -32,4 +32,4 @@ jobs:
           echo '${{ secrets.GCP_CREDENTIALS }}' > credentials.json
 
       - name: Run Av7-Share Screener
-        run: python run_v7a.py
+        run: python run_av7.py
