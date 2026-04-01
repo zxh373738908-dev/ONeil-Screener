@@ -12,11 +12,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (已更新您的最新 URL)
+# 1. 配置中心 (请填入您最新的 Web App URL)
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwfstK4Xq1DXft4U3_Qg9pjCQ5Qp0FiIskzrKnT1VFdRiH5FFyk6Iikv0FAcZNrPtp-/exec"
 
-# 港股领袖票池 (涵盖科技、金融、能源、消费龙头)
+# 港股领袖票池
 CORE_TICKERS_HK = [
     "0700.HK", "3690.HK", "9988.HK", "1211.HK", "1810.HK", 
     "0941.HK", "2318.HK", "0005.HK", "9999.HK", "0883.HK",
@@ -24,7 +24,6 @@ CORE_TICKERS_HK = [
     "1398.HK", "2331.HK", "2020.HK", "1177.HK", "2269.HK"
 ]
 
-# 行业映射
 SECTOR_MAP = {
     "0700.HK": "社交/游戏", "3690.HK": "外卖/科技", "9988.HK": "电商/云",
     "1211.HK": "新能源车", "1810.HK": "消费电子", "0941.HK": "电信/红利",
@@ -33,54 +32,63 @@ SECTOR_MAP = {
 }
 
 # ==========================================
-# 2. 核心数据净化器 (防止 JSON 报错)
+# 2. 核心净化工具
 # ==========================================
 def clean_val(v):
     if v is None: return ""
-    if isinstance(v, (float, np.float64, np.float32)):
-        return round(float(v), 2) if math.isfinite(v) else ""
-    return str(v)
+    try:
+        # 如果是 Series 或 array，取最后一个元素并转为 float
+        if hasattr(v, 'iloc'): v = v.iloc[-1]
+        if hasattr(v, 'item'): v = v.item()
+        v = float(v)
+        return round(v, 2) if math.isfinite(v) else ""
+    except:
+        return str(v)
 
 # ==========================================
-# 3. V1000 领袖演算法
+# 3. V1000 领袖演算法 (修复逻辑)
 # ==========================================
-def calculate_hk_commander(df, bench_df):
+def calculate_hk_commander(df, bench_series):
     try:
         if len(df) < 150: return None
         
-        close = df['Close']
-        high = df['High']
-        low = df['Low']
+        # 提取 Series 并确保是 1D
+        close = df['Close'].fillna(method='ffill')
+        high = df['High'].fillna(method='ffill')
+        low = df['Low'].fillna(method='ffill')
+        
         cp = float(close.iloc[-1])
         
-        # A. 趋势状态 (Stage 2 判断)
-        ma50 = close.rolling(50).mean().iloc[-1]
-        ma200 = close.rolling(200).mean().iloc[-1]
+        # A. 趋势状态
+        ma50 = float(close.rolling(50).mean().iloc[-1])
+        ma200 = float(close.rolling(200).mean().iloc[-1])
         is_bull = cp > ma50 and ma50 > ma200
         
-        # B. VCP 紧致度 (Minervini 核心：10天收盘价收缩)
+        # B. VCP 紧致度
         tightness = float((close.tail(10).std() / close.tail(10).mean()) * 100)
         
-        # C. RS 相对强度 (对比恒生指数)
-        # 对齐日期计算 60 日涨幅对比
-        stock_perf = cp / close.iloc[-60]
-        bench_perf = bench_df.iloc[-1] / bench_df.iloc[-60]
-        rs_score = stock_perf - bench_perf
+        # C. RS 相对强度 (修正对齐逻辑)
+        # 计算个股 60 日表现
+        stock_ret = cp / float(close.iloc[-60])
+        # 计算基准 60 日表现 (确保 bench_series 是单列)
+        bench_ret = float(bench_series.iloc[-1]) / float(bench_series.iloc[-60])
+        rs_score = float(stock_ret - bench_ret)
+        
+        # 判断 RS 是否创 20 日新高 (对比指数)
+        rs_line = close / bench_series.reindex(close.index).ffill()
+        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(20).max())
         
         # D. 信号决策
         signals = []
         weight = 0
-        
-        # 信号 1: 奇点觉醒 (RS走强且股价极度收缩，0700爆发常见形态)
         if tightness < 1.6:
             signals.append("👁️奇點觉醒")
             weight += 4
-        # 信号 2: 巅峰突破 (接近 52 周高点)
         if cp >= float(high.tail(252).max()) * 0.98:
             signals.append("🚀巔峰突破")
             weight += 2
         
-        # E. ADR 波动率
+        # E. ADR
         adr = float(((high - low) / low).tail(20).mean() * 100)
         
         return {
@@ -91,48 +99,63 @@ def calculate_hk_commander(df, bench_df):
             "RS_Score": rs_score,
             "MA_Status": "多头排布" if is_bull else "均线之下",
             "ADR": adr,
-            "Weight": weight
+            "Weight": int(weight),
+            "RS_NH": rs_nh
         }
-    except:
+    except Exception as e:
+        # print(f"Calc error: {e}")
         return None
 
 # ==========================================
-# 4. 执行与同步引擎
+# 4. 执行引擎
 # ==========================================
 def run_hk_commander():
     start_t = time.time()
-    bj_now = (datetime.datetime.now() + datetime.timedelta(hours=0)).strftime('%Y-%m-%d %H:%M')
-    print(f"🚀 [{datetime.datetime.now().strftime('%H:%M:%S')}] 开始港股领袖审计...")
+    # 强制不使用 yfinance 缓存以防 database locked 错误
+    yf.set_tz_cache(False)
+    
+    bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+    print(f"🚀 [{bj_now}] 开始港股领袖审计...")
 
     try:
-        # 下载数据 (基准: 恒生指数)
-        data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', threads=True, progress=False)
-        bench_df = yf.download("^HSI", period="2y", progress=False)['Close'].dropna()
-        hsi_vol = bench_df.pct_change().tail(20).std() * math.sqrt(252) * 100
+        # 下载数据 (基准使用恒生指数)
+        data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', progress=False)
+        bench_raw = yf.download("^HSI", period="2y", progress=False)
+        # 确保 bench_series 是单一 Series
+        if isinstance(bench_raw['Close'], pd.DataFrame):
+            bench_series = bench_raw['Close'].iloc[:, 0].dropna()
+        else:
+            bench_series = bench_raw['Close'].dropna()
+            
+        hsi_vol = float(bench_series.pct_change().tail(20).std() * math.sqrt(252) * 100)
     except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
-
-    # 构造写入矩阵
-    matrix = [
-        ["🏰 V1000 统帅版", "同步状态:", "✅ 连通", "更新时间(BJ):", bj_now, "", "", "", "", ""],
-        ["代码", "评级", "核心信号", "现价", "紧致度(VCP)", "RS相对强度", "50MA趋势", "ADR(20d)", "板块", "备注"]
-    ]
+        print(f"❌ 数据抓取失败: {e}"); return
 
     candidates = []
     for t in CORE_TICKERS_HK:
         try:
             if t not in data.columns.levels[0]: continue
-            df = data[t].dropna()
-            res = calculate_hk_commander(df, bench_df)
+            df_t = data[t].dropna()
+            if df_t.empty: continue
             
+            res = calculate_hk_commander(df_t, bench_series)
             if res:
-                res["Ticker"] = t.replace(".HK", "")
-                res["Sector"] = SECTOR_MAP.get(t, "核心蓝筹")
-                candidates.append(res)
+                # 过滤：必须是多头或者有特殊信号
+                if res["MA_Status"] == "多头排布" or res["Weight"] > 0:
+                    res["Ticker"] = t.replace(".HK", "")
+                    res["Sector"] = SECTOR_MAP.get(t, "核心蓝筹")
+                    candidates.append(res)
         except: continue
 
-    # 按权重和强度排序
-    sorted_res = sorted(candidates, key=lambda x: (x['Weight'], x['RS_Score']), reverse=True)
+    # 排序逻辑修复：显式转换为基础类型排序
+    candidates.sort(key=lambda x: (float(x['Weight']), float(x['RS_Score'])), reverse=True)
+    sorted_res = candidates[:15]
+
+    # 构造写入矩阵
+    matrix = [
+        ["🏰 V1000 统帅版", "同步状态:", "✅ 连通", "更新时间(BJ):", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
+        ["代码", "评级", "核心信号", "现价", "紧致度(VCP)", "RS相对强度", "50MA趋势", "ADR(20d)", "板块", "RS新高"]
+    ]
 
     for item in sorted_res:
         matrix.append([
@@ -145,19 +168,20 @@ def run_hk_commander():
             item["MA_Status"],
             f"{round(item['ADR'], 2)}%",
             item["Sector"],
-            "关注" if item['RS_Score'] > 0 else "-"
+            "★" if item.get("RS_NH") else "-"
         ])
 
     # 发送请求
     try:
-        clean_matrix = [[clean_val(c) for c in r] for r in matrix]
-        resp = requests.post(WEBAPP_URL, json=clean_matrix, timeout=25)
+        # 彻底净化整个矩阵
+        clean_matrix = [[str(cell) if not isinstance(cell, (int, float)) else cell for cell in row] for row in matrix]
+        # 再次确保数字不为 NaN
+        final_matrix = [[clean_val(c) if isinstance(c, (float, int)) else c for c in r] for r in clean_matrix]
         
-        print(f"DEBUG: Google服务器原始返回 -> {resp.text}")
+        resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=25)
+        print(f"DEBUG: 服务器返回 -> {resp.text}")
         if "Success" in resp.text:
-            print(f"🎉 港股同步成功！共审计 {len(sorted_res)} 只标的 | 耗时: {round(time.time()-start_t, 2)}s")
-        else:
-            print(f"⚠️ 服务器响应异常: {resp.text}")
+            print(f"🎉 港股同步成功！共审计 {len(sorted_res)} 只标的")
     except Exception as e:
         print(f"❌ 网络同步失败: {e}")
 
