@@ -8,7 +8,6 @@ import yfinance as yf
 import requests
 import re
 import time
-import sys
 from gspread_formatting import *
 
 warnings.filterwarnings('ignore')
@@ -19,166 +18,156 @@ warnings.filterwarnings('ignore')
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 TARGET_GID = 665566258  
 CREDS_FILE = "credentials.json"
-ACCOUNT_SIZE = 1000000 
-MAX_RISK_PER_TRADE = 0.008 
-TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
+ACCOUNT_SIZE = 500000 # 假设 50 万港币总仓位
+MAX_RISK_PER_TRADE = 0.008 # 单笔损失控制在总仓位 0.8%
 
-# 核心保底池：如果 API 失效，强制审计这些核心领袖
-FALLBACK_TICKERS = [
-    "0700", "3690", "9988", "1810", "1211", "9888", "2318", "0941", "0388", "0005",
-    "1024", "9618", "2015", "2269", "1177", "0857", "0883", "0386", "1398", "0939",
-    "3988", "2628", "2319", "0992", "2020", "2331", "1088", "1880", "6030", "3968",
-    "0267", "0016", "0002", "0003", "1928", "1113", "0011", "0001", "0960", "1093"
-]
-
-def init_commander_sheet():
-    try:
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
-        client = gspread.authorize(creds)
-        doc = client.open_by_key(SS_KEY)
-        for ws in doc.worksheets():
-            if str(ws.id) == str(TARGET_GID): return ws
-        return doc.get_worksheet(0)
-    except Exception as e:
-        print(f"❌ Google Sheets 初始化失败: {e}")
-        sys.exit(1)
-
-def get_chinese_names(codes):
-    mapping = {}
-    if not codes: return mapping
-    try:
-        for i in range(0, len(codes), 50):
-            chunk = [f"hk{str(c).zfill(5)}" for c in codes[i:i+50]]
-            url = f"http://qt.gtimg.cn/q={','.join(chunk)}"
-            r = requests.get(url, timeout=10)
-            matches = re.findall(r'v_hk(\d+)="[^~]+~([^~]+)', r.text)
-            for c, n in matches: mapping[str(c).lstrip('0')] = n
-    except: pass
-    return mapping
+def init_sheet():
+    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    client = gspread.authorize(creds)
+    doc = client.open_by_key(SS_KEY)
+    for ws in doc.worksheets():
+        if str(ws.id) == str(TARGET_GID): return ws
+    return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. 统帅核心算法
+# 🧠 2. V750 增强演算引擎
 # ==========================================
-def calculate_commander_signals(df, hsi_series, hstech_ok):
+def calculate_advanced_v750(df, hsi_series):
     try:
         df = df.dropna(subset=['Close'])
-        if len(df) < 150: return "DATA_SHORT"
+        if len(df) < 252: return None
+        
         close = df['Close'].values.astype(float)
         high = df['High'].values.astype(float)
         low = df['Low'].values.astype(float)
         vol = df['Volume'].values.astype(float)
         cp = close[-1]
         
-        avg_turn_20 = np.mean((close * vol)[-20:])
-        if avg_turn_20 < 60000000: return "LOW_LIQUID"
-
+        # 1. 趋势模板与生命线
         ma50 = np.mean(close[-50:])
-        dist_ma50 = (cp / ma50 - 1) * 100
-        
-        common_idx = hsi_series.index.intersection(df.index)
-        rs_line = close[df.index.get_indexer(common_idx)] / hsi_series.loc[common_idx].values
+        ma200 = np.mean(close[-200:])
+        is_stage_2 = (cp > ma50 > ma200) and (ma200 > np.mean(close[-220:-200]))
+
+        # 2. RS 加速度 (IBD 模拟)
+        hsi_val = hsi_series.reindex(df.index).ffill().values
+        rs_line = close / hsi_val
+        # RS 线不仅看新高，看斜率 (近10日涨幅)
+        rs_velocity = (rs_line[-1] - rs_line[-10]) / rs_line[-10] * 100
         rs_nh = rs_line[-1] >= np.max(rs_line[-252:])
-        
-        price_bins = np.linspace(np.min(low[-100:]), np.max(high[-100:]), 40)
-        hist, edges = np.histogram(close[-100:], bins=price_bins, weights=vol[-100:])
-        poc_price = edges[np.argmax(hist)]
-        
+
+        # 3. VCP 紧致度 (极致收缩判断)
         tightness = (np.std(close[-10:]) / np.mean(close[-10:])) * 100
-        vdu = vol[-1] < np.mean(vol[-20:]) * 0.6
-        neg_vol = vol[-11:-1][close[-11:-1] < close[-12:-2]]
-        is_pocket = (close[-1] > close[-2]) and (vol[-1] > (np.max(neg_vol) if len(neg_vol)>0 else 0))
-
-        signals = []
-        if rs_nh and cp < np.max(close[-20:]) * 1.025: signals.append("奇點")
-        if cp > ma50 and dist_ma50 < 4.0 and (vdu or tightness < 1.3): signals.append("老龍")
-        if cp >= np.max(close[-20:]) and vol[-1] > np.mean(vol[-20:]) * 1.2: signals.append("突破")
-        if rs_nh and hstech_ok and cp > poc_price: signals.append("共振")
-
-        if not signals: return "NO_SIGNAL"
         
-        action = f"💎 統帥共振" if len(signals) >= 3 else (f"🔥 双重({'+'.join(signals)})" if len(signals)==2 else f"🚀 {signals[0]}")
-        if dist_ma50 > 15: action = "⚠️ 乖離過大"
+        # 4. 机构能量 (成交额爆发比)
+        avg_vol20 = np.mean(vol[-20:])
+        vol_surge = vol[-1] / avg_vol20
+        vdu = vol[-1] < avg_vol20 * 0.55 # 成交量枯竭
 
-        adr = np.mean((high[-20:]-low[-20:])/close[-20:]) * 100
-        stop = max(ma50 * 0.985, cp * (1 - adr*0.01*1.6))
-        shares = (ACCOUNT_SIZE * MAX_RISK_PER_TRADE) // (cp - stop) if cp > stop else 0
+        # 5. 综合战法判定
+        action = "观察"
+        prio = 50
+        if rs_nh and cp < np.max(close[-20:]) * 1.02 and tightness < 1.4:
+            action, prio = "👁️ 奇點先行(Stealth)", 95
+        elif is_stage_2 and vdu and tightness < 1.2:
+            action, prio = "🐉 老龍回頭(V-Dry)", 90
+        elif rs_nh and cp >= np.max(close[-252:]) and vol_surge > 1.3:
+            action, prio = "🚀 巔峰突破(Breakout)", 92
+        elif is_stage_2 and rs_nh and rs_velocity > 0:
+            action, prio = "💎 雙重共振(Leader)", 88
+
+        # 6. 多重结构止损 (取 MA50 与 ADR 止损的科学平衡)
+        adr_20 = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
+        adr_stop = cp * (1 - adr_20 * 0.01 * 1.6)
+        # 结构止损：跌破 MA50 下方 1%
+        struct_stop = ma50 * 0.99
+        final_stop = max(adr_stop, struct_stop) # 哪个近用哪个，保护利润
+
+        # 7. 建议仓位 (Risk Parity 模型)
+        risk_per_share = cp - final_stop
+        suggested_shares = 0
+        if risk_per_share > 0:
+            suggested_shares = (ACCOUNT_SIZE * MAX_RISK_PER_TRADE) // risk_per_share
 
         return {
-            "Action": action, "Price": cp, "Dist_50": round(dist_ma50, 1),
-            "Shares": int(shares), "Stop": round(stop, 2), "Tight": round(tightness, 2),
-            "Above_POC": "✅" if cp > poc_price else "-", "rs_raw": cp/close[-120] if len(close)>120 else 1,
-            "Score": 60 + len(signals)*10, "is_stage_2": cp > ma50
+            "Action": action, "Score": prio + (rs_velocity * 2), "Price": cp, 
+            "Tight": round(tightness, 2), "Vol_Ratio": round(vol_surge, 2), 
+            "ADR": round(adr_20, 2), "Stop": round(final_stop, 2),
+            "Shares": int(suggested_shares), "RS_Vel": round(rs_velocity, 2),
+            "is_bull": cp > ma200, "rs_raw": (cp/close[-63]*2 + cp/close[-126] + cp/close[-252])
         }
-    except: return "ERROR"
+    except: return None
 
 # ==========================================
-# 🚀 3. 执行主逻辑
+# 🚀 3. 执行流程 (包含板块配额与量子评分)
 # ==========================================
 def main():
-    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%m-%d %H:%M')
-    print(f"[{now_str}] 🛰️ V45 量子统帅启动 (增强探测模式)...")
+    now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%m-%d %H:%M')
+    print(f"[{now_str}] 🚀 V45-V750 Pro Max 启动...")
     
-    sh = init_commander_sheet()
-    sh.update(range_name="A1", values=[[f"🏯 正在审计...", f"心跳: {now_str}", "状态: 获取票池中..."]])
-
-    # 1. 环境审计
+    # 1. 抓取基准
+    hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
+    hsi_series = hsi_raw.iloc[:,0] if isinstance(hsi_raw, pd.DataFrame) else hsi_raw
+    hsi_p, hsi_ma50 = hsi_series.iloc[-1], hsi_series.rolling(50).mean().iloc[-1]
+    
+    # 2. 扫描 TradingView 票池
+    url = "https://scanner.tradingview.com/hongkong/scan"
+    payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
+               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}],
+               "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     try:
-        mkt_data = yf.download(["^HSI", "3088.HK"], period="60d", progress=False)['Close']
-        hsi_series = mkt_data["^HSI"].dropna()
-        hstech_ok = mkt_data["3088.HK"].iloc[-1] > mkt_data["3088.HK"].rolling(20).mean().iloc[-1]
-    except:
-        print("❌ 指数下载失败"); return
+        resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
+        df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "其他"} for d in resp])
+    except: return
 
-    # 2. 获取票池 (增加伪装与保底)
-    all_codes = FALLBACK_TICKERS.copy()
-    try:
-        url = "https://scanner.tradingview.com/hongkong/scan"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-        payload = {"columns": ["name", "sector"], "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}], "range": [0, 200], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            data_tv = resp.json().get('data', [])
-            all_codes += [re.sub(r'[^0-9]', '', d['d'][0]) for d in data_tv]
-            print(f"✅ TV 接口调用成功，获取标的: {len(data_tv)}")
-        else:
-            print(f"⚠️ TV 接口返回状态码 {resp.status_code}，启动保底核心池")
-    except Exception as e:
-        print(f"⚠️ 票池接口异常: {e}，启动保底核心池")
-
-    all_codes = list(set(all_codes))
-    tickers = [c.zfill(4)+".HK" for c in all_codes]
-    name_map = get_chinese_names(all_codes)
-
-    # 3. 批量下载与审计
-    print(f"🔎 正在审计 {len(tickers)} 只标的形态...")
+    # 3. 获取个股详情
+    final_list = []
+    tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
     
-    final_list = []
     for t in tickers:
         try:
+            code_raw = t.split('.')[0].lstrip('0')
             if t not in data.columns.levels[0]: continue
-            res = calculate_commander_signals(data[t], hsi_series, hstech_ok)
-            if isinstance(res, dict) and res['is_stage_2']:
-                code_clean = t.split('.')[0].lstrip('0')
-                res.update({"Ticker": t.split('.')[0], "Name": name_map.get(code_clean, t)})
+            res = calculate_advanced_v750(data[t], hsi_series)
+            if res and res['is_bull'] and res['Action'] != "观察":
+                res.update({"Ticker": t.split('.')[0], "Sector": df_pool[df_pool['code']==code_raw].iloc[0]['sector']})
                 final_list.append(res)
         except: continue
 
-    # 4. 写入 Google Sheets
+    if not final_list: return
+    res_df = pd.DataFrame(final_list)
+
+    # 4. 板块配额与排名：每个板块只展示前 4 强，防止风险集中
+    res_df['Final_Score'] = res_df['Score'] + res_df['rs_raw'].rank(pct=True)*20
+    top_picks = res_df.sort_values(by="Final_Score", ascending=False).groupby('Sector').head(4)
+    top_picks = top_picks.head(60) # 总榜前60
+
+    # 5. 写入与可视化
+    sh = init_sheet()
     sh.clear()
-    sh.update(range_name="A1", values=[[f"🏯 量子统帅旗舰版", f"环境: {'☀️激进' if hstech_ok else '☁️谨慎'}", f"刷新: {now_str}", f"有效信号: {len(final_list)}"]])
     
-    if final_list:
-        res_df = pd.DataFrame(final_list)
-        res_df['RS_Rank'] = res_df['rs_raw'].rank(pct=True).apply(lambda x: int(x*99))
-        cols = ["Ticker", "Name", "Action", "RS_Rank", "Price", "Shares", "Stop", "Tight", "Dist_50"]
-        sh.update(range_name="A3", values=[cols] + res_df.sort_values(by="Score", ascending=False).head(50)[cols].values.tolist(), value_input_option="USER_ENTERED")
-        set_frozen(sh, rows=3)
-        print(f"✅ 看板已同步，发现 {len(final_list)} 个信号。")
-    else:
-        sh.update_acell("A4", "📭 审计完成：当前环境无符合统帅形态标的")
-        print("📭 审计完成：无符合形态标的")
+    weather = "☀️ 激进" if hsi_p > hsi_ma50 else "❄️ 观望"
+    header = [[f"🏰 V45-V750 量子领袖版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8% / 板块配额制"]]
+    sh.update(range_name="A1", values=header)
+    
+    cols = ["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "ADR", "Sector"]
+    sh.update(range_name="A3", values=[cols] + top_picks[cols].values.tolist(), value_input_option="USER_ENTERED")
+
+    # 美化格式
+    set_frozen(sh, rows=3)
+    format_cell_range(sh, 'A3:K3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
+    
+    rules = get_conditional_format_rules(sh)
+    # 奇点先行 - 紫色高亮 (机构最爱)
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('B4:B100', sh)],
+        booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['👁️']),
+                                format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True)))))
+    # 建议股数 - 绿色提醒
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)],
+        booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['0']),
+                                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.5, 0))))))
+    rules.save()
+    print(f"✅ 任务完成。成功捕捉 {len(top_picks)} 只量子领袖股。")
 
 if __name__ == "__main__":
     main()
