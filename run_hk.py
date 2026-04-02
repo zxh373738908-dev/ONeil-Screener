@@ -30,7 +30,7 @@ def init_sheet():
     return doc.get_worksheet(0)
 
 # ==========================================
-# 🧠 2. V750 增强演算引擎
+# 🧠 2. V750 增强演算引擎 (🚀主升浪 补丁版)
 # ==========================================
 def calculate_advanced_v750(df, hsi_series):
     try:
@@ -44,9 +44,20 @@ def calculate_advanced_v750(df, hsi_series):
         cp = close[-1]
         
         # 1. 趋势模板与生命线
+        ma10 = np.mean(close[-10:])
+        ma20 = np.mean(close[-20:])
         ma50 = np.mean(close[-50:])
         ma200 = np.mean(close[-200:])
         is_stage_2 = (cp > ma50 > ma200) and (ma200 > np.mean(close[-220:-200]))
+
+        # ---- 【🚀 补丁1：主升浪特征提取】 ----
+        # 解决 00175/02315 等强势股错杀：允许短期MA因波动粘合，但股价已强劲站上MA10与MA20，且不背离近期高点
+        is_main_uptrend = (
+            (cp > ma10) and (cp > ma20) and 
+            (ma10 > ma50) and (ma20 > ma50) and 
+            (ma20 > np.mean(close[-25:-5])) and 
+            (cp >= np.max(close[-60:]) * 0.85)
+        )
 
         # 2. RS 加速度 (IBD 模拟)
         hsi_val = hsi_series.reindex(df.index).ffill().values
@@ -75,11 +86,25 @@ def calculate_advanced_v750(df, hsi_series):
         elif is_stage_2 and rs_nh and rs_velocity > 0:
             action, prio = "💎 雙重共振(Leader)", 88
 
+        # ---- 【🚀 补丁2：主升浪判定与超级加分】 ----
+        if is_main_uptrend:
+            if action == "观察":
+                action, prio = "🚀 主升浪(Uptrend)", 94
+            else:
+                # 叠加了主升浪光环的个股，彻底拉爆优先级（+10分保送）
+                action = action.replace(")", " + 🚀主升浪)")
+                prio += 10
+
         # 6. 多重结构止损 (取 MA50 与 ADR 止损的科学平衡)
         adr_20 = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
         adr_stop = cp * (1 - adr_20 * 0.01 * 1.6)
-        # 结构止损：跌破 MA50 下方 1%
-        struct_stop = ma50 * 0.99
+        
+        # ---- 【🚀 补丁3：主升浪动态防守】 ----
+        if "主升浪" in action:
+            struct_stop = ma20 * 0.98 # 主升浪跌破 MA20的2% 及时离场，避免利润大幅回撤
+        else:
+            struct_stop = ma50 * 0.99
+            
         final_stop = max(adr_stop, struct_stop) # 哪个近用哪个，保护利润
 
         # 7. 建议仓位 (Risk Parity 模型)
@@ -112,16 +137,16 @@ def main():
     # 2. 扫描 TradingView 票池
     url = "https://scanner.tradingview.com/hongkong/scan"
     payload = {"columns": ["name", "description", "close", "market_cap_basic", "sector"],
-               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}],
+               "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}],
                "range": [0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     try:
-        resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
+        resp = requests.post(url, json=payload, timeout=15).json().get('data',[])
         df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "其他"} for d in resp])
     except: return
 
     # 3. 获取个股详情
     final_list = []
-    tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
+    tickers =[str(c).zfill(4)+".HK" for c in df_pool['code']]
     data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
     
     for t in tickers:
@@ -147,10 +172,10 @@ def main():
     sh.clear()
     
     weather = "☀️ 激进" if hsi_p > hsi_ma50 else "❄️ 观望"
-    header = [[f"🏰 V45-V750 量子领袖版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8% / 板块配额制"]]
+    header = [[f"🏰 V45-V750 量子领袖版 (🚀主升浪防错杀版)", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8% / 板块配额制"]]
     sh.update(range_name="A1", values=header)
     
-    cols = ["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "ADR", "Sector"]
+    cols =["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "ADR", "Sector"]
     sh.update(range_name="A3", values=[cols] + top_picks[cols].values.tolist(), value_input_option="USER_ENTERED")
 
     # 美化格式
@@ -158,10 +183,14 @@ def main():
     format_cell_range(sh, 'A3:K3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
     
     rules = get_conditional_format_rules(sh)
-    # 奇点先行 - 紫色高亮 (机构最爱)
+    # 奇点先行 - 紫色高亮
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('B4:B100', sh)],
         booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['👁️']),
                                 format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True)))))
+    # 主升浪 / 巅峰突破 - 橙红色高亮 (新增强调)
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('B4:B100', sh)],
+        booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🚀']),
+                                format=cellFormat(backgroundColor=color(1.0, 0.9, 0.8), textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0.2, 0.2))))))
     # 建议股数 - 绿色提醒
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)],
         booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['0']),
