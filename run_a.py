@@ -1,192 +1,184 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import gspread
-from google.oauth2.service_account import Credentials
-from gspread_formatting import *
-import datetime, time, warnings, logging, requests, os, math
-import yfinance as yf
+import datetime, time, requests, json, math, warnings
 
-# 尝试导入美化插件
-try:
-    from gspread_formatting import *
-    HAS_FORMATTING = True
-except ImportError:
-    HAS_FORMATTING = False
-
-# 基础干扰屏蔽
 warnings.filterwarnings('ignore')
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # ==========================================
-# 1. 配置中心
+# 1. 配置中心 (A股定制版)
 # ==========================================
-SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
-CREDS_FILE = "credentials.json"
-TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
-ACCOUNT_SIZE = 100000 
+# 填入您的 Google WebApp URL
+WEBAPP_URL = "https://script.google.com/macros/s/您的_ID/exec"
 
-def init_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
-    client = gspread.authorize(creds)
-    doc = client.open_by_key(SS_KEY)
+# A股核心观察池 (涵盖白酒、半导体、新能源、高股息、AI算力等)
+CORE_TICKERS_RAW = [
+    "600519", "300750", "601318", "000858", "600036", # 茅台, 宁德, 平安, 五粮液, 招行
+    "601138", "300274", "603501", "688041", "600900", # 工业富联, 阳光电源, 韦尔, 海光, 长江电力
+    "002594", "601899", "002415", "000333", "600030", # 比亚迪, 紫金矿业, 海康威视, 美的, 中信证券
+    "000063", "300502", "002475", "600150", "688981"  # 中兴通讯, 新易盛, 立讯精密, 中国船舶, 中芯国际
+]
+
+SECTOR_MAP = {
+    "600519": "大消费/白酒", "000858": "大消费/白酒", "000333": "大消费/家电",
+    "300750": "新能源/电池", "300274": "新能源/光伏", "002594": "新能源/汽车",
+    "603501": "半导体/IC", "688041": "半导体/算力", "688981": "半导体/代工",
+    "601138": "AI/硬件", "300502": "AI/光模块", "000063": "AI/通信",
+    "601318": "大金融/保险", "600036": "大金融/银行", "600030": "大金融/券商",
+    "600900": "高股息/电力", "601899": "资源/矿业", "600150": "中特估/船舶"
+}
+
+def format_ticker(code):
+    if code.startswith('6'): return f"{code}.SS"
+    if code.startswith('0') or code.startswith('3'): return f"{code}.SZ"
+    if code.startswith('688'): return f"{code}.SS"
+    if code.startswith('8') or code.startswith('4'): return f"{code}.BJ"
+    return code
+
+CORE_TICKERS = [format_ticker(t) for t in CORE_TICKERS_RAW]
+
+# ==========================================
+# 2. 深度净化工具
+# ==========================================
+def safe_val(v, is_num=True):
     try:
-        return doc.worksheet("A-Share V50-Guardian")
+        if v is None: return 0.0 if is_num else ""
+        if hasattr(v, 'iloc'): v = v.iloc[-1]
+        val = float(v)
+        return val if math.isfinite(val) else 0.0
     except:
-        return doc.add_worksheet(title="A-Share V50-Guardian", rows=1000, cols=20)
+        return 0.0 if is_num else str(v)
 
 # ==========================================
-# 🧠 2. V50.0 守护者审计引擎 (大环境感知 + 枢轴触发)
+# 3. 核心算法逻辑 (适配 A股 波动率)
 # ==========================================
-def calculate_guardian_engine(df, index_series, mkt_cap, market_mode):
+def calculate_v1000_nexus_ashare(df, benchmark_df):
     try:
-        if len(df) < 200: return None
-        c = df['Close'].astype(float); h = df['High'].astype(float); l = df['Low'].astype(float)
-        v = df['Volume'].astype(float); o = df['Open'].astype(float)
-        price = float(c.iloc[-1])
+        if len(df) < 60: return None
+        # 确保数据为 Series
+        close = df['Close'].squeeze()
+        high = df['High'].squeeze()
+        low = df['Low'].squeeze()
+        curr_price = float(close.iloc[-1])
         
-        # --- A. 均线与 52 周高位位置 ---
-        ma20, ma50, ma200 = c.rolling(20).mean(), c.rolling(50).mean(), c.rolling(200).mean()
-        lookback_1y = min(252, len(df))
-        h52 = h.tail(lookback_1y).max()
-        range_pos = (price - l.tail(lookback_1y).min()) / (h52 - l.tail(lookback_1y).min() + 0.001) * 100
+        # 1. 相对强度 (RS) - 对标沪深300
+        bench_aligned = benchmark_df.reindex(close.index).ffill()
+        rs_line = (close / bench_aligned).dropna()
+        # A股 RS 创新高通常是主升浪标志
+        rs_nh_20 = bool(rs_line.iloc[-1] >= rs_line.tail(25).max())
         
-        # --- B. 枢轴买点探测 (Pivot Point) ---
-        # 寻找最近 10 天的最高价作为枢轴
-        pivot_price = h.tail(10).head(9).max() 
-        is_pivot_break = price >= pivot_price
+        # 2. 紧致度 (A股版 VCP)
+        # A股由于10%限制，收盘价标准差/均值更平滑
+        tightness = float((close.tail(12).std() / close.tail(12).mean()) * 100)
         
-        # --- C. RS 强度与 Stealth ---
-        rs_line = (c / index_series).fillna(method='ffill')
-        rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
-        rs_score = (price / c.iloc[-21] * 3) + (price / c.iloc[-63] * 1) # 短期聚焦
-        is_rs_stealth = rs_nh and (price < h.tail(20).max() * 1.015)
+        # 3. RS 评分 (滚动表现)
+        def get_perf(days):
+            if len(close) < days: return 0.0
+            return (curr_price - close.iloc[-days]) / close.iloc[-days]
+        
+        # 加权：近1个月(21天)权重最高，反映 A股 短线爆发力
+        rs_score = float(get_perf(21)*4 + get_perf(63)*2 + get_perf(126))
 
-        # --- D. 机构纯度成交量 (Intensity) ---
-        up_v = v[c > c.shift(1)].tail(20).mean()
-        dn_v = v[c < c.shift(1)].tail(20).mean()
-        vol_intensity = up_v / (dn_v + 1) # 上涨日量能比下跌日量能
-
-        # --- E. 针对 600519 的反转探测 ---
-        # 大市值 + 回踩均线止跌 + 量能背离
-        is_bluechip_rebound = mkt_cap > 1000e8 and price > ma20.iloc[-1] and v.iloc[-1] < v.tail(5).mean()
-
-        # ==========================================
-        # ⚔️ 战术标签与综合评分
-        # ==========================================
-        action = "观察"
-        # 1. 🌅 黎明枢轴 (高确定性突破点)
-        if is_pivot_break and vol_intensity > 1.2 and range_pos > 65:
-            action = "🌅 黎明枢轴(买点确认)"
-        # 2. 🛡️ 蓝筹护盘 (600519 提早探测)
-        elif is_bluechip_rebound and rs_line.iloc[-1] > rs_line.iloc[-5]:
-            action = "🛡️ 蓝筹复苏(潜伏)"
-        # 3. 👁️ 奇点先行
-        elif is_rs_stealth and vol_intensity > 1.1:
-            action = "👁️ 奇点先行(Stealth)"
-        # 4. 🚀 龙抬头
-        elif rs_nh and price >= h52 * 0.98:
-            action = "🚀 天际突破(Breakout)"
-
-        # 评分模型：RS(40%) + 强度(30%) + 位置(30%)
-        score = (rs_score * 30) + (vol_intensity * 25) + (range_pos * 0.2)
-        if market_mode == "DOWN": score *= 0.8 # 大盘不好，分值缩减
-        if action != "观察": score += 20 # 战术加分
-
+        signals, base_res = [], 0
+        # 信号 A：奇点突破 (RS 新高 + 价格横盘)
+        if rs_nh_20 and tightness < 2.5: 
+            signals.append("👁️奇点"); base_res += 4
+        # 信号 B：高位平台 (接近半年高点)
+        h120 = float(high.tail(120).max())
+        if curr_price >= h120 * 0.92: 
+            signals.append("🚀高位"); base_res += 2
+        # 信号 C：多头排列
+        ma20 = close.rolling(20).mean().iloc[-1]
+        if curr_price > ma20:
+            base_res += 1
+        
+        # A股平均振幅 (ADR)
+        adr = float(((high - low) / low).tail(20).mean() * 100)
+        
         return {
-            "action": action, "score": score, "pivot": round(pivot_price, 2),
-            "intensity": round(vol_intensity, 2), "rs_nh": "🌟" if rs_nh else "-",
-            "r_pos": round(range_pos, 1)
+            "RS_Score": rs_score, "Signals": signals, "Base_Res": base_res, 
+            "Price": curr_price, "Tightness": tightness, "ADR": adr
         }
-    except: return None
+    except Exception as e:
+        # print(f"计算报错: {e}")
+        return None
 
 # ==========================================
-# 🚀 3. 主扫描流程 (大盘制动集成版)
+# 4. 主指挥引擎
 # ==========================================
-def run_v50_guardian():
-    now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    print(f"[{now_str}] 🚀 A股 V50.0 守护者启动：正在全市场透视...")
+def run_v1000_ashare():
+    start_time = time.time()
+    print("🚀 V1000 [A股枢纽版] 启动分析...")
 
-    # 1. 🚦 大盘环境审计 (Regime Check)
     try:
-        m_idx = yf.download("000300.SS", period="100d", progress=False)
-        m_close = m_idx['Close'].iloc[-1].item()
-        m_ma50 = m_idx['Close'].rolling(50).mean().iloc[-1]
-        market_mode = "UP" if m_close > m_ma50 else "DOWN"
-        print(f" -> 🚦 当前大盘模式: {market_mode}")
-    except: market_mode = "UP"
+        # 下载数据 (沪深300作为基准)
+        data = yf.download(CORE_TICKERS, period="1y", group_by='ticker', threads=True, progress=False)
+        bench_df = yf.download("000300.SS", period="1y", progress=False)['Close'].squeeze()
+        # 大盘情绪：沪深300当日涨跌
+        mkt_change = ((bench_df.iloc[-1] - bench_df.iloc[-2]) / bench_df.iloc[-2]) * 100
+    except Exception as e:
+        print(f"❌ 数据下载失败: {e}"); return
 
-    # 2. TV 云端筛选 (市值>65亿)
-    tv_url = "https://scanner.tradingview.com/china/scan"
-    payload = {"columns": ["name", "description", "market_cap_basic", "industry", "close", "change"],
-               "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 65e8}],
-               "range": [0, 850], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
-    try:
-        resp = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
-        df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][3], "price": d['d'][4], "chg": d['d'][5]} for d in resp])
-    except: return print("❌ 接口断开")
-
-    # 3. 核心扫描
-    all_hits = []
-    tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
-    chunk_size = 40
-    idx_raw = yf.download("000300.SS", period="350d", progress=False)['Close'].iloc[:, 0]
+    candidates = []
+    sector_cluster = {}
     
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        data = yf.download(chunk, period="1y", group_by='ticker', progress=False, threads=True)
-        for t in chunk:
-            try:
-                if t not in data.columns.get_level_values(0): continue
-                df_h = data[t].dropna()
-                c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
-                
-                res = calculate_guardian_engine(df_h, idx_raw, row_info['mkt'], market_mode)
-                if not res or res['action'] == "观察": continue
-
-                all_hits.append({
-                    "Ticker": c_code, "Name": row_info['name'], "指令": res['action'], "枢轴买点": res['pivot'],
-                    "综合评分": res['score'], "52W位置%": res['r_pos'], "量能强度": res['intensity'],
-                    "行业": row_info['industry'], "现价": row_info['price'], "板块热力": 0
-                })
-            except: continue
-
-    if not all_hits: return print("⚠️ 行情极寒，无幸存火种")
-
-    # 4. 🔥 军团共振逻辑
-    res_df = pd.DataFrame(all_hits)
-    industry_counts = res_df['行业'].value_counts()
-    def guardian_boost(row):
-        count = industry_counts[row['行业']]
-        if count >= 3:
-            row['指令'] = f"🛡️ 军团 | {row['指令']}"
-            row['综合评分'] += 15
-        row['板块热力'] = count
-        return row
-    res_df = res_df.apply(guardian_boost, axis=1)
-    
-    # 5. 排序与写入
-    res_df['RS评级'] = res_df['综合评分'].rank(pct=True).apply(lambda x: int(x*99))
-    res_df = res_df.sort_values(by="RS评级", ascending=False).head(60)
-
-    sh = init_sheet(); sh.clear()
-    cols = ["Ticker", "Name", "指令", "RS评级", "枢轴买点", "52W位置%", "量能强度", "板块热力", "行业", "现价"]
-    sh.update(range_name="A1", values=[cols] + res_df[cols].values.tolist(), value_input_option="USER_ENTERED")
-    sh.update_acell("L1", f"V50.0 Guardian | 大盘水位: {market_mode} | {now_str}")
-
-    # 6. 视觉美化
-    if HAS_FORMATTING:
+    for t_full in CORE_TICKERS:
         try:
-            set_frozen(sh, rows=1)
-            fmt_rules = get_conditional_format_rules(sh)
-            # 枢轴点买点加黄
-            rule_pivot = ConditionalFormatRule(ranges=[GridRange.from_a1_range('E2:E65', sh)],
-                booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['0']),
-                    format=cellFormat(backgroundColor=color(1, 1, 0.8), textFormat=textFormat(bold=True))))
-            fmt_rules.append(rule_pivot); fmt_rules.save()
-        except: pass
+            t_raw = t_full.split('.')[0]
+            df_t = data[t_full].dropna()
+            if df_t.empty or len(df_t) < 40: continue
+            
+            res = calculate_v1000_nexus_ashare(df_t, bench_df)
+            if res:
+                res["Ticker"] = t_raw
+                res["Sector"] = SECTOR_MAP.get(t_raw, "其他板块")
+                candidates.append(res)
+                sector_cluster[res["Sector"]] = sector_cluster.get(res["Sector"], 0) + 1
+        except: continue
 
-    print(f"✅ V50.0 守护者任务完成！")
+    if not candidates:
+        print("📭 当前市场无枢纽信号"); return
+
+    # 排序：得分越高越靠前
+    sorted_df = pd.DataFrame(candidates).sort_values(by=["Base_Res", "RS_Score"], ascending=False).head(15)
+    
+    final_list = []
+    for _, row in sorted_df.iterrows():
+        rating = "💎SSS 领涨" if row['Base_Res'] >= 5 else ("🔥强势" if row['RS_Score'] > 0.2 else "✅观察")
+        sig_str = " + ".join(row['Signals']) if row['Signals'] else "📈 稳健趋势"
+        cluster = f"{sector_cluster.get(row['Sector'], 1)}家异动"
+        
+        final_list.append([
+            str(row['Ticker']),
+            rating,
+            sig_str,
+            cluster,
+            f"{round(row['ADR'], 2)}%", # A股看重弹性(ADR)
+            round(float(row['Price']), 2),
+            f"{round(float(row['Tightness']), 2)}%",
+            round(float(row['RS_Score']), 2),
+            str(row['Sector']),
+            "A-Share"
+        ])
+
+    # 构造北京时间
+    bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%m-%d %H:%M')
+    mkt_status = "多头" if mkt_change > 0 else "空头"
+    
+    header = [
+        ["🏰 V1000 A股枢纽控制台", "更新:", bj_now, "大盘:", f"{round(mkt_change,2)}%", mkt_status, "", "", "", ""],
+        ["代码", "综合评级", "核心信号", "板块共振", "波动率AD", "现价", "收盘紧致度", "RS强度", "所属行业", "市场"]
+    ]
+    
+    matrix = header + final_list
+    
+    try:
+        # 清洗并发送
+        clean_matrix = json.loads(json.dumps(matrix, default=lambda x: safe_val(x, is_num=False)))
+        resp = requests.post(WEBAPP_URL, json=clean_matrix, timeout=15)
+        print(f"🎉 A股数据同步成功！耗时: {round(time.time() - start_time, 2)}s")
+    except Exception as e:
+        print(f"❌ 同步失败: {e}")
 
 if __name__ == "__main__":
-    run_v50_guardian()
+    run_v1000_ashare()
