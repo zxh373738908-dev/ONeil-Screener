@@ -21,7 +21,7 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 ACCOUNT_SIZE = 10000  
 
-CORE_LEADERS = ["NVDA", "GOOGL", "CF", "PR", "TSLA", "PLTR", "META", "AVGO", "COST", "AAPL", "MSFT", "AMZN"]
+CORE_LEADERS =["NVDA", "GOOGL", "CF", "PR", "TSLA", "PLTR", "META", "AVGO", "COST", "AAPL", "MSFT", "AMZN"]
 
 # ==========================================
 # 🛡️ 核心工具
@@ -64,7 +64,9 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
         
         is_stage_2 = bool(current_price > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
         
-        rs_line = (close / spy_df).fillna(method='ffill')
+        # 🌟 修复：Pandas 新版 ffill 写法，解决 fillna 的 FutureWarning
+        rs_line = (close / spy_df).ffill()
+        
         rs_3m = safe_div(current_price, close.iloc[-63])
         rs_score = (rs_3m * 2) + safe_div(current_price, close.iloc[-126]) + safe_div(current_price, close.iloc[-252])
         rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
@@ -165,7 +167,7 @@ def run_v750_apex_sentinel():
     breadth = (breadth_c / valid_count * 100) if valid_count > 0 else 50.0
 
     print(f"🚀 [2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
-    candidates = []
+    candidates =[]
     for t in valid_ts:
         try:
             df = data[t].dropna()
@@ -177,12 +179,20 @@ def run_v750_apex_sentinel():
             if vix > 29 and "🚀" in v750['action']: continue
             if not v750['is_stage_2'] and not v750['is_early_bird']: continue
 
+            # 🌟 修复：将 Price 和 止损位 强制转换为带有 $ 符号的字符串，彻底解决 Google Sheets 格式错位问题
             candidates.append({
-                "Ticker": t, "Action": v750['action'], "Score": v750['score'], 
-                "Sector": ticker_sector_map.get(t, "Other"), "Price": v750['price'],
-                "建议买入": v750['shares'], "止损位": v750['stop'], 
-                "U/D比": v750['ud'], "紧致度": v750['tight'], "ADR%": v750['adr'],
-                "RS新高": "🌟" if v750['rs_nh'] else "-", "Stock_Dollar_Vol": v750['dollar_vol']
+                "Ticker": t, 
+                "Action": v750['action'], 
+                "Score": round(v750['score'], 2), 
+                "Sector": ticker_sector_map.get(t, "Other"), 
+                "Price": f"${v750['price']:.2f}",               
+                "建议买入": v750['shares'], 
+                "止损位": f"${v750['stop']:.2f}",                 
+                "U/D比": v750['ud'], 
+                "紧致度": v750['tight'], 
+                "ADR%": v750['adr'],
+                "RS新高": "🌟" if v750['rs_nh'] else "-", 
+                "Stock_Dollar_Vol": v750['dollar_vol']
             })
         except: continue
 
@@ -192,7 +202,7 @@ def run_v750_apex_sentinel():
     final_seeds = cand_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(10)
 
     print(f"🔥 [3/3] 正在审计期权异动...")
-    results = []
+    results =[]
     weather = "☀️ 极佳" if (breadth > 60 and vix < 21) else "⛈️ 风险" if (breadth < 40 or vix > 28) else "☁️ 震荡"
 
     for _, row in final_seeds.iterrows():
@@ -241,16 +251,13 @@ def final_output(res, vix, breadth, weather):
         bj_time_str = datetime.datetime.now(beijing_tz).strftime('%Y-%m-%d %H:%M')
 
         header = [
-            ["🏰 [V750 哨兵巅峰 - 机构纯净版]", "", "Update(北京时间):", bj_time_str],
-            ["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],
-            ["大师指令:", "已开启机构护城河：过滤 $10 以下及日均成交额不足千万美元的弱流动性标的。"],
-            ["", "", "", ""]
+            ["🏰[V750 哨兵巅峰 - 机构纯净版]", "", "Update(北京时间):", bj_time_str],["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],["大师指令:", "已开启机构护城河：过滤 $10 以下及日均成交额不足千万美元的弱流动性标的。"],["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
         
         if res:
             df = pd.DataFrame(res)
-            cols = ["Ticker", "评级", "Action", "期权异动", "Price", "建议买入", "止损位", "U/D比", "紧致度", "期权看涨%", "期现比", "财报日", "Sector"]
+            cols =["Ticker", "评级", "Action", "期权异动", "Price", "建议买入", "止损位", "U/D比", "紧致度", "期权看涨%", "期现比", "财报日", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             sh.update(values=[df.columns.tolist()] + [[robust_json_clean(c) for c in r] for r in df.values.tolist()], range_name="A5")
         else:
