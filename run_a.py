@@ -8,7 +8,8 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 熔断配置中心
 # ==========================================
-WEBAPP_URL = "你的_URL_HERE"
+# 请确保这里填入的是你真实的 Google 部署 URL
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyaG1UpjC3NLqrqC5T3oIcGM8mnstV-AzlmEDTMdrcfgsOzjzek3aeAqYtg-74ZHv8_/exec"
 
 # 核心观察池
 CORE_TICKERS_RAW = [
