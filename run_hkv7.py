@@ -6,19 +6,22 @@ import datetime, time, requests, json, math, warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (请填入您的 Web App URL)
+# 1. 配置中心
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwfstK4Xq1DXft4U3_Qg9pjCQ5Qp0FiIskzrKnT1VFdRiH5FFyk6Iikv0FAcZNrPtp-/exec"
 
-TOTAL_CAPITAL = 1000000  # 100万港币基准
-MAX_RISK_PER_STOCK = 0.008 # 单笔损失控制在总资产 0.8%
+TOTAL_CAPITAL = 1000000 
+MAX_RISK_PER_STOCK = 0.008 
 
-CORE_TICKERS_HK = [
-    "0700.HK", "3690.HK", "9988.HK", "1211.HK", "1810.HK", 
+# 核心领袖监控名单 (必须出现在表格中)
+LEADER_WATCH = ["0700.HK", "3690.HK", "9988.HK", "1211.HK", "1810.HK"]
+
+# 扩展扫描池
+CORE_TICKERS_HK = list(set(LEADER_WATCH + [
     "0941.HK", "2318.HK", "0005.HK", "9999.HK", "0883.HK",
     "1024.HK", "1299.HK", "2015.HK", "9618.HK", "0939.HK",
     "1398.HK", "2331.HK", "2020.HK", "1177.HK", "2269.HK", "0388.HK"
-]
+]))
 
 SECTOR_MAP = {
     "0700.HK": "互联网/社交", "3690.HK": "生活服务", "9988.HK": "电商/云",
@@ -28,86 +31,74 @@ SECTOR_MAP = {
 }
 
 # ==========================================
-# 🧠 2. 量子统帅核心演算法 (四剑合一版)
+# 🧠 2. 量子大师演算引擎
 # ==========================================
-def calculate_quantum_commander(df, hsi_series):
+def calculate_master_commander(df, hsi_series):
     try:
-        if len(df) < 150: return None
+        if len(df) < 120: return None
         close = df['Close'].ffill()
         high = df['High'].ffill()
         low = df['Low'].ffill()
         vol = df['Volume'].ffill()
         cp = float(close.iloc[-1])
         
-        # A. 趋势状态 (适应性 Stage 2)
+        # A. 趋势状态 (核心指标)
+        ma10 = float(close.rolling(10).mean().iloc[-1])
         ma50 = float(close.rolling(50).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1])
-        is_bull = cp > ma50 # 只要站在50日线上即视为短期转强
+        is_bull = cp > ma50
         
-        # B. RS 觉醒与斜率 (对比恒指)
+        # B. 相对强度与觉醒 (RS Awakening)
         bench_aligned = hsi_series.reindex(close.index).ffill()
         rs_line = close / bench_aligned
         rs_ma20 = rs_line.rolling(20).mean()
-        # 觉醒：RS线上穿其20日均线
         rs_awakening = rs_line.iloc[-1] > rs_ma20.iloc[-1] and rs_line.iloc[-2] <= rs_ma20.iloc[-2]
-        rs_nh = bool(float(rs_line.iloc[-1]) >= float(rs_line.tail(30).max()))
+        rs_nh = bool(float(rs_line.iloc[-1]) >= float(rs_line.tail(40).max()))
         
         # C. 量能：口袋枢轴 (Pocket Pivot)
-        # 当日阳线且成交量 > 过去10天内最大阴线成交量
         neg_days = vol[-11:-1][close[-11:-1] < close[-12:-2]]
         max_neg_vol = float(neg_days.max()) if len(neg_days) > 0 else 9e15
         is_pocket = (close.iloc[-1] > close.iloc[-2]) and (vol.iloc[-1] > max_neg_vol)
-        vol_ratio = float(vol.iloc[-1] / vol.rolling(20).mean().iloc[-1])
+        vol_surge = float(vol.iloc[-1] / vol.rolling(20).mean().iloc[-1])
         
-        # D. 结构：VCP 紧致度 (10天收缩)
+        # D. 结构：VCP 紧致度 (收缩判定)
         tightness = float((close.tail(10).std() / close.tail(10).mean()) * 100)
         
-        # E. 风险止损 (动态 ADR)
+        # E. 止损与头寸
         adr = float(((high - low) / low).tail(20).mean() * 100)
-        # 止损取MA50下方1.5%或ADR回撤
         stop_price = max(ma50 * 0.985, cp * (1 - (adr * 0.01 * 1.5)))
-        
-        # F. 信号决策
+        risk_per_share = cp - stop_price
+        shares = (TOTAL_CAPITAL * MAX_RISK_PER_STOCK) // risk_per_share if risk_per_share > 0 else 0
+
+        # F. 信号矩阵
         signals = []
         score = 0
         if is_pocket: signals.append("🎯口袋枢轴"); score += 4
         if rs_awakening: signals.append("🔔强度觉醒"); score += 3
+        if tightness < 1.8: signals.append("👁️紧致"); score += 3
         if rs_nh: signals.append("🌟RS领先"); score += 2
-        if tightness < 1.5: signals.append("👁️极致紧致"); score += 4
-        if cp >= float(high.tail(252).max()) * 0.98: signals.append("🚀巅峰突破"); score += 3
+        if vol_surge > 1.4: signals.append("🔥放量"); score += 2
 
-        # G. 建议头寸 (0.8% 风险模型)
-        risk_per_share = cp - stop_price
-        shares = (TOTAL_CAPITAL * MAX_RISK_PER_STOCK) // risk_per_share if risk_per_share > 0 else 0
-
-        # --- 判定评级 ---
-        if is_bull and score >= 7: rating = "💎SSS 统帅"
-        elif is_bull and score >= 4: rating = "🔥强势股"
+        # 评级逻辑
+        if is_bull and score >= 6: rating = "💎SSS 统帅"
+        elif is_bull: rating = "🔥多头趋势"
         elif score >= 5: rating = "✅信号监控"
         else: rating = "观察"
 
         return {
-            "Rating": rating,
-            "Action": " + ".join(signals) if signals else "横盘积累",
-            "Price": cp,
-            "Tightness": tightness,
-            "Score": score,
-            "Vol_Ratio": vol_ratio,
-            "Shares": int(shares),
-            "Stop": stop_price,
-            "ADR": adr,
-            "is_bull": is_bull,
-            "RS_NH": rs_nh
+            "Rating": rating, "Action": " + ".join(signals) if signals else "震荡蓄势",
+            "Price": cp, "Tightness": tightness, "Score": score, "Vol_Ratio": vol_surge,
+            "Shares": int(shares), "Stop": stop_price, "ADR": adr, "is_bull": is_bull
         }
     except: return None
 
 # ==========================================
-# 3. 执行引擎
+# 🚀 3. 执行引擎
 # ==========================================
-def run_hk_commander():
+def run_master_commander():
     start_t = time.time()
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    print(f"🚀 [{bj_now}] 启动 V1000 量子统帅审计...")
+    print(f"🚀 [{bj_now}] 启动 V1000 大师版审计...")
 
     try:
         data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', progress=False, threads=False)
@@ -116,41 +107,41 @@ def run_hk_commander():
         if isinstance(bench_series, pd.DataFrame): bench_series = bench_series.iloc[:, 0]
         hsi_vol = float(bench_series.pct_change().tail(20).std() * math.sqrt(252) * 100)
     except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
+        print(f"❌ 数据下载失败: {e}"); return
 
     candidates = []
-    sector_heat = {}
-
+    bull_count = 0
+    
     for t in CORE_TICKERS_HK:
         try:
             if t not in data.columns.levels[0]: continue
-            res = calculate_quantum_commander(data[t].dropna(), bench_series)
-            if res and (res["Rating"] != "观察" or res["is_bull"]):
+            res = calculate_master_commander(data[t].dropna(), bench_series)
+            if res:
+                if res["is_bull"]: bull_count += 1
                 res["Ticker"] = t.replace(".HK", "")
                 res["Sector"] = SECTOR_MAP.get(t, "核心/其他")
-                candidates.append(res)
-                sector_heat[res["Sector"]] = sector_heat.get(res["Sector"], 0) + 1
+                
+                # 过滤条件：要么是核心监控 LEADER_WATCH，要么必须有信号/多头
+                if t in LEADER_WATCH or res["Rating"] != "观察" or res["is_bull"]:
+                    candidates.append(res)
         except: continue
 
-    # 排序：评分优先，RS新高优先
-    candidates.sort(key=lambda x: (x['Score'], x['RS_NH']), reverse=True)
+    # 排序：强制领袖股在前，其余按评分排序
+    candidates.sort(key=lambda x: (x['Ticker'] in [t.replace(".HK","") for t in LEADER_WATCH], x['Score']), reverse=True)
     
-    # 构造表格矩阵
+    # 构造表格
+    mkt_breadth = f"{round((bull_count / len(CORE_TICKERS_HK)) * 100, 1)}%"
     matrix = [
-        ["🏰 V1000 量子统帅 [合体版]", "状态:", "✅ 审计同步", "北京时间:", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
-        ["代码", "统帅评级", "核心信号", "建议股数", "现价", "止损价", "紧致度", "综合评分", "量能比", "行业联动"]
+        ["🏰 V1000 量子统帅 [大师版]", "多头广度:", mkt_breadth, "北京时间:", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
+        ["代码", "统帅评级", "核心信号", "建议股数", "现价", "止损价", "紧致度", "评分", "量能比", "所属板块"]
     ]
 
-    if not candidates:
-        matrix.append(["📭", "当前环境极差", "未探测到量子共振信号", "-", "-", "-", "-", "-", "-", "-"])
-    else:
-        for item in candidates[:15]:
-            heat_str = f"{item['Sector']}({sector_heat.get(item['Sector'], 1)}只)"
-            matrix.append([
-                item["Ticker"], item["Rating"], item["Action"], item["Shares"], item["Price"],
-                round(item["Stop"], 2), f"{round(item['Tightness'], 2)}%", item["Score"],
-                f"{round(item['Vol_Ratio'], 2)}x", heat_str
-            ])
+    for item in candidates[:20]: # 增加展示行数
+        matrix.append([
+            item["Ticker"], item["Rating"], item["Action"], item["Shares"], item["Price"],
+            round(item["Stop"], 2), f"{round(item['Tightness'], 2)}%", item["Score"],
+            f"{round(item['Vol_Ratio'], 2)}x", item["Sector"]
+        ])
 
     # 同步 Google Sheets
     try:
@@ -160,9 +151,9 @@ def run_hk_commander():
         
         final_matrix = [[clean_final(c) for c in r] for r in matrix]
         resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=25)
-        print(f"🎉 统帅看板更新成功！捕捉: {len(candidates)} 只 | 耗时: {round(time.time()-start_t, 2)}s")
+        print(f"🎉 统帅看板更新成功！捕捉标的: {len(candidates)} 只 | 广度: {mkt_breadth}")
     except Exception as e:
         print(f"❌ 网络同步失败: {e}")
 
 if __name__ == "__main__":
-    run_hk_commander()
+    run_master_commander()
