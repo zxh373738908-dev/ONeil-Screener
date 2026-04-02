@@ -3,15 +3,15 @@ import pandas as pd
 import numpy as np
 import datetime, time, requests, json, math, warnings
 
+# 屏蔽警告
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 熔断配置中心
+# 1. 熔断配置中心 (已更新你的最新 URL)
 # ==========================================
-# 请确保这里填入的是你真实的 Google 部署 URL
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyaG1UpjC3NLqrqC5T3oIcGM8mnstV-AzlmEDTMdrcfgsOzjzek3aeAqYtg-74ZHv8_/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxPdtWf0ZHbtccckA8OHILNM_c9XlXTFV_dGoJEm5RswQpiqh6rMqu4Os1cOz93IIor/exec"
 
-# 核心观察池
+# 核心观察池 (A股强势龙头)
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
     "002475", "002594", "601899", "600030", "600900", "600150", "300274", "000333",
@@ -24,18 +24,20 @@ def format_ticker(code):
     if code.startswith('688'): return f"{code}.SS"
     return f"{code}.BJ" if code.startswith('8') or code.startswith('4') else code
 
+def safe_convert(obj):
+    if isinstance(obj, (np.integer, np.floating)): return float(obj)
+    return str(obj)
+
 # ==========================================
-# 2. 安全计算插件 (防止数据溢出)
+# 2. 安全计算工具
 # ==========================================
 def safe_div(n, d):
-    """安全除法：防止分母为0或数据溢出"""
     try:
         res = float(n) / (float(d) + 1e-9)
         return res if math.isfinite(res) else 0.0
     except: return 0.0
 
 def clamp(val, min_v, max_v):
-    """极值抑制：防止评分爆表"""
     return max(min(val, max_v), min_v)
 
 # ==========================================
@@ -43,37 +45,33 @@ def clamp(val, min_v, max_v):
 # ==========================================
 def calculate_ultimate_safe(df, bench_series, mkt_regime):
     try:
-        # A. 基础清洗：剔除无效行并强制转为 float
+        # 数据清洗
         df = df.replace([np.inf, -np.inf], np.nan).dropna().astype(float)
         if len(df) < 120: return None
         
         c, h, l, v = df['Close'], df['High'], df['Low'], df['Volume']
         curr_price = float(c.iloc[-1])
         
-        # B. 趋势阶段 (Stage 2)
+        # 趋势阶段 (Stage 2)
         ma50 = c.rolling(50).mean().iloc[-1]
         ma200 = c.rolling(200).mean().iloc[-1]
         is_stage2 = curr_price > ma200 and ma50 > ma200
         
-        # C. 波动率止损 (ATR) - 限制 ATR 异常
+        # 波动率止损 (ATR)
         tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(20).mean().iloc[-1]
-        # 止损价保护：不能低于现价的 50%，不能高于现价
         stop_loss = clamp(curr_price - (atr * 1.5), curr_price * 0.5, curr_price * 0.99)
         
-        # D. 成交量强度 (加装安全阀：最高限制在 10 倍)
+        # 量能强度 (最高限10)
         up_v = v[c > c.shift(1)].tail(10).mean()
         dn_v = v[c < c.shift(1)].tail(10).mean()
         vol_ratio = clamp(safe_div(up_v, dn_v), 0.1, 10.0)
         
-        # E. 枢轴买点 (20日高点)
+        # 枢轴买点 (20日高点)
         pivot_20d = float(h.tail(20).iloc[:-1].max())
         
-        # F. 相对强度评分 (RS) - 归一化处理
+        # 评分计算 (限制0-100)
         bench_aligned = bench_series.reindex(c.index).ffill()
-        rs_line = safe_div(c, bench_aligned)
-        
-        # 性能评分：限制在 0-100 之间
         perf_score = safe_div(curr_price, c.iloc[-21]) * 20 + safe_div(curr_price, c.iloc[-63]) * 10
         final_score = clamp(perf_score + (vol_ratio * 5), 0, 100)
         
@@ -94,7 +92,7 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
     except: return None
 
 # ==========================================
-# 4. 主流程
+# 4. 主执行流程
 # ==========================================
 def run_v50_safe_guard():
     start_time = time.time()
@@ -107,14 +105,15 @@ def run_v50_safe_guard():
         m_idx = yf.download("000300.SS", period="1y", progress=False)
         bench = m_idx['Close'].replace([np.inf, -np.inf], np.nan).dropna().squeeze()
         mkt_regime = "Bull" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "Bear"
-    except: return print("数据源中断")
+    except:
+        print("❌ 数据源获取失败"); return
 
     final_matrix = []
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
-            # 兼容 yfinance 多股下载的 Index 结构
-            df_t = data[t_full] if isinstance(data.columns, pd.MultiIndex) else data
+            # 处理单股或多股数据结构
+            df_t = data[t_full] if len(tickers) > 1 else data
             res = calculate_ultimate_safe(df_t, bench, mkt_regime)
             
             if res:
@@ -129,21 +128,26 @@ def run_v50_safe_guard():
     # 排序
     final_matrix.sort(key=lambda x: x[6], reverse=True)
     
+    # 调试信息 (放在函数内部)
+    print(f"DEBUG: 准备发送的数据行数: {len(final_matrix)}")
+
     header = [
         ["🏰 V50-SafeGuardian (修正版)", "大盘:", mkt_regime, "安全等级:", "高", "", "", "", "", ""],
         ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "更新时间"]
     ]
 
+    # 发送请求
     try:
-        payload = json.loads(json.dumps(header + final_matrix, default=lambda x: str(x)))
-        resp = requests.post(WEBAPP_URL, json=payload, timeout=15)
-        print(f"🎉 数据已安全清洗并同步！响应: {resp.text}")
+        # 将头部和数据合并
+        payload = header + final_matrix
+        # 深度清理格式
+        clean_json = json.loads(json.dumps(payload, default=safe_convert))
+        
+        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=15)
+        print(f"🎉 同步完成！响应: {resp.text}")
+        print(f"⏰ 总耗时: {round(time.time() - start_time, 2)}s")
     except Exception as e:
-        print(f"同步失败: {e}")
+        print(f"❌ 同步失败: {e}")
 
 if __name__ == "__main__":
     run_v50_safe_guard()
-    # 在 final_matrix.sort(...) 之后添加：
-    print(f"DEBUG: 准备发送的数据行数: {len(final_matrix)}") 
-    if len(final_matrix) == 0:
-        print("⚠️ 警告：当前没有符合策略条件的股票，发送的是空列表！")
