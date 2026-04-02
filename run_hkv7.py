@@ -13,7 +13,7 @@ WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwfstK4Xq1DXft4U3_Qg9pjCQ5
 TOTAL_CAPITAL = 1000000 
 MAX_RISK_PER_STOCK = 0.008 
 
-# 核心领袖监控名单 (这些票无论好坏，都会出现在看板前 5 行)
+# 核心监控（必出标的）
 LEADER_WATCH = ["0700.HK", "3690.HK", "9988.HK", "1211.HK", "1810.HK"]
 
 CORE_TICKERS_HK = list(set(LEADER_WATCH + [
@@ -23,90 +23,101 @@ CORE_TICKERS_HK = list(set(LEADER_WATCH + [
 ]))
 
 # ==========================================
-# 🧠 2. 量子哨兵演算法 (增强容错)
+# 🧠 2. 量子哨兵演算法 (修复索引对齐 Bug)
 # ==========================================
 def calculate_sentinel_metrics(df, hsi_series):
     try:
-        # 即使数据不足，也尽量返回基础数据
-        if df is None or len(df) < 50: return None
+        if df is None or len(df) < 60: return None
         
+        # 强制转换为基础 Series 并填充
         close = df['Close'].ffill()
         high = df['High'].ffill()
         low = df['Low'].ffill()
         vol = df['Volume'].ffill()
         cp = float(close.iloc[-1])
         
-        # A. 趋势检测
+        # A. 均线状态
         ma10 = float(close.rolling(10).mean().iloc[-1])
         ma50 = float(close.rolling(50).mean().iloc[-1])
-        # 多头状态判断
         is_bull = cp > ma50
-        short_term_up = cp > ma10
         
-        # B. RS 觉醒 (对比恒指)
+        # B. RS 觉醒 (忽略索引对比)
         bench_aligned = hsi_series.reindex(close.index).ffill()
-        rs_line = close / bench_aligned
+        rs_line = (close / bench_aligned).dropna()
+        if len(rs_line) < 20: return None
+        
         rs_ma20 = rs_line.rolling(20).mean()
-        rs_awakening = rs_line.iloc[-1] > rs_ma20.iloc[-1]
+        # 显式使用 iloc 标量对比，避免 Series 对比报错
+        rs_awakening = float(rs_line.iloc[-1]) > float(rs_ma20.iloc[-1])
         
         # C. 紧致度 (收缩判定)
         tightness = float((close.tail(10).std() / close.tail(10).mean()) * 100)
         
-        # D. 口袋枢轴
-        neg_days = vol[-10:-1][close[-10:-1] < close[-11:-2]]
-        max_neg_vol = float(neg_days.max()) if len(neg_days) > 0 else 9e15
-        is_pocket = (cp > close.iloc[-2]) and (vol.iloc[-1] > max_neg_vol)
+        # D. 口袋枢轴 (修复关键：使用 .values 忽略日期索引)
+        # 获取过去10天的收盘价和成交量切片
+        v_slice = vol.iloc[-11:-1].values
+        c_slice = close.iloc[-11:-1].values
+        c_prev_slice = close.iloc[-12:-2].values
+        
+        # 找出过去10天里的阴线成交量
+        neg_vol_list = v_slice[c_slice < c_prev_slice]
+        max_neg_vol = float(np.max(neg_vol_list)) if len(neg_vol_list) > 0 else 9e15
+        
+        # 当日成交量对比
+        is_pocket = (cp > float(close.iloc[-2])) and (float(vol.iloc[-1]) > max_neg_vol)
 
-        # E. 评分与评级
+        # E. 评分系统
         score = 0
         signals = []
         if is_pocket: signals.append("🎯口袋枢轴"); score += 4
         if rs_awakening: signals.append("🔔RS觉醒"); score += 3
         if tightness < 1.8: signals.append("👁️紧致"); score += 3
-        if cp > ma10 and close.iloc[-1] > close.iloc[-2]: signals.append("📈转强"); score += 2
+        if cp > ma10: signals.append("📈转强"); score += 2
 
+        # 状态判定
         if is_bull and score >= 6: rating = "💎SSS 统帅"
         elif is_bull: rating = "🔥多头趋势"
-        elif short_term_up: rating = "✅短线转强"
+        elif cp > ma10: rating = "✅短线转强"
         else: rating = "❄️均线压制"
 
         adr = float(((high - low) / low).tail(20).mean() * 100)
-        # 风险止损计算
         stop_p = max(ma50 * 0.98, cp * (1 - (adr * 0.01 * 1.5)))
         shares = (TOTAL_CAPITAL * MAX_RISK_PER_STOCK) // (cp - stop_p) if cp > stop_p else 0
 
         return {
-            "Rating": rating, "Action": " + ".join(signals) if signals else "横盘积累",
+            "Rating": rating, "Action": " + ".join(signals) if signals else "震荡蓄势",
             "Price": cp, "Tightness": tightness, "Score": score,
-            "Shares": int(shares), "Stop": stop_p, "is_bull": is_bull, "Ticker": ""
+            "Shares": int(shares), "Stop": stop_p, "is_bull": is_bull
         }
     except Exception as e:
+        # 打印详细错误到终端以便调试
+        print(f"Error detail: {e}")
         return {"Rating": "⚠️计算异常", "Action": str(e)[:15], "Price": 0, "Tightness": 0, "Score": 0, "Shares": 0, "Stop": 0, "is_bull": False}
 
 # ==========================================
-# 🚀 3. 主程序
+# 🚀 3. 执行引擎
 # ==========================================
 def run_sentinel_commander():
     start_t = time.time()
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    print(f"🚀 [{bj_now}] 启动量子哨兵强制审计...")
+    print(f"🚀 [{bj_now}] 启动量子哨兵最终加固版...")
 
     try:
-        # 下载数据
+        # threads=False 避免数据库锁定
         data = yf.download(CORE_TICKERS_HK, period="2y", group_by='ticker', progress=False, threads=False)
         bench_raw = yf.download("^HSI", period="2y", progress=False, threads=False)
         bench_series = bench_raw['Close'].squeeze()
         if isinstance(bench_series, pd.DataFrame): bench_series = bench_series.iloc[:, 0]
         hsi_vol = float(bench_series.pct_change().tail(20).std() * math.sqrt(252) * 100)
     except Exception as e:
-        print(f"❌ 基础数据抓取失败: {e}"); return
+        print(f"❌ 数据获取失败: {e}"); return
 
     candidates = []
     bull_count = 0
     
-    # 遍历票池
     for t in CORE_TICKERS_HK:
         try:
+            # 获取个股数据切片
             df_t = data[t].dropna() if t in data.columns.levels[0] else None
             res = calculate_sentinel_metrics(df_t, bench_series)
             
@@ -114,35 +125,31 @@ def run_sentinel_commander():
                 res["Ticker"] = t.replace(".HK", "")
                 if res["is_bull"]: bull_count += 1
                 
-                # 核心逻辑：LEADER_WATCH 必进，其他标的需符合 Rating != 均线压制
-                if t in LEADER_WATCH or res["Rating"] != "❄️均线压制":
+                # 策略：LEADER_WATCH 必出，其他有信号才出
+                if (t in LEADER_WATCH) or (res["Score"] > 0) or (res["is_bull"]):
                     candidates.append(res)
         except: continue
 
-    # 排序：将 LEADER_WATCH 强制排在最前面，其余按 Score 排序
-    def sort_logic(x):
+    # 排序：Leader 强制置顶，其余按评分排
+    def sort_key(x):
         is_leader = 1 if (x['Ticker'] + ".HK") in LEADER_WATCH else 0
         return (is_leader, x['Score'])
 
-    candidates.sort(key=sort_logic, reverse=True)
+    candidates.sort(key=sort_key, reverse=True)
     
-    # 构造表格
+    # 构造写入矩阵
     mkt_breadth = f"{round((bull_count / len(CORE_TICKERS_HK)) * 100, 1)}%"
     matrix = [
-        ["🏰 V1000 量子哨兵 [监控版]", "多头广度:", mkt_breadth, "北京时间:", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
-        ["代码", "哨兵评级", "核心信号", "建议股数", "现价", "止损参考", "紧致度", "强度评分", "状态", "板块"]
+        ["🏰 V1000 量子哨兵 [最终加固]", "多头广度:", mkt_breadth, "北京时间:", bj_now, f"大盘波动: {round(hsi_vol,1)}%", "", "", "", ""],
+        ["代码", "哨兵评级", "核心信号", "建议股数", "现价", "止损参考", "紧致度", "强度评分", "趋势状态", "板块"]
     ]
 
-    # 如果没数据，至少显示表头
-    if not candidates:
-        matrix.append(["📭", "当前环境极度低迷", "未发现任何量子信号", "-", "-", "-", "-", "-", "-", "-"])
-    else:
-        for item in candidates[:20]:
-            matrix.append([
-                item["Ticker"], item["Rating"], item["Action"], item["Shares"], item["Price"],
-                round(item["Stop"], 2), f"{round(item['Tightness'], 2)}%", item["Score"],
-                "多头" if item["is_bull"] else "空头", "核心蓝筹"
-            ])
+    for item in candidates[:25]:
+        matrix.append([
+            item["Ticker"], item["Rating"], item["Action"], item["Shares"], item["Price"],
+            round(item["Stop"], 2), f"{round(item['Tightness'], 2)}%", item["Score"],
+            "多头" if item["is_bull"] else "空头", "核心蓝筹"
+        ])
 
     # 同步 Google Sheets
     try:
