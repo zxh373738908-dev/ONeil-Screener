@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 熔断配置中心 (已更新你的最新 URL)
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxPdtWf0ZHbtccckA8OHILNM_c9XlXTFV_dGoJEm5RswQpiqh6rMqu4Os1cOz93IIor/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzZdO1FFAZGwP3WH0_urUNlR9pePn3Sajkz9OePhpqchCfkAVmagpusGSASwrM9SLl7/exec"
 
 # 核心观察池 (A股强势龙头)
 CORE_TICKERS_RAW = [
