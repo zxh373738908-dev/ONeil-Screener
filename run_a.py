@@ -143,3 +143,7 @@ def run_v50_safe_guard():
 
 if __name__ == "__main__":
     run_v50_safe_guard()
+    # 在 final_matrix.sort(...) 之后添加：
+    print(f"DEBUG: 准备发送的数据行数: {len(final_matrix)}") 
+    if len(final_matrix) == 0:
+        print("⚠️ 警告：当前没有符合策略条件的股票，发送的是空列表！")
