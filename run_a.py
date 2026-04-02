@@ -6,11 +6,11 @@ import datetime, time, requests, json, math, warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心
+# 1. 熔断配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyaG1UpjC3NLqrqC5T3oIcGM8mnstV-AzlmEDTMdrcfgsOzjzek3aeAqYtg-74ZHv8_/exec"
+WEBAPP_URL = "你的_URL_HERE"
 
-# 扩充核心池：增加各赛道弹性龙头，建议扩充至 60+ 只
+# 核心观察池
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
     "002475", "002594", "601899", "600030", "600900", "600150", "300274", "000333",
@@ -24,114 +24,121 @@ def format_ticker(code):
     return f"{code}.BJ" if code.startswith('8') or code.startswith('4') else code
 
 # ==========================================
-# 2. 核心分析引擎 (Ultimate 版)
+# 2. 安全计算插件 (防止数据溢出)
 # ==========================================
-def calculate_ultimate_engine(df, bench_series, mkt_regime):
+def safe_div(n, d):
+    """安全除法：防止分母为0或数据溢出"""
     try:
-        if len(df) < 200: return None
+        res = float(n) / (float(d) + 1e-9)
+        return res if math.isfinite(res) else 0.0
+    except: return 0.0
+
+def clamp(val, min_v, max_v):
+    """极值抑制：防止评分爆表"""
+    return max(min(val, max_v), min_v)
+
+# ==========================================
+# 3. 核心安全引擎
+# ==========================================
+def calculate_ultimate_safe(df, bench_series, mkt_regime):
+    try:
+        # A. 基础清洗：剔除无效行并强制转为 float
+        df = df.replace([np.inf, -np.inf], np.nan).dropna().astype(float)
+        if len(df) < 120: return None
         
-        c = df['Close'].squeeze()
-        h = df['High'].squeeze()
-        l = df['Low'].squeeze()
-        v = df['Volume'].squeeze()
+        c, h, l, v = df['Close'], df['High'], df['Low'], df['Volume']
         curr_price = float(c.iloc[-1])
         
-        # --- A. 趋势阶阶段过滤 (Stage 2 Check) ---
+        # B. 趋势阶段 (Stage 2)
         ma50 = c.rolling(50).mean().iloc[-1]
         ma200 = c.rolling(200).mean().iloc[-1]
-        # 核心：股价必须在200日线上方，且50日线也在200日线上方（典型的多头趋势）
         is_stage2 = curr_price > ma200 and ma50 > ma200
         
-        # --- B. 波动率与科学止损 (ATR Stop Loss) ---
-        # 计算 20 日 ATR (平均真实波幅)
+        # C. 波动率止损 (ATR) - 限制 ATR 异常
         tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(20).mean().iloc[-1]
-        stop_loss = curr_price - (atr * 1.5) # 1.5倍ATR止损
+        # 止损价保护：不能低于现价的 50%，不能高于现价
+        stop_loss = clamp(curr_price - (atr * 1.5), curr_price * 0.5, curr_price * 0.99)
         
-        # --- C. 枢轴买点与成交量强度 ---
+        # D. 成交量强度 (加装安全阀：最高限制在 10 倍)
+        up_v = v[c > c.shift(1)].tail(10).mean()
+        dn_v = v[c < c.shift(1)].tail(10).mean()
+        vol_ratio = clamp(safe_div(up_v, dn_v), 0.1, 10.0)
+        
+        # E. 枢轴买点 (20日高点)
         pivot_20d = float(h.tail(20).iloc[:-1].max())
-        up_vol = v[c > c.shift(1)].tail(10).mean()
-        dn_vol = v[c < c.shift(1)].tail(10).mean()
-        vol_ratio = up_vol / (dn_vol + 1)
         
-        # --- D. 相对强度评分 ---
+        # F. 相对强度评分 (RS) - 归一化处理
         bench_aligned = bench_series.reindex(c.index).ffill()
-        rs_line = (c / bench_aligned).dropna()
-        rs_nh = rs_line.iloc[-1] >= rs_line.tail(120).max() # 半年RS新高
+        rs_line = safe_div(c, bench_aligned)
         
-        # 计算综合评分
-        score = (curr_price/c.iloc[-21]*40) + (vol_ratio*20)
-        if not is_stage2: score *= 0.5 # 非二阶段趋势，评分减半
-        if mkt_regime == "Bear": score *= 0.7
+        # 性能评分：限制在 0-100 之间
+        perf_score = safe_div(curr_price, c.iloc[-21]) * 20 + safe_div(curr_price, c.iloc[-63]) * 10
+        final_score = clamp(perf_score + (vol_ratio * 5), 0, 100)
+        
+        if not is_stage2: final_score *= 0.6
+        if mkt_regime == "Bear": final_score *= 0.8
 
-        # 战术标签
-        action = "持有/观察"
-        if is_stage2 and curr_price >= pivot_20d * 0.98 and vol_ratio > 1.3:
+        action = "观察"
+        if is_stage2 and curr_price >= pivot_20d * 0.98 and vol_ratio > 1.2:
             action = "🚀 枢轴突破"
-        elif rs_nh and (c.tail(10).std()/c.tail(10).mean()) < 0.02:
-            action = "👁️ 奇点缩量"
+        elif vol_ratio > 1.5 and curr_price > ma50:
+            action = "🛡️ 机构吸筹"
 
         return {
-            "score": score, "action": action, "pivot": pivot_20d,
-            "stop": stop_loss, "vol": vol_ratio, "stage2": "✅" if is_stage2 else "❌"
+            "score": round(final_score, 2), "action": action, 
+            "pivot": round(pivot_20d, 2), "stop": round(stop_loss, 2), 
+            "vol": round(vol_ratio, 2), "stage2": "✅" if is_stage2 else "❌"
         }
     except: return None
 
 # ==========================================
-# 3. 主流程
+# 4. 主流程
 # ==========================================
-def run_v50_ultimate():
+def run_v50_safe_guard():
     start_time = time.time()
-    print("🛡️ V50-Ultimate 终极审计启动...")
+    print("🚀 安全版 V50-Guardian 启动，正在拦截溢出数据...")
 
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        data = yf.download(tickers, period="2y", group_by='ticker', threads=True, progress=False)
+        data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
         m_idx = yf.download("000300.SS", period="1y", progress=False)
-        bench = m_idx['Close'].squeeze()
+        bench = m_idx['Close'].replace([np.inf, -np.inf], np.nan).dropna().squeeze()
         mkt_regime = "Bull" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "Bear"
-    except: return print("数据源异常")
+    except: return print("数据源中断")
 
-    results = []
-    sector_resonance = {}
-
+    final_matrix = []
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
-            df_t = data[t_full].dropna()
-            res = calculate_ultimate_engine(df_t, bench, mkt_regime)
+            # 兼容 yfinance 多股下载的 Index 结构
+            df_t = data[t_full] if isinstance(data.columns, pd.MultiIndex) else data
+            res = calculate_ultimate_safe(df_t, bench, mkt_regime)
+            
             if res:
-                res["ticker"] = t_raw
-                results.append(res)
-                # 统计板块异动（简单映射，可扩展）
-                # sector_resonance[...] += 1
+                final_matrix.append([
+                    t_raw, res['action'], res['stage2'], 
+                    res['pivot'], res['stop'], res['vol'], 
+                    res['score'], "正常" if res['score'] < 80 else "高度关注", 
+                    "A-Share", datetime.datetime.now().strftime('%H:%M')
+                ])
         except: continue
 
-    # 排序与导出
-    sorted_df = sorted(results, key=lambda x: x['score'], reverse=True)[:20]
+    # 排序
+    final_matrix.sort(key=lambda x: x[6], reverse=True)
     
-    final_matrix = []
     header = [
-        ["🏰 V50-Ultimate 终极枢纽", "大盘:", mkt_regime, "Update:", datetime.datetime.now().strftime('%H:%M'), "", "", "", "", ""],
-        ["代码", "状态/建议", "二阶段", "枢轴买点", "科学止损", "量能比", "综合评分", "风险提示", "市场", "RS地位"]
+        ["🏰 V50-SafeGuardian (修正版)", "大盘:", mkt_regime, "安全等级:", "高", "", "", "", "", ""],
+        ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "更新时间"]
     ]
-    
-    for r in sorted_df:
-        risk_msg = "风险高" if r['score'] < 40 else "趋势稳健"
-        final_matrix.append([
-            r['ticker'], r['action'], r['stage2'], 
-            round(r['pivot'], 2), round(r['stop'], 2),
-            round(r['vol'], 2), round(r['score'], 2),
-            risk_msg, "A-Share", "Strong" if r['score'] > 60 else "Normal"
-        ])
 
     try:
         payload = json.loads(json.dumps(header + final_matrix, default=lambda x: str(x)))
-        requests.post(WEBAPP_URL, json=payload, timeout=15)
-        print(f"🎉 终极版同步成功！耗时: {round(time.time() - start_time, 2)}s")
+        resp = requests.post(WEBAPP_URL, json=payload, timeout=15)
+        print(f"🎉 数据已安全清洗并同步！响应: {resp.text}")
     except Exception as e:
         print(f"同步失败: {e}")
 
 if __name__ == "__main__":
-    run_v50_ultimate()
+    run_v50_safe_guard()
