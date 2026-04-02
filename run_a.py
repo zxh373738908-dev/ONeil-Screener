@@ -3,194 +3,135 @@ import pandas as pd
 import numpy as np
 import datetime, time, requests, json, math, warnings
 
-# 屏蔽不必要的警告
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (A股定制版)
+# 1. 配置中心
 # ==========================================
-# 您的 Google WebApp URL
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyaG1UpjC3NLqrqC5T3oIcGM8mnstV-AzlmEDTMdrcfgsOzjzek3aeAqYtg-74ZHv8_/exec"
 
-# A股核心观察池 (涵盖白酒、半导体、新能源、高股息、AI算力等)
+# 扩充核心池：增加各赛道弹性龙头，建议扩充至 60+ 只
 CORE_TICKERS_RAW = [
-    "600519", "300750", "601318", "000858", "600036", # 茅台, 宁德, 平安, 五粮液, 招行
-    "601138", "300274", "603501", "688041", "600900", # 工业富联, 阳光电源, 韦尔, 海光, 长江电力
-    "002594", "601899", "002415", "000333", "600030", # 比亚迪, 紫金矿业, 海康威视, 美的, 中信证券
-    "000063", "300502", "002475", "600150", "688981"  # 中兴通讯, 新易盛, 立讯精密, 中国船舶, 中芯国际
+    "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
+    "002475", "002594", "601899", "600030", "600900", "600150", "300274", "000333",
+    "688981", "300763", "002415", "603259", "601318", "000651", "600585", "000725"
 ]
 
-SECTOR_MAP = {
-    "600519": "大消费/白酒", "000858": "大消费/白酒", "000333": "大消费/家电",
-    "300750": "新能源/电池", "300274": "新能源/光伏", "002594": "新能源/汽车",
-    "603501": "半导体/IC", "688041": "半导体/算力", "688981": "半导体/代工",
-    "601138": "AI/硬件驱动", "300502": "AI/光模块", "000063": "AI/通信设备",
-    "601318": "大金融/保险", "600036": "大金融/银行", "600030": "大金融/券商",
-    "600900": "红利/长江电力", "601899": "资源/紫金矿业", "600150": "中特估/船舶"
-}
-
 def format_ticker(code):
-    """自动匹配 A股 交易所后缀"""
     if code.startswith('6'): return f"{code}.SS"
     if code.startswith('0') or code.startswith('3'): return f"{code}.SZ"
-    if code.startswith('8') or code.startswith('4'): return f"{code}.BJ"
-    return code
+    if code.startswith('688'): return f"{code}.SS"
+    return f"{code}.BJ" if code.startswith('8') or code.startswith('4') else code
 
 # ==========================================
-# 2. 深度数据净化逻辑
+# 2. 核心分析引擎 (Ultimate 版)
 # ==========================================
-def safe_convert(obj):
-    """将 NumPy/Pandas 类型强制转为 Python 基础类型，防止 JSON 报错"""
-    if isinstance(obj, (np.integer, np.floating)):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (datetime.datetime, datetime.date)):
-        return obj.isoformat()
-    return str(obj)
-
-# ==========================================
-# 3. 核心算法逻辑 (VCP 紧致度 + RS 相对强度)
-# ==========================================
-def calculate_v1000_nexus_ashare(df, bench_series):
+def calculate_ultimate_engine(df, bench_series, mkt_regime):
     try:
-        if len(df) < 60: return None
+        if len(df) < 200: return None
         
-        # 提取收盘价、最高、最低，并确保是 Series
-        close = df['Close'].squeeze()
-        high = df['High'].squeeze()
-        low = df['Low'].squeeze()
-        curr_price = float(close.iloc[-1])
+        c = df['Close'].squeeze()
+        h = df['High'].squeeze()
+        l = df['Low'].squeeze()
+        v = df['Volume'].squeeze()
+        curr_price = float(c.iloc[-1])
         
-        # 1. 相对强度 (RS) - 对标沪深300
-        # 对齐索引
-        bench_aligned = bench_series.reindex(close.index).ffill()
-        rs_line = (close / bench_aligned).dropna()
-        rs_nh_20 = bool(rs_line.iloc[-1] >= rs_line.tail(25).max())
+        # --- A. 趋势阶阶段过滤 (Stage 2 Check) ---
+        ma50 = c.rolling(50).mean().iloc[-1]
+        ma200 = c.rolling(200).mean().iloc[-1]
+        # 核心：股价必须在200日线上方，且50日线也在200日线上方（典型的多头趋势）
+        is_stage2 = curr_price > ma200 and ma50 > ma200
         
-        # 2. 紧致度 (VCP) - 过去12天波动率缩减
-        tightness = float((close.tail(12).std() / close.tail(12).mean()) * 100)
+        # --- B. 波动率与科学止损 (ATR Stop Loss) ---
+        # 计算 20 日 ATR (平均真实波幅)
+        tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(20).mean().iloc[-1]
+        stop_loss = curr_price - (atr * 1.5) # 1.5倍ATR止损
         
-        # 3. RS 表现分 (1个月、3个月、半年加权)
-        def get_perf(days):
-            if len(close) < days: return 0.0
-            return (curr_price - close.iloc[-days]) / close.iloc[-days]
+        # --- C. 枢轴买点与成交量强度 ---
+        pivot_20d = float(h.tail(20).iloc[:-1].max())
+        up_vol = v[c > c.shift(1)].tail(10).mean()
+        dn_vol = v[c < c.shift(1)].tail(10).mean()
+        vol_ratio = up_vol / (dn_vol + 1)
         
-        rs_score = float(get_perf(21)*4 + get_perf(63)*2 + get_perf(126))
+        # --- D. 相对强度评分 ---
+        bench_aligned = bench_series.reindex(c.index).ffill()
+        rs_line = (c / bench_aligned).dropna()
+        rs_nh = rs_line.iloc[-1] >= rs_line.tail(120).max() # 半年RS新高
+        
+        # 计算综合评分
+        score = (curr_price/c.iloc[-21]*40) + (vol_ratio*20)
+        if not is_stage2: score *= 0.5 # 非二阶段趋势，评分减半
+        if mkt_regime == "Bear": score *= 0.7
 
-        signals, base_res = [], 0
-        
-        # 信号 A：奇点突破 (RS 新高 + 价格波动极小)
-        if rs_nh_20 and tightness < 2.5: 
-            signals.append("👁️奇点"); base_res += 4
-        # 信号 B：高位平台 (距离半年高点 8% 以内)
-        h120 = float(high.tail(120).max())
-        if curr_price >= h120 * 0.92: 
-            signals.append("🚀高位"); base_res += 2
-        
-        # 信号 C：多头排列 (站上20日均线)
-        ma20 = close.rolling(20).mean().iloc[-1]
-        if curr_price > ma20:
-            base_res += 1
-        
-        # 振幅 ADR
-        adr = float(((high - low) / low).tail(20).mean() * 100)
-        
+        # 战术标签
+        action = "持有/观察"
+        if is_stage2 and curr_price >= pivot_20d * 0.98 and vol_ratio > 1.3:
+            action = "🚀 枢轴突破"
+        elif rs_nh and (c.tail(10).std()/c.tail(10).mean()) < 0.02:
+            action = "👁️ 奇点缩量"
+
         return {
-            "RS_Score": rs_score, "Signals": signals, "Base_Res": base_res, 
-            "Price": curr_price, "Tightness": tightness, "ADR": adr
+            "score": score, "action": action, "pivot": pivot_20d,
+            "stop": stop_loss, "vol": vol_ratio, "stage2": "✅" if is_stage2 else "❌"
         }
-    except:
-        return None
+    except: return None
 
 # ==========================================
-# 4. 主指挥引擎
+# 3. 主流程
 # ==========================================
-def run_v1000_ashare():
+def run_v50_ultimate():
     start_time = time.time()
-    print("🚀 V1000 [A股枢纽版] 启动分析...")
+    print("🛡️ V50-Ultimate 终极审计启动...")
 
-    # 格式化所有代码
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
-
-    try:
-        # 下载数据
-        data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
-        # 基准数据 (沪深300)
-        m_idx = yf.download("000300.SS", period="1y", progress=False)
-        bench_series = m_idx['Close'].squeeze()
-        
-        # 大盘当日涨跌
-        mkt_change = ((bench_series.iloc[-1] - bench_series.iloc[-2]) / bench_series.iloc[-2]) * 100
-    except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
-
-    candidates = []
-    sector_cluster = {}
     
+    try:
+        data = yf.download(tickers, period="2y", group_by='ticker', threads=True, progress=False)
+        m_idx = yf.download("000300.SS", period="1y", progress=False)
+        bench = m_idx['Close'].squeeze()
+        mkt_regime = "Bull" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "Bear"
+    except: return print("数据源异常")
+
+    results = []
+    sector_resonance = {}
+
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
-            # yfinance 下载多股时，data 是 MultiIndex
             df_t = data[t_full].dropna()
-            if df_t.empty: continue
-            
-            res = calculate_v1000_nexus_ashare(df_t, bench_series)
+            res = calculate_ultimate_engine(df_t, bench, mkt_regime)
             if res:
-                res["Ticker"] = t_raw
-                res["Sector"] = SECTOR_MAP.get(t_raw, "其他板块")
-                candidates.append(res)
-                sector_cluster[res["Sector"]] = sector_cluster.get(res["Sector"], 0) + 1
+                res["ticker"] = t_raw
+                results.append(res)
+                # 统计板块异动（简单映射，可扩展）
+                # sector_resonance[...] += 1
         except: continue
 
-    if not candidates:
-        print("📭 暂无枢纽信号"); return
-
-    # 排序逻辑：Base_Res (信号数量) > RS_Score (强度)
-    sorted_df = pd.DataFrame(candidates).sort_values(by=["Base_Res", "RS_Score"], ascending=False).head(15)
+    # 排序与导出
+    sorted_df = sorted(results, key=lambda x: x['score'], reverse=True)[:20]
     
-    final_list = []
-    for _, row in sorted_df.iterrows():
-        rating = "💎SSS 领涨" if row['Base_Res'] >= 5 else ("🔥强势" if row['RS_Score'] > 0.15 else "✅观察")
-        sig_str = " + ".join(row['Signals']) if row['Signals'] else "📈 稳健趋势"
-        cluster = f"{sector_cluster.get(row['Sector'], 1)}家共振"
-        
-        final_list.append([
-            str(row['Ticker']),
-            rating,
-            sig_str,
-            cluster,
-            f"{round(row['ADR'], 2)}%", 
-            round(float(row['Price']), 2),
-            f"{round(float(row['Tightness']), 2)}%",
-            round(float(row['RS_Score']), 2),
-            str(row['Sector']),
-            "A-Share"
-        ])
-
-    # 时间与状态头
-    bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%m-%d %H:%M')
-    mkt_status = "多头环境" if mkt_change > 0 else "缩量回调"
-    
+    final_matrix = []
     header = [
-        ["🏰 V50-Guardian A股枢纽", "更新:", bj_now, "大盘涨跌:", f"{round(mkt_change,2)}%", mkt_status, "", "", "", ""],
-        ["代码", "综合评级", "核心信号", "板块共振", "波动率AD", "现价", "收盘紧致度", "RS强度强度", "所属行业", "市场"]
+        ["🏰 V50-Ultimate 终极枢纽", "大盘:", mkt_regime, "Update:", datetime.datetime.now().strftime('%H:%M'), "", "", "", "", ""],
+        ["代码", "状态/建议", "二阶段", "枢轴买点", "科学止损", "量能比", "综合评分", "风险提示", "市场", "RS地位"]
     ]
     
-    matrix = header + final_list
-    
-    # 5. 推送至 Google Sheets
+    for r in sorted_df:
+        risk_msg = "风险高" if r['score'] < 40 else "趋势稳健"
+        final_matrix.append([
+            r['ticker'], r['action'], r['stage2'], 
+            round(r['pivot'], 2), round(r['stop'], 2),
+            round(r['vol'], 2), round(r['score'], 2),
+            risk_msg, "A-Share", "Strong" if r['score'] > 60 else "Normal"
+        ])
+
     try:
-        # 使用 json.dumps 的 default 参数处理所有非标数据
-        clean_json = json.loads(json.dumps(matrix, default=safe_convert))
-        
-        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=15)
-        
-        print(f"📡 服务器响应: {resp.text}")
-        print(f"🎉 A股数据同步成功！耗时: {round(time.time() - start_time, 2)}s")
-        
+        payload = json.loads(json.dumps(header + final_matrix, default=lambda x: str(x)))
+        requests.post(WEBAPP_URL, json=payload, timeout=15)
+        print(f"🎉 终极版同步成功！耗时: {round(time.time() - start_time, 2)}s")
     except Exception as e:
-        print(f"❌ 同步过程中出错: {e}")
+        print(f"同步失败: {e}")
 
 if __name__ == "__main__":
-    run_v1000_ashare()
+    run_v50_ultimate()
