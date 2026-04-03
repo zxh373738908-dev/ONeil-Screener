@@ -1,3 +1,20 @@
+import uuid # 导入随机库
+
+# ... (保留之前的代码)
+
+def run_v50_safe_guard():
+    # ... (前面的代码保持不变)
+    
+    # 生成一个简短的随机 ID
+    trace_id = str(uuid.uuid4())[:8] 
+    
+    # 构建表头 - 在这里加入 Trace ID 和 完整时间
+    header = [
+        ["🏰 V50-Guardian", "同步编号:", trace_id, "状态:", mkt_regime, "北京时间:", update_time_str, "", "", ""],
+        ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "最后同步"]
+    ]
+    
+    # ... (后续发送请求的代码保持不变)
 import yfinance as yf
 import pandas as pd
 import numpy as np
