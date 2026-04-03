@@ -8,9 +8,9 @@ from datetime import timezone, timedelta
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (已更新为你提供的最新 URL)
+# 1. 配置中心 (请换成你“新建部署”后得到的最新 URL)
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxuubMwtk3irExpoDWqnH6WujbfxlikMkGSBPijkbfqpogXQE5buOlmz2A7Sjpvcle0/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxIkSuUE-7q_FbdgbG9y06H93LlM0bmlHLYQJWJ1RRF9ljh8CFuBOzEi6ZjlXoaapQ/exec" 
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
@@ -28,17 +28,8 @@ def safe_convert(obj):
     if isinstance(obj, (np.integer, np.floating)): return float(obj)
     return str(obj)
 
-def safe_div(n, d):
-    try:
-        res = float(n) / (float(d) + 1e-9)
-        return res if math.isfinite(res) else 0.0
-    except: return 0.0
-
-def clamp(val, min_v, max_v):
-    return max(min(val, max_v), min_v)
-
 # ==========================================
-# 2. 核心安全引擎
+# 2. 核心逻辑
 # ==========================================
 def calculate_ultimate_safe(df, bench_series, mkt_regime):
     try:
@@ -48,30 +39,28 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
         c, h, l, v = df['Close'], df['High'], df['Low'], df['Volume']
         curr_price = float(c.iloc[-1])
         
-        # 趋势阶段 (Stage 2)
+        # 核心指标
         ma50 = c.rolling(50).mean().iloc[-1]
         ma200 = c.rolling(200).mean().iloc[-1]
         is_stage2 = curr_price > ma200 and ma50 > ma200
         
-        # 波动率止损 (ATR)
+        # ATR止损
         tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(20).mean().iloc[-1]
-        stop_loss = clamp(curr_price - (atr * 1.5), curr_price * 0.5, curr_price * 0.99)
+        stop_loss = max(min(curr_price - (atr * 1.5), curr_price * 0.99), curr_price * 0.5)
         
-        # 量能强度
+        # 量能
         up_v = v[c > c.shift(1)].tail(10).mean()
         dn_v = v[c < c.shift(1)].tail(10).mean()
-        vol_ratio = clamp(safe_div(up_v, dn_v), 0.1, 10.0)
+        vol_ratio = min(max(float(up_v) / (float(dn_v) + 1e-9), 0.1), 10.0)
         
-        # 枢轴买点 (20日高点)
+        # 枢轴买点
         pivot_20d = float(h.tail(20).iloc[:-1].max())
         
-        # 评分计算 (限制0-100)
-        perf_score = safe_div(curr_price, c.iloc[-21]) * 20 + safe_div(curr_price, c.iloc[-63]) * 10
-        final_score = clamp(perf_score + (vol_ratio * 5), 0, 100)
-        
-        if not is_stage2: final_score *= 0.6
-        if mkt_regime == "Bear": final_score *= 0.8
+        # 综合评分 (0-100)
+        score = (float(curr_price)/c.iloc[-21]*20 + float(curr_price)/c.iloc[-63]*10 + vol_ratio*5)
+        if not is_stage2: score *= 0.6
+        score = min(max(score, 0), 100)
 
         action = "观察"
         if is_stage2 and curr_price >= pivot_20d * 0.98 and vol_ratio > 1.2:
@@ -80,25 +69,23 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
             action = "🛡️ 机构吸筹"
 
         return {
-            "score": final_score, "action": action, 
+            "score": score, "action": action, 
             "pivot": pivot_20d, "stop": stop_loss, 
             "vol": vol_ratio, "stage2": "✅" if is_stage2 else "❌"
         }
     except: return None
 
 # ==========================================
-# 3. 主执行流程
+# 3. 执行主程序
 # ==========================================
 def run_v50_safe_guard():
-    start_time = time.time()
-    
-    # 设置北京时间
+    # 北京时间处理
     tz_beijing = timezone(timedelta(hours=8))
     now_beijing = datetime.datetime.now(tz_beijing)
     update_time_str = now_beijing.strftime('%Y-%m-%d %H:%M:%S')
     trace_id = f"ID-{uuid.uuid4().hex[:6].upper()}"
 
-    print(f"🚀 V50-Guardian 启动 | 编号: {trace_id} | 北京时间: {update_time_str}")
+    print(f"🚀 A-Share Screener 启动 | {trace_id} | {update_time_str}")
 
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
@@ -106,54 +93,45 @@ def run_v50_safe_guard():
         data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False, auto_adjust=True)
         m_idx = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
         bench = m_idx['Close'].replace([np.inf, -np.inf], np.nan).dropna().squeeze()
-        mkt_regime = "多头震荡" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "空头防守"
+        mkt_regime = "Bull" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "Bear"
     except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
+        print(f"❌ 数据源故障: {e}"); return
 
     final_matrix = []
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
             df_t = data[t_full] if len(tickers) > 1 else data
-            if df_t.empty: continue
-            
             res = calculate_ultimate_safe(df_t, bench, mkt_regime)
             
             if res:
-                # 统一格式化：价格保留2位小数，评分保留1位小数
                 final_matrix.append([
                     t_raw, 
                     res['action'], 
                     res['stage2'], 
-                    f"{res['pivot']:.2f}", 
+                    f"{res['pivot']:.2f}",   # 强制保留2位小数
                     f"{res['stop']:.2f}", 
                     f"{res['vol']:.2f}", 
                     round(res['score'], 2), 
-                    "正常" if res['score'] < 80 else "🔥 高度关注", 
+                    "正常" if res['score'] < 80 else "高度关注", 
                     "A-Share", 
                     now_beijing.strftime('%H:%M:%S')
                 ])
         except: continue
 
-    # 按评分排序
     final_matrix.sort(key=lambda x: float(x[6]), reverse=True)
 
-    # 构建表头
     header = [
-        ["🏰 V50-SafeGuardian", "同步编号:", trace_id, "大盘阶段:", mkt_regime, "更新时间:", update_time_str, "", "", ""],
-        ["代码", "操作建议", "二阶段", "枢轴买点", "科学止损", "机构力度", "综合评分", "风险状态", "市场", "最后同步"]
+        ["📊 V50 A-Share Screener", "同步编号:", trace_id, "标签页:", "A-Share screener", "大盘:", mkt_regime, "更新:", update_time_str, ""],
+        ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "最后同步时间"]
     ]
 
-    # 发送请求
     try:
         payload = header + final_matrix
         clean_json = json.loads(json.dumps(payload, default=safe_convert))
-        
-        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=20)
-        
+        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=15)
         print(f"🎉 同步响应: {resp.text}")
-        print(f"⏰ 耗时: {round(time.time() - start_time, 2)}s")
-        print(f"✅ 请检查 Google Sheet，A1 单元格旁边的编号应为: {trace_id}")
+        print(f"✅ 数据已发送至标签页 'A-Share screener'，同步ID: {trace_id}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
