@@ -1,33 +1,16 @@
-import uuid # 导入随机库
-
-# ... (保留之前的代码)
-
-def run_v50_safe_guard():
-    # ... (前面的代码保持不变)
-    
-    # 生成一个简短的随机 ID
-    trace_id = str(uuid.uuid4())[:8] 
-    
-    # 构建表头 - 在这里加入 Trace ID 和 完整时间
-    header = [
-        ["🏰 V50-Guardian", "同步编号:", trace_id, "状态:", mkt_regime, "北京时间:", update_time_str, "", "", ""],
-        ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "最后同步"]
-    ]
-    
-    # ... (后续发送请求的代码保持不变)
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime, time, requests, json, math, warnings
+import datetime, time, requests, json, math, warnings, uuid
 from datetime import timezone, timedelta
 
 # 屏蔽警告
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心
+# 1. 配置中心 (已更新为你提供的最新 URL)
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbw6I21q6DNjlcFYZw4Ibx8rfMj-BMcXQk6II1c8DCKS6MnX6SUNeJs0dDWOPcdIpxYz/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwYBDQzu32TyGxTJ4X3y9nEnsAOagdApM-yw68Bp_AD_Wat8pLCgAb0Luygww4l0wP6/exec"
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
@@ -55,7 +38,7 @@ def clamp(val, min_v, max_v):
     return max(min(val, max_v), min_v)
 
 # ==========================================
-# 2. 核心计算引擎
+# 2. 核心安全引擎
 # ==========================================
 def calculate_ultimate_safe(df, bench_series, mkt_regime):
     try:
@@ -83,7 +66,7 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
         # 枢轴买点 (20日高点)
         pivot_20d = float(h.tail(20).iloc[:-1].max())
         
-        # 评分计算
+        # 评分计算 (限制0-100)
         perf_score = safe_div(curr_price, c.iloc[-21]) * 20 + safe_div(curr_price, c.iloc[-63]) * 10
         final_score = clamp(perf_score + (vol_ratio * 5), 0, 100)
         
@@ -97,12 +80,9 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
             action = "🛡️ 机构吸筹"
 
         return {
-            "score": round(final_score, 2), 
-            "action": action, 
-            "pivot": round(pivot_20d, 2), 
-            "stop": round(stop_loss, 2), 
-            "vol": round(vol_ratio, 2), 
-            "stage2": "✅" if is_stage2 else "❌"
+            "score": final_score, "action": action, 
+            "pivot": pivot_20d, "stop": stop_loss, 
+            "vol": vol_ratio, "stage2": "✅" if is_stage2 else "❌"
         }
     except: return None
 
@@ -110,62 +90,58 @@ def calculate_ultimate_safe(df, bench_series, mkt_regime):
 # 3. 主执行流程
 # ==========================================
 def run_v50_safe_guard():
-    # 获取北京时间
+    start_time = time.time()
+    
+    # 设置北京时间
     tz_beijing = timezone(timedelta(hours=8))
     now_beijing = datetime.datetime.now(tz_beijing)
     update_time_str = now_beijing.strftime('%Y-%m-%d %H:%M:%S')
+    trace_id = f"ID-{uuid.uuid4().hex[:6].upper()}"
 
-    print(f"🚀 安全版 V50-Guardian 启动 | 北京时间: {update_time_str}")
+    print(f"🚀 V50-Guardian 启动 | 编号: {trace_id} | 北京时间: {update_time_str}")
 
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        # 增加 auto_adjust=True 确保价格是复权后的
         data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False, auto_adjust=True)
         m_idx = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
-        
-        if m_idx.empty:
-            print("❌ 无法获取指数数据，请检查网络"); return
-            
         bench = m_idx['Close'].replace([np.inf, -np.inf], np.nan).dropna().squeeze()
-        mkt_regime = "Bull" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "Bear"
+        mkt_regime = "多头震荡" if bench.iloc[-1] > bench.rolling(50).mean().iloc[-1] else "空头防守"
     except Exception as e:
-        print(f"❌ 数据源获取失败: {e}"); return
+        print(f"❌ 数据获取失败: {e}"); return
 
     final_matrix = []
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
             df_t = data[t_full] if len(tickers) > 1 else data
-            
-            # 检查个股数据是否为空
-            if df_t.empty or len(df_t) < 10: continue
+            if df_t.empty: continue
             
             res = calculate_ultimate_safe(df_t, bench, mkt_regime)
             
             if res:
-                # 强制转换数值格式，确保输出为规范的小数
+                # 统一格式化：价格保留2位小数，评分保留1位小数
                 final_matrix.append([
                     t_raw, 
                     res['action'], 
                     res['stage2'], 
-                    f"{res['pivot']:.2f}",   # 格式化为字符串，保留2位小数
+                    f"{res['pivot']:.2f}", 
                     f"{res['stop']:.2f}", 
                     f"{res['vol']:.2f}", 
                     round(res['score'], 2), 
-                    "正常" if res['score'] < 80 else "高度关注", 
+                    "正常" if res['score'] < 80 else "🔥 高度关注", 
                     "A-Share", 
                     now_beijing.strftime('%H:%M:%S')
                 ])
         except: continue
 
-    # 按分数排序
+    # 按评分排序
     final_matrix.sort(key=lambda x: float(x[6]), reverse=True)
-    
+
     # 构建表头
     header = [
-        ["🏰 V50-SafeGuardian", "大盘状态:", mkt_regime, "更新日期:", update_time_str, "", "", "", "", ""],
-        ["代码", "建议指令", "二阶段", "枢轴买点", "科学止损价", "量能比", "综合评分", "风险状态", "市场", "最后同步时间"]
+        ["🏰 V50-SafeGuardian", "同步编号:", trace_id, "大盘阶段:", mkt_regime, "更新时间:", update_time_str, "", "", ""],
+        ["代码", "操作建议", "二阶段", "枢轴买点", "科学止损", "机构力度", "综合评分", "风险状态", "市场", "最后同步"]
     ]
 
     # 发送请求
@@ -173,13 +149,13 @@ def run_v50_safe_guard():
         payload = header + final_matrix
         clean_json = json.loads(json.dumps(payload, default=safe_convert))
         
-        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=15)
-        if "SUCCESS" in resp.text:
-            print(f"🎉 同步成功！北京时间 {now_beijing.strftime('%H:%M')} 数据已写入 Google Sheet")
-        else:
-            print(f"⚠️ 脚本响应异常: {resp.text}")
+        resp = requests.post(WEBAPP_URL, json=clean_json, timeout=20)
+        
+        print(f"🎉 同步响应: {resp.text}")
+        print(f"⏰ 耗时: {round(time.time() - start_time, 2)}s")
+        print(f"✅ 请检查 Google Sheet，A1 单元格旁边的编号应为: {trace_id}")
     except Exception as e:
-        print(f"❌ 同步过程中发生错误: {e}")
+        print(f"❌ 同步失败: {e}")
 
 if __name__ == "__main__":
     run_v50_safe_guard()
