@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心 (已更新为你提供的最新 URL)
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwYBDQzu32TyGxTJ4X3y9nEnsAOagdApM-yw68Bp_AD_Wat8pLCgAb0Luygww4l0wP6/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyhaF_Fv2cV-piqvHuPq_wKctNwaTLzOG-Chos5ETQn6xk7Bvds6kt0mXWrOh2a18Q/exec"
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
