@@ -18,8 +18,7 @@ TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 TARGET_SHEET_NAME = "A-v7-screener"
 
 def init_sheet():
-    if not os.path.exists(CREDS_FILE):
-        print(f"❌ 错误: 找不到 {CREDS_FILE}"); exit(1)
+    if not os.path.exists(CREDS_FILE): print(f"❌ 错误: 找不到 {CREDS_FILE}"); exit(1)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     try:
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
@@ -29,136 +28,120 @@ def init_sheet():
     except Exception as e: print(f"❌ 授权失败: {e}"); exit(1)
 
 # ==========================================
-# 🧠 2. V52.7 Super Performance 核心引擎
+# 🧠 2. V52.9 Alpha Apex 巅峰引擎
 # ==========================================
-def calculate_vcp_engine(df, idx_df, mkt_cap):
+def calculate_alpha_apex_engine(df, idx_df, mkt_cap):
     try:
-        if len(df) < 250: return None
-        
+        if len(df) < 200: return None
         c = df['Close'].astype(float); h = df['High'].astype(float)
         l = df['Low'].astype(float); v = df['Volume'].astype(float)
         price = float(c.iloc[-1])
         
-        # 0. 流动性与基础趋势过滤
+        # 0. 流动性过滤
         if (c * v).tail(20).mean() < 1.5e8: return None
         ma50 = c.rolling(50).mean().iloc[-1]; ma200 = c.rolling(200).mean().iloc[-1]
         if price < ma50 or ma50 < ma200: return None
 
-        # --- A. RS 线新高探测 (Relative Strength Blue Dot) ---
+        # --- A. RS 强化系统 (IBD横向+RS线斜率) ---
+        rs_val = ( (price/c.iloc[-21])*0.45 + (price/c.iloc[-63])*0.2 + (price/c.iloc[-126])*0.2 + (price/c.iloc[-252])*0.15 )
         rs_line = c / idx_df
-        rs_max_250 = rs_line.rolling(250).max().iloc[-1]
-        price_max_250 = h.rolling(250).max().iloc[-1]
+        # RS 线 5 日斜率
+        rs_slope = (rs_line.iloc[-1] - rs_line.iloc[-6]) / rs_line.iloc[-6] * 100
+        is_blue_dot = rs_line.iloc[-1] >= rs_line.tail(250).max() * 0.99
+
+        # --- B. 紧致度与 VDU (缩量寂静) ---
+        tightness_8 = (h.tail(8).max() - l.tail(8).min()) / l.tail(8).min() * 100
+        # 探测过去 5 天是否有至少 1 天成交量 < 60日均量的 55%
+        vdu_signal = (v.tail(5) < v.rolling(60).mean().tail(5) * 0.55).any()
         
-        # RS 线先于或同步股价创新高 (核心强势指标)
-        is_rs_lead = rs_line.iloc[-1] >= rs_max_250 * 0.99
-        rs_rank = (rs_line.tail(250) < rs_line.iloc[-1]).mean() * 100
+        # --- C. 乖离率检查 (防追高) ---
+        bias_50 = (price / ma50 - 1) * 100
+        # 如果 bias_50 > 25%, 标记为极度过热
+        is_extended = bias_50 > 22
 
-        # --- B. VCP 波动逐级收缩检测 ---
-        def get_volatility(days):
-            window = df.tail(days)
-            return (window['High'].max() - window['Low'].min()) / window['Low'].min() * 100
-
-        v1 = get_volatility(40) # 第一轮收缩
-        v2 = get_volatility(20) # 第二轮收缩
-        v3 = get_volatility(10) # 第三轮收缩
-        # 判断收缩特征：波动率逐渐减小
-        is_vcp = v1 > v2 and v2 > v3 and v3 < 6.0
-
-        # --- C. 口袋支点 (Pocket Pivot) 与量能 ---
-        avg_v10 = v.rolling(10).mean().iloc[-2]
-        is_pivot = v.iloc[-1] > avg_v10 and c.iloc[-1] > c.iloc[-2]
+        # --- D. 模态判定 ---
+        tag = "关注"
+        if tightness_8 < 4 and vdu_signal and is_blue_dot: tag = "💎 巅峰奇点(VDU)"
+        elif price > c.rolling(10).mean().iloc[-1] > c.rolling(20).mean().iloc[-1] and is_blue_dot: tag = "🚀 强力主升"
+        elif is_blue_dot: tag = "🔹 RS领跑"
+        elif tightness_8 < 2.5: tag = "🌪️ 极致紧致"
         
-        # 吸筹比
-        up_vol = v.tail(20)[c.diff().tail(20) > 0].sum()
-        dn_vol = v.tail(20)[c.diff().tail(20) < 0].sum()
-        ad_ratio = up_vol / (dn_vol + 1)
+        if tag == "关注" or price < c.iloc[-2]: return None # 过滤掉今日收跌的标的
 
-        # --- D. 盈亏比预估 ---
+        # --- E. 止损与空间 ---
         atr = (pd.concat([h-l, abs(h-c.shift()), abs(l-c.shift())], axis=1).max(axis=1)).rolling(14).mean().iloc[-1]
-        stop_p = price - (atr * 1.5)
-        target_p = price_max_250 * 1.1
+        stop_p = price - (atr * 1.6)
+        target_p = h.tail(250).max() * 1.12
         rrr = (target_p - price) / (price - stop_p + 0.01)
 
-        # --- E. 勋章认定逻辑 ---
-        tag = "观察"
-        if is_vcp and is_rs_lead and is_pivot: tag = "💎 完美起爆点"
-        elif is_rs_lead and price > price_max_250 * 0.95: tag = "🥇 相对强度领跑"
-        elif mkt_cap > 1000e8 and rs_rank > 80: tag = "🛡️ 蓝筹中流"
-        elif is_vcp: tag = "🌪️ 波动收缩中"
-        
-        if tag == "观察" or rrr < 1.3: return None
-
-        # 最终评分：RS排名(40%) + 吸筹比(30%) + VCP奖励(20%) + RRR(10%)
-        vcp_bonus = 20 if is_vcp else 0
-        pivot_bonus = 15 if is_pivot else 0
-        score = (rs_rank * 0.5) + (min(ad_ratio, 3) * 10) + vcp_bonus + pivot_bonus
-
         return {
-            "tag": tag, "score": float(score), "rs_rank": f"{int(rs_rank)}%",
-            "vcp": f"{round(v1,1)}>{round(v2,1)}>{round(v3,1)}", "ad": round(float(ad_ratio), 1),
-            "rrr": round(float(rrr), 1), "pivot": "🔥" if is_pivot else "❌",
-            "stop": round(float(stop_p), 2), "target": round(float(target_p), 2)
+            "tag": tag, "score": float(rs_val), "rs_val": rs_val, "rs_slope": round(rs_slope, 2),
+            "bias": round(bias_50, 1), "vdu": "✅" if vdu_signal else "❌", "rrr": round(rrr, 1),
+            "stop": round(stop_p, 2), "target": round(target_p, 2), "is_ext": is_extended
         }
     except: return None
 
 # ==========================================
-# 🚀 3. 主流程
+# 🚀 3. 主流程流程
 # ==========================================
-def run_v52_7_super():
+def run_v52_9_apex():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    print(f"[{now_str}] 🛰️ V52.7 Super Performance 启动...")
+    print(f"[{now_str}] 🛰️ V52.9 Alpha Apex 启动...")
 
-    # 1. 大盘动态天气 (MA20 + MA200)
+    # 1. 基准
     idx_f = yf.download("000300.SS", period="400d", progress=False)['Close']
     idx_s = idx_f.iloc[:, 0] if isinstance(idx_f, pd.DataFrame) else idx_f
-    ma20 = idx_s.rolling(20).mean().iloc[-1]; ma200 = idx_s.rolling(200).mean().iloc[-1]; curr_idx = idx_s.iloc[-1]
     
-    if curr_idx > ma20 and curr_idx > ma200: mkt_weather = "☀️ 极佳"
-    elif curr_idx < ma20 and curr_idx < ma200: mkt_weather = "🌧️ 避险"
-    else: mkt_weather = "⛅ 震荡"
-
-    # 2. 获取池
+    # 2. 池获取
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {"columns": ["name", "description", "market_cap_basic", "industry", "close"],
                "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 85e8}],
-               "range": [0, 1000], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
+               "range": [0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     resp = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
     df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "mkt": d['d'][2], "industry": d['d'][3], "price": d['d'][4]} for d in resp])
 
-    # 3. 扫描
+    # 3. 批量扫描
     all_hits = []
     tickers = [f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
-    chunk_size = 50
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i : i + chunk_size]
-        data = yf.download(chunk, period="2y", group_by='ticker', progress=False, threads=True)
-        for t in chunk:
-            try:
-                df_h = data[t].dropna() if isinstance(data.columns, pd.MultiIndex) else data.dropna()
-                if len(df_h) < 200: continue
-                c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
-                res = calculate_vcp_engine(df_h, idx_s, row_info['mkt'])
-                if res:
-                    all_hits.append({
-                        "代码": c_code, "名称": row_info['name'], "勋章": res['tag'], "评分": res['score'],
-                        "RS排名": res['rs_rank'], "VCP序列": res['vcp'], "口袋支点": res['pivot'],
-                        "吸筹比": res['ad'], "盈亏比": res['rrr'], "行业": row_info['industry'],
-                        "现价": row_info['price'], "止损": res['stop'], "目标": res['target']
-                    })
-            except: continue
+    data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
+    
+    for t in tickers:
+        try:
+            df_h = data[t].dropna()
+            if len(df_h) < 150: continue
+            c_code = t.split('.')[0]; row_info = df_pool[df_pool['code'] == c_code].iloc[0]
+            res = calculate_alpha_apex_engine(df_h, idx_s, row_info['mkt'])
+            if res:
+                res.update({"code": c_code, "name": row_info['name'], "industry": row_info['industry'], "price": row_info['price']})
+                all_hits.append(res)
+        except: continue
 
-    # 4. 排序与输出
     if not all_hits: return print("无信号")
-    final_df = pd.DataFrame(all_hits).sort_values(by="评分", ascending=False)
-    final_df = final_df.groupby("行业").head(4) # 行业平衡
-    final_df['评分'] = final_df['评分'].rank(pct=True).apply(lambda x: int(x*99))
-    final_df = final_df.sort_values(by="评分", ascending=False).head(60)
+    
+    # 4. 行业 RS 分析 & RS 横向评级
+    final_raw_df = pd.DataFrame(all_hits)
+    final_raw_df['RS评级'] = final_raw_df['score'].rank(pct=True).apply(lambda x: int(x*99))
+    
+    # 计算行业平均 RS，识别领涨板块
+    industry_rank = final_raw_df.groupby("industry")['RS评级'].mean().sort_values(ascending=False)
+    def get_leader_tag(ind):
+        return "🔥 领涨主线" if industry_rank[ind] > 85 else "普通"
+    final_raw_df['板块地位'] = final_raw_df['industry'].apply(get_leader_tag)
+
+    # 5. 排序与输出 (过滤 RS < 75)
+    final_df = final_raw_df[final_raw_df['RS评级'] > 75].sort_values(by="RS评级", ascending=False)
+    final_df = final_df.groupby("industry").head(5).head(60)
+
+    # 处理乖离率警告
+    final_df['勋章'] = final_df.apply(lambda r: "⚠️ 极致乖离" if r['is_ext'] else r['tag'], axis=1)
 
     sh = init_sheet(); sh.clear()
-    cols = ["代码", "名称", "勋章", "评分", "RS排名", "VCP序列", "口袋支点", "吸筹比", "盈亏比", "行业", "现价", "止损", "目标"]
-    sh.update(range_name="A1", values=[cols] + final_df[cols].values.tolist(), value_input_option="USER_ENTERED")
-    sh.update_acell("N1", f"V52.7 Super | 天气:{mkt_weather} | {now_str}")
-    print(f"🎉 扫描圆满成功！已筛选 {len(final_df)} 只个股。")
+    cols_map = {"code": "代码", "name": "名称", "勋章": "勋章", "RS评级": "RS评级", "rs_slope": "RS斜率",
+                "bias": "50日乖离", "vdu": "缩量", "rrr": "盈亏比", "板块地位": "板块地位", 
+                "industry": "行业", "price": "现价", "stop": "止损", "target": "目标"}
+    sh.update(range_name="A1", values=[list(cols_map.values())] + final_df[list(cols_map.values())].values.tolist(), value_input_option="USER_ENTERED")
+    sh.update_acell("N1", f"V52.9 Alpha Apex | 横向RS+板块扫描 | {now_str}")
+    print(f"🎉 扫描圆满成功！已更新 {len(final_df)} 只个股。")
 
 if __name__ == "__main__":
-    run_v52_7_super()
+    run_v52_9_apex()
