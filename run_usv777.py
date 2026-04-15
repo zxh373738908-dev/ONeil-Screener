@@ -11,203 +11,232 @@ import math
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心
+# 1. 策略配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzDWTkTPXZof6GPbJ8ylmckDRPzWDtlLtB_9sMRsEhtyW0Hmhr833oZLdMbuPmw0XRy/exec"
+# 請確保這是你最新部署的 GAS Webhook URL
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycby1pIM7iO43lcLQpOmi5LCJIn3VN9a0Ilf9amoy1EtQV_GBXJkk_A4PpsrJxKzH7i51/exec"
+SHEET_TAB_NAME = "🚀右側_動能成長"
 
-# 核心壟斷巨頭股票池
-MONOPOLY_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "TSM", "ASML", "AVGO",
-    "V", "MA", "JPM", "BRK-B", "SPGI", "MCO", 
-    "LLY", "NVO", "UNH", "JNJ", "ISRG",       
-    "WMT", "COST", "PG", "KO", "PEP",         
-    "LIN", "SHW", "CAT", "DE", "LMT",         
-    "UNP", "WM", "RSG", "NOW", "SNPS", "CDNS"
-]
-
-# 策略參數
-MAX_DRAWDOWN = -0.30  # 跌幅要求
-MAX_RSI = 30.0        # 週 RSI 要求
+# 排除的板塊/行業
+EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'Credit Services']
 
 # ==========================================
-# 2. 技術指標與基礎計算
+# 2. 大盤環境濾網 (Market Regime Filter)
 # ==========================================
-def calculate_weekly_rsi(prices, period=14):
-    """計算 Wilder's RSI (處理了 NaN 與無限大防護)"""
-    if len(prices) < period + 1:
-        return 50.0
-    delta = prices.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=period-1, adjust=False).mean()
-    ema_down = down.ewm(com=period-1, adjust=False).mean()
-    rs = ema_up / ema_down
-    rsi = 100 - (100 / (1 + rs))
-    
-    final_rsi = float(rsi.iloc[-1])
-    return final_rsi if math.isfinite(final_rsi) else 50.0
+def check_market_trend():
+    """檢查標普500 (SPY) 是否處於多頭趨勢 (價格 > 50日均線)"""
+    try:
+        spy = yf.download("SPY", period="6mo", progress=False)['Close']
+        if isinstance(spy, pd.DataFrame): spy = spy.iloc[:, 0]
+        
+        curr_spy = float(spy.iloc[-1])
+        ma50_spy = float(spy.tail(50).mean())
+        
+        is_bull_market = curr_spy > ma50_spy
+        return is_bull_market, curr_spy, ma50_spy
+    except Exception as e:
+        print("⚠️ 無法獲取大盤數據，默認放行。")
+        return True, 0, 0
 
 # ==========================================
-# 3. 极速基本面防错与快取机制
+# 3. 獲取股票池 (S&P 500 作為高流動性代表)
 # ==========================================
-def check_fundamentals(ticker):
+def get_universe():
+    print("📡 正在獲取基礎股票池 (大型股)...")
+    try:
+        tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        df = tables[0]
+        tickers = [t.replace('.', '-') for t in df['Symbol'].tolist()]
+        return tickers
+    except:
+        return ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "CRWD", "PLTR"]
+
+# ==========================================
+# 4. 智能基本面評估 (Z-Score + Rule of 40)
+# ==========================================
+def calculate_fundamentals(ticker):
     """
-    極速版：優先驗證 TTM 數據。只要營收>1億且 FCF與ROE為正即過關。
-    大幅減少請求 .financials 導致的卡頓與 IP 封鎖。
+    動態評估：科技股使用 Rule of 40，傳統行業使用 Altman Z-Score
     """
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         
-        # 1. 營收檢查 (Revenue > $100M)
-        revenue = info.get('totalRevenue', 0)
-        if revenue is not None and revenue < 100_000_000:
-            return False, f"營收不足: ${revenue/1e6:.1f}M"
-
-        # 2. 首選 TTM 數據快速通關
-        fcf_ttm = info.get('freeCashflow', 0)
-        roe_ttm = info.get('returnOnEquity', 0)
+        sector = info.get('sector', '')
+        industry = info.get('industry', '')
         
-        # 處理 None 值
-        fcf_ttm = fcf_ttm if fcf_ttm is not None else 0
-        roe_ttm = roe_ttm if roe_ttm is not None else 0
-
-        if fcf_ttm > 0 and roe_ttm > 0:
-            return True, f"TTM 健康 (FCF: ${fcf_ttm/1e9:.1f}B)"
-
-        # 3. 如果 info 抓不到，才迫不得已去抓財報 (容錯機制)
-        cashflow = stock.cashflow
-        if not cashflow.empty and 'Free Cash Flow' in cashflow.index:
-            recent_fcf = cashflow.loc['Free Cash Flow'].iloc[0]
-            if recent_fcf > 0:
-                return True, "財報 FCF 為正"
+        # 1. 剔除金融地雷
+        for ex in EXCLUDED_INDUSTRIES:
+            if ex.lower() in sector.lower() or ex.lower() in industry.lower():
+                return False, 0, "金融/保險股剔除", info
                 
-        return False, "現金流或回報不達標"
+        # 2. 基礎規模要求 (營收 > 10億)
+        rev = info.get('totalRevenue') or 0
+        if rev < 1_000_000_000:
+            return False, 0, "營收規模不足", info
+
+        # 3. 科技股專屬：矽谷 40 法則 (Rule of 40)
+        is_tech = 'Technology' in sector or 'Software' in industry
+        
+        if is_tech:
+            fcf = info.get('freeCashflow') or 0
+            rev_growth = info.get('revenueGrowth') or 0
+            fcf_margin = fcf / rev if rev > 0 else 0
+            
+            rule_40_score = (rev_growth + fcf_margin) * 100
+            
+            if rule_40_score >= 40: # 滿足40法則即為極品科技股
+                return True, rule_40_score, f"Rule of 40: {rule_40_score:.1f}%", info
+            else:
+                return False, 0, "未達科技股40法則", info
+                
+        # 4. 傳統行業：Altman Z-Score 簡化版
+        else:
+            bs = stock.balance_sheet
+            inc = stock.financials
+            if bs.empty or inc.empty: return False, 0, "無財務報表", info
+            
+            ta = bs.loc['Total Assets'].iloc[0] if 'Total Assets' in bs.index else 1
+            tl = bs.loc['Total Liabilities Net Minority Interest'].iloc[0] if 'Total Liabilities Net Minority Interest' in bs.index else 1
+            ebit = inc.loc['EBIT'].iloc[0] if 'EBIT' in inc.index else 0
+            mkt_cap = info.get('marketCap', 1)
+            
+            # 簡化算法，抓取核心健康度
+            x3 = ebit / ta      # 資產回報
+            x4 = mkt_cap / tl   # 債務健康度
+            
+            z_score = (3.3 * x3) + (0.6 * x4)
+            if z_score > 2.0:
+                return True, z_score * 10, f"Z-Score 安全 ({z_score:.2f})", info
+            else:
+                return False, 0, "Z-Score 偏低", info
 
     except Exception as e:
-        return False, "API 抓取超時或無數據"
+        return False, 0, "數據抓取失敗", {}
 
 # ==========================================
-# 4. 核心篩選引擎 (降維打擊版)
+# 5. 主指揮引擎
 # ==========================================
-def run_quality_dip_scanner():
+def run_growth_momentum_scanner():
     start_time = time.time()
-    print("💎 [高品質-黃金坑期權策略 V2] 啟動...")
+    print("🚀 [CAN SLIM 動能成長策略] 啟動...")
     
+    # 【優化1】大盤環境審查
+    is_bull, curr_spy, ma50_spy = check_market_trend()
+    if not is_bull:
+        print(f"🛑 大盤轉弱 (SPY {curr_spy:.2f} 跌破 50MA {ma50_spy:.2f})，停止右側建倉。")
+        sync_to_google_sheet(is_bull=False)
+        return
+
+    print("✅ 大盤處於多頭趨勢，允許右側交易。")
+    tickers = get_universe()
+
     try:
-        # 【優化】period="max" 確保抓到真正的歷史最高點，避免把半山腰當作高點
-        print(f"📡 正在下載 {len(MONOPOLY_TICKERS)} 隻標的的歷史復權數據...")
-        data_daily = yf.download(MONOPOLY_TICKERS, period="max", interval="1d", group_by='ticker', auto_adjust=True, threads=True, progress=False)
+        data = yf.download(tickers, period="1y", interval="1d", group_by='ticker', auto_adjust=True, threads=True, progress=False)
     except Exception as e:
         print(f"❌ 數據下載失敗: {e}"); return
 
-    candidates = []
+    tech_candidates = []
 
-    for t in MONOPOLY_TICKERS:
+    # 第一層：技術面漏斗初篩
+    for t in tickers:
         try:
-            # 【優化】安全提取單隻股票數據，兼容不同版本的 pandas/yfinance
-            if isinstance(data_daily.columns, pd.MultiIndex):
-                df_d = data_daily[t].dropna()
-            else:
-                df_d = data_daily.dropna() if len(MONOPOLY_TICKERS) == 1 else pd.DataFrame()
-                
-            if len(df_d) < 200: continue # 數據過短跳過
-
-            close_d = df_d['Close']
-            vol_d = df_d['Volume']
-            curr_price = float(close_d.iloc[-1])
-
-            # 降採樣: 日線 -> 週線
-            df_w = df_d.resample('W-FRI').agg({
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last'
-            }).dropna()
-
-            # 1. 高點跌幅計算 (Drawdown < -30%)
-            ath = float(df_w['High'].max())
-            drawdown = (curr_price - ath) / ath
-            if drawdown > MAX_DRAWDOWN: continue
-
-            # 2. 週線 RSI(14) < 30
-            weekly_rsi = calculate_weekly_rsi(df_w['Close'], 14)
-            if weekly_rsi >= MAX_RSI: continue
-
-            # 3. 60天平均交易額 > 1億美元
-            trade_value_60d = (close_d.tail(60) * vol_d.tail(60)).mean()
-            if trade_value_60d < 100_000_000: continue
-
-            # 4. 200週均線距離
-            wma_200 = float(df_w['Close'].tail(200).mean()) if len(df_w) >= 200 else float(df_w['Close'].mean())
-            dist_200wma = (curr_price - wma_200) / wma_200
-
-            print(f"🔎 發現黃金坑候選: [{t}] 跌幅 {drawdown*100:.1f}%，進入基本面審查...")
-
-            # 5. 執行基本面審查 (只對技術面通關的股票執行，極大節約時間)
-            passed, fund_msg = check_fundamentals(t)
+            df = data[t].dropna() if isinstance(data.columns, pd.MultiIndex) else data.dropna()
+            if len(df) < 200: continue
             
-            if passed:
-                target_strike = curr_price * 1.10
-                target_dte_date = (datetime.datetime.now() + datetime.timedelta(days=365)).strftime('%Y-%m-%d')
-                
-                candidates.append({
-                    "Ticker": t, "Price": curr_price, "ATH_Drawdown": drawdown * 100,
-                    "Weekly_RSI": weekly_rsi, "Trade_Value_M": trade_value_60d / 1_000_000,
-                    "Fund_Status": fund_msg, "Distance_200WMA": dist_200wma * 100,
-                    "Target_Strike": target_strike, "Target_DTE": f"> {target_dte_date}"
-                })
-        except Exception as e:
-            continue
+            close, vol = df['Close'], df['Volume']
+            curr_price = float(close.iloc[-1])
+            
+            # 流動性與均線多頭
+            vol_10d = vol.tail(10).mean()
+            if vol_10d < 500_000: continue
+            
+            ma20 = close.tail(20).mean()
+            ma50 = close.tail(50).mean()
+            ma200 = close.tail(200).mean()
+            if not (curr_price > ma20 and ma20 > ma50 and ma50 > ma200): continue
+            
+            # RS 動能計算
+            ret_1m = (curr_price - close.iloc[-21]) / close.iloc[-21] if len(close) >= 21 else 0
+            ret_3m = (curr_price - close.iloc[-63]) / close.iloc[-63] if len(close) >= 63 else 0
+            ret_1y = (curr_price - close.iloc[-252]) / close.iloc[-252] if len(close) >= 252 else 0
+            
+            rs_score = (ret_1m * 0.4) + (ret_3m * 0.3) + (ret_1y * 0.3)
+            if rs_score < 0: continue
+            
+            tech_candidates.append({
+                "Ticker": t, "Price": curr_price, "RS_Score": rs_score,
+                "Ret_1M": ret_1m, "Ret_3M": ret_3m
+            })
+        except: continue
 
-    # ==========================================
-    # 5. 輸出與同步處理
-    # ==========================================
-    if not candidates:
-        print("📭 當前市場無符合「高品質+深跌超賣」的標的。（符合策略設計）")
-        candidates = [{"Ticker": "無符合標的", "Price": 0, "ATH_Drawdown": 0, "Weekly_RSI": 0, 
-                       "Trade_Value_M": 0, "Fund_Status": "等待市場錯殺機會", 
-                       "Distance_200WMA": 0, "Target_Strike": 0, "Target_DTE": "-"}]
+    # 取 RS 最強的前 40 隻進入基本面體檢
+    tech_candidates = sorted(tech_candidates, key=lambda x: x['RS_Score'], reverse=True)[:40]
+    print(f"⚔️ 技術面初篩完成，選出 {len(tech_candidates)} 隻強勢股進入基本面體檢...")
 
-    sorted_df = pd.DataFrame(candidates).sort_values(by="ATH_Drawdown", ascending=True)
-    final_list = []
+    final_candidates = []
     
-    for _, row in sorted_df.reset_index().iterrows():
-        if str(row['Ticker']) == "無符合標的":
-            final_list.append(["無符合標的", "-", "-", "-", "-", "-", "-", "-", "-", "-"])
-            break
-            
-        final_list.append([
-            str(row['Ticker']),
-            round(float(row['Price']), 2),
-            f"{round(float(row['ATH_Drawdown']), 2)}%",
-            round(float(row['Weekly_RSI']), 2),
-            f"${round(float(row['Trade_Value_M']), 0)}M",
-            str(row['Fund_Status']),
-            f"{round(float(row['Distance_200WMA']), 2)}%",
-            f"Call @ ${round(float(row['Target_Strike']), 2)}",
-            str(row['Target_DTE']),
-            "翻倍平半 / 60天平倉 / 零止損"
-        ])
+    # 第二層：基本面深查
+    for cand in tech_candidates:
+        t = cand['Ticker']
+        passed, fin_score, fin_msg, info = calculate_fundamentals(t)
+        
+        if passed:
+            total_score = cand['RS_Score'] * 100 + fin_score
+            final_candidates.append({
+                "Ticker": t, "Price": cand['Price'], "Sector": info.get('sector', 'Unknown'),
+                "RS_Score": cand['RS_Score'] * 100, "Fin_Score": fin_score,
+                "Total_Score": total_score, "Details": fin_msg,
+                "1M_Ret": cand['Ret_1M'] * 100, "3M_Ret": cand['Ret_3M'] * 100
+            })
 
+    top_10 = sorted(final_candidates, key=lambda x: x['Total_Score'], reverse=True)[:10]
+    sync_to_google_sheet(is_bull=True, data_list=top_10, exec_time=time.time() - start_time)
+
+# ==========================================
+# 6. 格式化與雲端同步 (支援多工作表)
+# ==========================================
+def sync_to_google_sheet(is_bull, data_list=None, exec_time=0):
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    
     header = [
-        ["💎 高品質左側抄底期權策略", "更新:", bj_now, "策略屬性:", "極端錯殺/勝率極高", "", "", "", "", ""],
-        ["代碼", "現價", "距歷史高點跌幅", "週RSI(14)", "60天均交易額", "基本面狀態", "距200週線", "建議行權價(10% OTM)", "建議到期日(DTE)", "交易紀律"]
+        ["🚀 動能成長 Top 10 (右側策略)", "更新:", bj_now, "大盤狀態:", "🟢 多頭允許交易" if is_bull else "🔴 轉弱暫停交易", "", "", "", "", ""],
+        ["排名", "代碼", "板塊", "現價", "近1月漲幅", "近3月漲幅", "RS動能分", "基本面護城河", "綜合總分", "交易紀律"]
     ]
     
+    final_list = []
+    if not is_bull:
+        final_list.append(["-", "大盤跌破50MA", "系統判定為危險期", "-", "-", "-", "-", "保留現金", "-", "觀望 / 嚴禁右側追高"])
+    elif not data_list:
+        final_list.append(["-", "無符合標的", "-", "-", "-", "-", "-", "-", "-", "-"])
+    else:
+        for i, row in enumerate(data_list):
+            final_list.append([
+                f"Top {i+1}", str(row['Ticker']), str(row['Sector']), round(float(row['Price']), 2),
+                f"{round(float(row['1M_Ret']), 1)}%", f"{round(float(row['3M_Ret']), 1)}%",
+                round(float(row['RS_Score']), 2), str(row['Details']), round(float(row['Total_Score']), 2),
+                "回踩 20EMA 買入 / 破 50MA 止損" # 【優化3】明確進出場點
+            ])
+
     matrix = header + final_list
     
     try:
-        # 強制替換 NaN 為 0，防止 JSON 崩潰
         def safe_json_val(val):
             if isinstance(val, float) and not math.isfinite(val): return 0
             return str(val)
             
-        payload = json.loads(json.dumps(matrix, default=safe_json_val))
-        resp = requests.post(WEBAPP_URL, json=payload, timeout=15)
-        print(f"🎉 雲端同步完成！總耗時: {round(time.time() - start_time, 2)}秒")
+        matrix_clean = json.loads(json.dumps(matrix, default=safe_json_val))
+        
+        # 【核心變更】使用新的 payload 結構，指定分頁名稱
+        payload = {
+            "sheet_name": SHEET_TAB_NAME, 
+            "data": matrix_clean
+        }
+        
+        requests.post(WEBAPP_URL, json=payload, timeout=15)
+        print(f"🎉 雲端同步完成！發送至分頁: [{SHEET_TAB_NAME}] | 耗時: {round(exec_time, 2)}秒")
     except Exception as e:
         print(f"❌ 雲端同步失敗: {e}")
 
 if __name__ == "__main__":
-    run_quality_dip_scanner()
+    run_growth_momentum_scanner()
