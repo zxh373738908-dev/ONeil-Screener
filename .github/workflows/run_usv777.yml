@@ -1,0 +1,31 @@
+name: USv777Screener
+
+on:
+  schedule:
+    # 每天 UTC 时间 22:00 运行 (北京时间早上 6:00)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: 
+
+jobs:
+  run-us-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas numpy gspread google-auth polygon-api-client lxml
+
+      - name: Create credentials.json
+        # 🛡️ 核心修正：只使用一个确定的 Secret。建议在 GitHub Secrets 里统一命名为 GCP_SA_JSON
+        run: |
+          echo '${{ secrets.GCP_SA_JSON }}' > credentials.json
+
+      - name: Run US777Screener
+        run: python run_usv777.py
