@@ -5,7 +5,7 @@ from google.oauth2.service_account import Credentials
 import datetime, warnings, logging, requests
 import yfinance as yf
 
-# ================= 配置区 =================
+# ================= 配置区 (不改动原有架构) =================
 warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
@@ -14,26 +14,29 @@ CREDS_FILE = "credentials.json"
 TARGET_SHEET_NAME = "A-v7-V53.3-BloodBird"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
 
-# 调整后的早鸟参数 (更符合 A 股弹性)
-RS_MIN = 70           # RS 评级下调至 70，扩大扫描范围
-TIGHTNESS_MAX = 5.0   # 紧致度放宽到 5% (A股波动大，太小了选不到)
-DIST_MA20_LIMIT = 7.0 # 距离20日线 7% 以内
-# ==========================================
+# 核心参数：追求爆发前的“安静”
+MIN_RS = 75            # 市场前 25% 的强势股
+MAX_TIGHTNESS = 4.5    # 5日价格波动率
+MAX_BIAS_MA20 = 8.0    # 距离20日线不要太远
+# =========================================================
 
 def init_sheet():
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     client = gspread.authorize(creds)
     return client.open_by_key(SS_KEY).worksheet(TARGET_SHEET_NAME)
 
+def get_benchmark():
+    return yf.download("000300.SS", period="260d", progress=False)['Close']
+
 def run_v53_optimizer():
     now = datetime.datetime.now(TZ_SHANGHAI)
-    print(f"[{now.strftime('%H:%M:%S')}] 🚀 开始高胜率早鸟扫描 (自适应版)...")
+    print(f"[{now.strftime('%H:%M:%S')}] 🚀 启动 V53.4 Alpha-Bird 终极版...")
 
-    # 1. 抓取数据
+    # 1. 抓取股票池
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {
         "columns": ["name", "description", "industry", "close", "market_cap_basic"],
-        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 80e8}], 
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 85e8}], 
         "range": [0, 800]
     }
     raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
@@ -45,79 +48,94 @@ def run_v53_optimizer():
         tickers.append(yf_code)
         meta[yf_code] = {"name": item['d'][1], "industry": item['d'][2], "symbol": code}
 
-    # 2. 下载数据
-    print(f"📥 正在分析 {len(tickers)} 只核心资产...")
+    # 2. 批量获取 K 线
+    print(f"📥 深度扫描 {len(tickers)} 只标的趋势...")
     all_data = yf.download(tickers, period="260d", group_by='ticker', progress=True, threads=True)
+    benchmark = get_benchmark()
     
-    # 3. 计算 RS 评级
-    rs_list = []
+    # 3. RS 评级计算
+    rs_map = {}
     for t in tickers:
         try:
             c = all_data[t]['Close'].dropna()
-            if len(c) < 120: continue
-            score = (c.iloc[-1]/c.iloc[-22]*0.4) + (c.iloc[-1]/c.iloc[-66]*0.2) + (c.iloc[-1]/c.iloc[-132]*0.2) + (c.iloc[-1]/c.iloc[-250]*0.2)
-            rs_list.append({"code": t, "score": score})
+            if len(c) < 150: continue
+            # 权重相对强度得分
+            s = (c.iloc[-1]/c.iloc[-22]*0.4) + (c.iloc[-1]/c.iloc[-66]*0.3) + (c.iloc[-1]/c.iloc[-120]*0.3)
+            rs_map[t] = s
         except: continue
-    rs_df = pd.DataFrame(rs_list)
+    
+    rs_df = pd.DataFrame(list(rs_map.items()), columns=['code', 'score'])
     rs_df['rank'] = rs_df['score'].rank(pct=True) * 99
 
-    # 4. 核心扫描逻辑
+    # 4. 逻辑扫描
     results = []
-    candidates = [] # 存储 RS 高但紧致度略差的“强力股”
-
     for t in tickers:
         try:
             df = all_data[t].dropna()
             if len(df) < 50: continue
             
-            close = df['Close']
-            curr_p = float(close.iloc[-1])
-            ma20 = close.rolling(20).mean().iloc[-1]
-            ma50 = close.rolling(50).mean().iloc[-1]
+            c = df['Close']
+            v = df['Volume']
+            curr_p = float(c.iloc[-1])
             
-            # 计算指标
+            # --- 均线系统 ---
+            ma10 = c.rolling(10).mean().iloc[-1]
+            ma20 = c.rolling(20).mean().iloc[-1]
+            ma50 = c.rolling(50).mean().iloc[-1]
+            
+            # --- 核心过滤指标 ---
+            # 1. 紧致度 (最近5天)
+            tightness = (c.iloc[-5:].std() / c.iloc[-5:].mean()) * 100
+            # 2. RS 评级
             this_rs = rs_df[rs_df['code'] == t]['rank'].values[0]
-            tightness = (close.iloc[-5:].std() / close.iloc[-5:].mean()) * 100
-            bias_20 = ((curr_p - ma20) / ma20) * 100
-            vol_ratio = df['Volume'].iloc[-1] / df['Volume'].iloc[-5:-1].mean()
+            # 3. 量能枯竭 (今日成交量对比5日均量)
+            vdu_ratio = v.iloc[-1] / v.iloc[-6:-1].mean()
+            # 4. 趋势排列 (MA10 > MA20 > MA50 为多头排列)
+            is_uptrend = ma10 > ma20 > ma50
+            # 5. RS线高点对比
+            rs_line = c / benchmark.reindex(c.index).ffill()
+            is_rs_new_high = "⭐新高" if rs_line.iloc[-1] >= rs_line.iloc[-20:].max() else "--"
             
-            # 数据封装
-            item = {
-                "RS评级": int(this_rs),
-                "代码": meta[t]['symbol'],
-                "名称": meta[t]['name'],
-                "现价": round(curr_p, 2),
-                "紧致度": f"{round(tightness, 2)}%",
-                "量比": round(vol_ratio, 2),
-                "MA20乖离": f"{round(bias_20, 1)}%",
-                "行业": meta[t]['industry'],
-                "更新": now.strftime('%H:%M')
-            }
+            # --- 触发逻辑 (早鸟伏击) ---
+            # 条件：RS高 + 多头趋势 + 紧致 + 距离20日线近 + (量能枯竭或微增)
+            if this_rs > MIN_RS and is_uptrend and tightness < MAX_TIGHTNESS:
+                bias_20 = ((curr_p - ma20) / ma20) * 100
+                if -2 < bias_20 < MAX_BIAS_MA20:
+                    
+                    # 动态止损：取MA20或ATR止损的较大者
+                    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+                    stop_l = max(ma20 * 0.98, curr_p - 1.5 * atr)
+                    target_l = curr_p + (target_p_diff := (curr_p - stop_l) * 3)
 
-            # 严格筛选 (早鸟起飞点)
-            if this_rs > RS_MIN and -2 < bias_20 < DIST_MA20_LIMIT and tightness < TIGHTNESS_MAX:
-                item["状态"] = "🔥 极度蓄势"
-                results.append(item)
-            # 次优筛选 (RS极高但已经在涨)
-            elif this_rs > 90 and bias_20 < 15:
-                item["状态"] = "⭐ 领涨强势"
-                candidates.append(item)
-
+                    results.append({
+                        "RS评级": int(this_rs),
+                        "代码": meta[t]['symbol'],
+                        "名称": meta[t]['name'],
+                        "现价": round(curr_p, 2),
+                        "量比": round(vdu_ratio, 2),
+                        "紧致度": f"{round(tightness, 2)}%",
+                        "50日乖离": f"{round(((curr_p-ma50)/ma50)*100, 1)}%",
+                        "盈亏比": round((target_l - curr_p)/(curr_p - stop_l), 2),
+                        "行业": meta[t]['industry'],
+                        "止损": round(stop_l, 2),
+                        "目标": round(target_l, 2),
+                        "RS线新高": is_rs_new_high,
+                        "更新时间": now.strftime('%H:%M')
+                    })
         except: continue
 
-    # 5. 写入逻辑
+    # 5. 写入 Google Sheets (不改变位置)
     sh = init_sheet()
     sh.clear()
     
-    # 优先展示“蓄势”标的，如果没有，展示“RS前20名”的强势股
-    final_list = results if results else sorted(candidates, key=lambda x: x['RS评级'], reverse=True)[:20]
-
-    if final_list:
-        df_res = pd.DataFrame(final_list)
-        sh.update([df_res.columns.values.tolist()] + df_res.values.tolist())
-        print(f"✅ 成功! 发现 {len(results)} 只完美蓄势股，以及 {len(final_list)-len(results)} 只高RS领涨股。")
+    if results:
+        # 按 RS 评级和量比（越小越好）排序
+        df_final = pd.DataFrame(results).sort_values(by=["RS评级", "量比"], ascending=[False, True])
+        sh.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+        print(f"✅ 扫描完成！锁定 {len(df_final)} 只高胜率早鸟，优先展示缩量蓄势品种。")
     else:
-        print("⚠️ 依然没有发现任何高价值标的，请检查数据源或市场是否处于普跌。")
+        sh.update_acell("A1", f"最后扫描: {now.strftime('%H:%M')} - 市场强势股均在大幅波动，无蓄势点")
+        print("⚠️ 没发现标的：说明当前强势股正在剧烈洗盘或拉升中，不符合伏击原则。")
 
 if __name__ == "__main__":
     run_v53_optimizer()
