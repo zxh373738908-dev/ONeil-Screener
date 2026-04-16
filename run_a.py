@@ -9,8 +9,8 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
-# 【重要】填入你最后一次部署获取的 URL
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyiou21dO-1s4V3BrcHTemHAQNnzw8zmbQ97IenYpJHvw9dGniGg9FyExQjafyefqG5/exec"
+# 【重要】请替换为你最新部署得到的 URL
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbytCLB6vbSBDZpwPQX6FAhSNyCFlsnWHChOX6vs89WWVYKAorvnAS8jEx9WXNoP79Ef/exec"
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
@@ -33,93 +33,93 @@ def safe_convert(obj):
 # ==========================================
 def analyze_stock_safe(df_s, bench_series, t_code):
     try:
-        close_ser = df_s['Close'].dropna()
-        if isinstance(close_ser, pd.DataFrame): close_ser = close_ser.iloc[:, 0]
-        high_ser = df_s['High'].dropna()
-        if isinstance(high_ser, pd.DataFrame): high_ser = high_ser.iloc[:, 0]
-        low_ser = df_s['Low'].dropna()
-        if isinstance(low_ser, pd.DataFrame): low_ser = low_ser.iloc[:, 0]
-        vol_ser = df_s['Volume'].dropna()
-        if isinstance(vol_ser, pd.DataFrame): vol_ser = vol_ser.iloc[:, 0]
+        # 提取序列并转为单列 Series 防止歧义
+        c = df_s['Close'].dropna()
+        if isinstance(c, pd.DataFrame): c = c.iloc[:, 0]
+        h = df_s['High'].dropna()
+        if isinstance(h, pd.DataFrame): h = h.iloc[:, 0]
+        l = df_s['Low'].dropna()
+        if isinstance(l, pd.DataFrame): l = l.iloc[:, 0]
+        v = df_s['Volume'].dropna()
+        if isinstance(v, pd.DataFrame): v = v.iloc[:, 0]
 
-        if len(close_ser) < 60: return None
-        curr_price, prev_close = float(close_ser.iloc[-1]), float(close_ser.iloc[-2])
+        if len(c) < 60: return None
+        curr, prev = float(c.iloc[-1]), float(c.iloc[-2])
         
-        # RS评分
-        stock_ret = (curr_price / float(close_ser.iloc[-min(len(close_ser), 120)])) - 1
-        bench_ret = (float(bench_series.iloc[-1]) / float(bench_series.iloc[-min(len(bench_series), 120)])) - 1
-        rs_score = float(round((stock_ret - bench_ret + 1) * 85, 2))
+        # 1. RS 评分
+        s_ret = (curr / float(c.iloc[-min(len(c), 120)])) - 1
+        b_ret = (float(bench_series.iloc[-1]) / float(bench_series.iloc[-min(len(bench_series), 120)])) - 1
+        rs = float(round((s_ret - b_ret + 1) * 85, 2))
 
-        # 50日线与斜率
-        ma50 = close_ser.rolling(50).mean()
-        ma50_curr = float(ma50.iloc[-1])
-        ma50_slope = (ma50_curr - float(ma50.iloc[-6])) / float(ma50.iloc[-6]) * 100 if len(ma50)>6 else 0
+        # 2. MA50 与斜率
+        ma50 = c.rolling(50).mean()
+        m50_c = float(ma50.iloc[-1])
+        slope = (m50_c - float(ma50.iloc[-6])) / float(ma50.iloc[-6]) * 100 if len(ma50)>6 else 0
 
-        # 量比与回撤
-        vol_ratio = float(vol_ser.iloc[-1] / vol_ser.iloc[-21:-1].mean())
-        dist_high = float(((curr_price / high_ser.tail(22).max()) - 1) * 100)
-        amp = float((float(high_ser.iloc[-1]) - float(low_ser.iloc[-1])) / prev_close * 100)
+        # 3. 核心量价
+        v_r = float(v.iloc[-1] / v.iloc[-21:-1].mean())
+        dist = float(((curr / h.tail(22).max()) - 1) * 100)
+        amp = float((float(h.iloc[-1]) - float(l.iloc[-1])) / prev * 100)
 
+        # 4. 判定逻辑
         level, act, win, guide = "⚪ 观察", "潜伏观察", "40%", "等待回踩"
-        is_near_ma50 = (ma50_curr * 0.97) <= curr_price <= (ma50_curr * 1.03)
+        near_ma50 = (m50_c * 0.97) <= curr <= (m50_c * 1.03)
         
-        if rs_score > 85:
-            if is_near_ma50 and vol_ratio < 0.7:
-                level, act, win, guide = "🚀 进攻", "🐍 毒蛇出洞", "85%", "地量回踩，爆发在即"
-            elif dist_high > -5:
-                level, act, win, guide = "🔥 强势", "禁追 (高位)", "60%", "股价在高位横盘"
+        if rs > 85:
+            if near_ma50 and v_r < 0.7:
+                level, act, win, guide = "🚀 进攻", "🐍 毒蛇出洞", "85%", "极度缩量踩线，买入胜率高"
+            elif dist > -5:
+                level, act, win, guide = "🔥 强势", "禁追 (高位)", "60%", "高位横盘中，勿追"
             else:
-                level, act, win, guide = "🟡 准备", "等待缩量", "55%", "趋势强，等缩量买点"
-        elif curr_price < ma50_curr * 0.96:
-            level, act, win, guide = "💀 破位", "放弃 (跌穿)", "10%", "跌破生命线，速离"
+                level, act, win, guide = "🟡 准备", "等待缩量", "55%", "趋势极强，等缩量回踩"
+        elif curr < m50_c * 0.96:
+            level, act, win, guide = "💀 破位", "放弃 (跌穿)", "10%", "跌破生命线，已走弱"
 
-        return [t_code, act, level, f"{dist_high:.1f}%", f"{vol_ratio:.2f}x", f"{amp:.1f}%", 
-                "📈 向上" if ma50_slope > 0 else "📉 向下", win, guide, rs_score]
+        return [t_code, act, level, f"{dist:.1f}%", f"{v_r:.2f}x", f"{amp:.1f}%", 
+                "📈 向上" if slope > 0 else "📉 向下", win, guide, rs]
     except: return None
 
 # ==========================================
-# 3. 执行主逻辑
+# 3. 主程序
 # ==========================================
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    trace_id = f"V68-{uuid.uuid4().hex[:4].upper()}"
+    trace_id = f"VIPER-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"🚀 V60.8 启动扫描 | ID: {trace_id}")
+    print(f"🚀 V60.9 终极扫描启动 | ID: {trace_id}")
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        idx_data = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
-        bench_close = idx_data['Close']
-        if isinstance(bench_close, pd.DataFrame): bench_close = bench_close.iloc[:, 0]
+        idx = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
+        bench = idx['Close']
+        if isinstance(bench, pd.DataFrame): bench = bench.iloc[:, 0]
         all_data = yf.download(tickers, period="1y", group_by='ticker', progress=False, auto_adjust=True)
     except Exception as e:
-        print(f"❌ 数据获取失败: {e}"); return
+        print(f"❌ 数据下载失败: {e}"); return
 
     results = []
     for t_full in tickers:
         t_raw = t_full.split('.')[0]
         try:
-            res = analyze_stock_safe(all_data[t_full], bench_close, t_raw)
-            if res: results.append(res); print(f"✅ {t_raw} 分析完成")
+            res = analyze_stock_safe(all_data[t_full], bench, t_raw)
+            if res: results.append(res); print(f"✅ {t_raw} OK")
         except: continue
 
     results.sort(key=lambda x: (x[2], x[9]), reverse=True)
     
     header = [
-        ["🚀 V60.8 毒蛇终极版", "ID:", trace_id, "模式:", "同步推送", "更新:", dt_str, "", "", ""], 
+        ["🚀 V60.9 毒蛇量化 (自动化版)", "ID:", trace_id, "模式:", "MA50地量回踩", "更新:", dt_str, "", "", ""], 
         ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅", "MA50趋势", "预测胜率", "实战指引", "RS分"]
     ]
     
     if results:
         try:
             payload = json.loads(json.dumps(header + results, default=safe_convert))
-            print(f"📡 正在推送到表格，请稍候...")
+            print(f"📡 正在推送到 Google Sheets...")
             resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
-            print(f"📡 Google 响应内容: {resp.text}")
-            if "Success" in resp.text:
-                print(f"🎉 成功！请刷新你的 Google Sheet 查看结果。")
-        except Exception as e: print(f"❌ 推送过程出错: {e}")
+            print(f"📡 Google 响应: {resp.text}")
+        except Exception as e: print(f"❌ 推送失败: {e}")
 
 if __name__ == "__main__":
     main()
