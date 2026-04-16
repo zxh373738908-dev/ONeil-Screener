@@ -180,4 +180,3 @@ sh.update_acell("N1", f"V53.2 Early Bird | {now_str} | Breadth: {len(all_hits)}"
 
 print(f"🎉 任务成功！已更新 {len(final_df)} 只潜力个股到表格。")
 if name == "main":
-run_v53_early_bird()
