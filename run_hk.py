@@ -191,21 +191,57 @@ def main():
         set_frozen(ws, rows=3)
         format_cell_range(ws, 'A3:L3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0.2, 0.2, 0.2)))
         
-        # 条件格式 (进攻版特殊高亮)
-        rules = get_conditional_format_rules(ws)
-        if "V850" in config["title"]:
-            # RS 极速动量 - 金色提醒
-            rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('I4:I50', ws)],
-                booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['15']),
-                                        format=cellFormat(backgroundColor=color(1, 0.9, 0.6), textFormat=textFormat(bold=True)))))
+        # 条件格式 (基础格式化)
+        set_frozen(ws, rows=3)
+        format_cell_range(ws, 'A3:L3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0.2, 0.2, 0.2)))
         
-        # 巅峰突破/主升浪 - 红色高亮
-        rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('B4:B50', ws)],
-            booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🚀', '🔥']),
-                                    format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0))))))
+        rules = get_conditional_format_rules(ws)
+        
+        # 1. 针对 V850 的 RS 极速动量 - 金色提醒 (数值类型)
+        if "V850" in config["title"]:
+            rules.append(ConditionalFormatRule(
+                ranges=[GridRange.from_a1_range('I4:I100', ws)],
+                booleanRule=BooleanRule(
+                    condition=BooleanCondition('NUMBER_GREATER', ['15']),
+                    format=cellFormat(backgroundColor=color(1, 0.9, 0.6), textFormat=textFormat(bold=True))
+                )
+            ))
+
+        # 2. 分开处理：火箭 (🚀) 巅峰突破 - 红色高亮
+        rules.append(ConditionalFormatRule(
+            ranges=[GridRange.from_a1_range('B4:B100', ws)],
+            booleanRule=BooleanRule(
+                condition=BooleanCondition('TEXT_CONTAINS', ['🚀']),
+                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)))
+            )
+        ))
+
+        # 3. 分开处理：火焰 (🔥) 主升浪 - 红色高亮
+        rules.append(ConditionalFormatRule(
+            ranges=[GridRange.from_a1_range('B4:B100', ws)],
+            booleanRule=BooleanRule(
+                condition=BooleanCondition('TEXT_CONTAINS', ['🔥']),
+                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)))
+            )
+        ))
+
+        # 4. 奇点先行 (👁️) - 紫色背景 (原有逻辑)
+        rules.append(ConditionalFormatRule(
+            ranges=[GridRange.from_a1_range('B4:B100', ws)],
+            booleanRule=BooleanRule(
+                condition=BooleanCondition('TEXT_CONTAINS', ['👁️']),
+                format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True))
+            )
+        ))
+
+        # 5. 针对极度延伸 (☠️) - 灰色删除线 (针对 V750)
+        rules.append(ConditionalFormatRule(
+            ranges=[GridRange.from_a1_range('B4:B100', ws)],
+            booleanRule=BooleanRule(
+                condition=BooleanCondition('TEXT_CONTAINS', ['☠️']),
+                format=cellFormat(backgroundColor=color(0.85, 0.85, 0.85), 
+                                 textFormat=textFormat(strikethrough=True, foregroundColor=color(0.5, 0.5, 0.5)))
+            )
+        ))
+
         rules.save()
-
-    print(f"✅ 任务完成。V750 捕捉 {len(v750_results)} 只，V850 捕捉 {len(v850_results)} 只。")
-
-if __name__ == "__main__":
-    main()
