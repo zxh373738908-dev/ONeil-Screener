@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxcwtfGFZqWyulM2x63ytoYnuYzR-siWVCahjsIqdRbsuYjBac8YCuy7GTRlwd-YGmc/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzdFvvn32j46Z0oyfa0klqfJ1yNiY8WSXNi6jyaI9Qihe98m8zIkdCNNEU1XYEoLzBT/exec"
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
@@ -188,3 +188,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+ if results:
+        try:
+            payload = json.loads(json.dumps(header + results, default=safe_convert))
+            resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
+            
+            # --- 新增调试行 ---
+            print(f"📡 Google返回内容: {resp.text}") 
+            
+            if "Success" in resp.text:
+                print(f"🎉 成功! 数据已写入表格。")
+            else:
+                print(f"⚠️ 脚本已接收但未成功写入，请检查Apps Script。")
+        except Exception as e:
+            print(f"❌ 网络传输失败: {e}")
