@@ -59,7 +59,6 @@ def extract_ticker_data(data, ticker):
         return data.dropna()
     except: return pd.DataFrame()
 
-# 獲取大盤與恐慌指數
 def get_market_regime():
     try:
         spy_df = extract_ticker_data(yf.download("SPY", period="6mo", progress=False), "SPY") if "SPY" in yf.download("SPY", period="6mo", progress=False).columns else yf.download("SPY", period="6mo", progress=False)
@@ -67,14 +66,11 @@ def get_market_regime():
         
         curr_spy, ma50_spy = float(spy_df['Close'].iloc[-1]), float(spy_df['Close'].tail(50).mean())
         curr_vix = float(vix_df['Close'].iloc[-1])
-        
-        # 【優化1】VIX 必須小於 22 且 SPY 站上 50MA 才是真正的安全牛市
-        is_bull = (curr_spy > ma50_spy) and (curr_vix < 22)
-        return is_bull, curr_vix
+        return (curr_spy > ma50_spy) and (curr_vix < 22), curr_vix
     except: return True, 15.0
 
 # ==========================================
-# 3. 🛡️ 策略 A: 左側黃金坑 (智能 IV 防護版)
+# 3. 🛡️ 策略 A: 左側黃金坑
 # ==========================================
 def run_left_side_golden_pit(curr_vix):
     print("\n" + "="*50 + "\n🛡️ [策略 A: 左側黃金坑] 啟動掃描...")
@@ -100,9 +96,7 @@ def run_left_side_golden_pit(curr_vix):
             time.sleep(0.2)
             info = yf.Ticker(t).info
             if safe_get(info, 'freeCashflow') > 0 and safe_get(info, 'revenueGrowth') > -0.10:
-                # 【優化3】高 VIX 環境下提示改用 Spread 策略
-                discipline = "翻倍平半 / 零止損" if curr_vix < 25 else "⚠️IV極高！改用 Bull Call Spread"
-                
+                discipline = "翻倍平半 / 零止損" if curr_vix < 25 else "⚠️IV極高！改做 Bull Call Spread"
                 candidates.append({
                     "Ticker": t, "Price": curr_price, "Drawdown": drawdown*100,
                     "Status": "FCF健康 | 20MA企穩 | 📈放量", "Strike": curr_price * 0.80, "Discipline": discipline
@@ -121,7 +115,7 @@ def run_left_side_golden_pit(curr_vix):
     sync_to_google_sheet("🛡️左側_黃金坑", header + final_list)
 
 # ==========================================
-# 4. 🚀 策略 B: 右側動能成長 (智能狙擊區版)
+# 4. 🚀 策略 B: 右側動能成長 (風險量化與 RVOL 版)
 # ==========================================
 def run_right_side_momentum(is_bull, curr_vix):
     print("\n" + "="*50 + "\n🚀 [策略 B: 右側動能成長] 啟動掃描...")
@@ -129,7 +123,7 @@ def run_right_side_momentum(is_bull, curr_vix):
     market_status = f"🟢 允許交易 (VIX:{curr_vix:.1f})" if is_bull else f"🔴 轉弱或恐慌 (VIX:{curr_vix:.1f})，暫停"
     header = [
         ["🚀 動能成長 Top 10", "更新:", datetime.datetime.now().strftime('%m-%d %H:%M'), "大盤:", market_status, "", "", "", "", ""],
-        ["排名", "代碼", "板塊", "現價", "近1月漲幅", "近3月漲幅", "RS動能分", "基本面與技術形態", "綜合總分", "交易紀律"]
+        ["排名", "代碼", "板塊", "現價", "近1月漲幅", "近3月漲幅", "RS動能分", "基本面與技術形態", "綜合總分", "交易紀律 (買賣點與風控)"]
     ]
 
     if not is_bull:
@@ -154,10 +148,13 @@ def run_right_side_momentum(is_bull, curr_vix):
             
             if curr_price < ma50 or ((curr_price - ma50) / ma50) > 0.35: continue
             
-            # 【優化2】計算真正的 20EMA 並判斷是否進入「狙擊區」 (±2.5% 範圍)
             ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
             dist_to_ema20 = abs(curr_price - ema20) / ema20
             in_sniper_zone = dist_to_ema20 <= 0.025 
+            
+            # 【V10 核心升級 1】計算 RVOL (相對成交量) 與 止損風險
+            rvol = float(vol.iloc[-1] / vol.tail(10).mean())
+            risk_pct = ((curr_price - ma50) / curr_price) * 100 # 距離 50MA 的虧損百分比
             
             r1m = (curr_price - close.iloc[-21]) / close.iloc[-21] if len(close)>=21 else 0
             r3m = (curr_price - close.iloc[-63]) / close.iloc[-63] if len(close)>=63 else 0
@@ -167,12 +164,11 @@ def run_right_side_momentum(is_bull, curr_vix):
             if rs_score > 0:
                 cands.append({"Ticker": t, "Price": curr_price, "RS": rs_score, "1M": r1m, "3M": r3m, 
                               "Tightness": (close.tail(15).std() / close.tail(15).mean()) * 100, 
-                              "Vol_OK": vol.iloc[-1] > vol.tail(10).mean(),
-                              "Sniper": in_sniper_zone}) # 記錄狙擊狀態
+                              "RVOL": rvol, "Sniper": in_sniper_zone, "Risk_Pct": risk_pct})
         except: continue
 
     cands = sorted(cands, key=lambda x: x['RS'], reverse=True)[:50] 
-    print(f"🔬 體檢 (共 {len(cands)} 隻)，執行均衡與狙擊偵測...")
+    print(f"🔬 體檢 (共 {len(cands)} 隻)，執行均衡與風險測算...")
     
     final_cands = []
     for c in cands:
@@ -195,13 +191,15 @@ def run_right_side_momentum(is_bull, curr_vix):
 
             if fin_score > 0:
                 tight_msg = f" | 收斂:{c['Tightness']:.1f}%" if c['Tightness'] < 4.0 else ""
-                vol_msg = " 📈放量" if c['Vol_OK'] else ""
+                # 【V10 核心升級 2】顯示具體的放量倍數
+                vol_msg = f" 📈{c['RVOL']:.1f}x量" if c['RVOL'] > 1.2 else ""
+                
                 final_cands.append({
                     "T": c['Ticker'], "Sec": sec.replace("Consumer Defensive", "Cons Def").replace("Consumer Cyclical", "Cons Cyc")[:12], 
                     "P": c['Price'], "1M": c['1M']*100, "3M": c['3M']*100, "RS": c['RS']*100, 
                     "Msg": fin_msg + tight_msg + vol_msg,
                     "Tot": (c['RS']*100) + fin_score - (c['Tightness'] * 1.5),
-                    "Sniper": c['Sniper']
+                    "Sniper": c['Sniper'], "Risk": c['Risk_Pct']
                 })
         except: continue
 
@@ -215,16 +213,17 @@ def run_right_side_momentum(is_bull, curr_vix):
             sector_counts[sec] = sector_counts.get(sec, 0) + 1
         if len(top10) >= 10: break
 
+    # 【V10 核心升級 3】智能風控紀律輸出
     final_list = [["-", "無符合標的", "-", "-", "-", "-", "-", "-", "-", "-"]] if not top10 else [
         [f"Top {i+1}", r['T'], r['Sec'], round(r['P'], 2), f"{round(r['1M'], 1)}%", 
          f"{round(r['3M'], 1)}%", round(r['RS'], 2), r['Msg'], round(r['Tot'], 2), 
-         "🎯 回踩到位！現價買入" if r['Sniper'] else "等待回踩 20EMA"] # 【優化2】智能狙擊信號
+         f"🎯 回踩買入 (止損風險: -{r['Risk']:.1f}%)" if r['Sniper'] else f"等待回踩 20EMA (潛在風險: -{r['Risk']:.1f}%)"]
         for i, r in enumerate(top10)
     ]
     sync_to_google_sheet("🚀右側_動能成長", header + final_list)
 
 if __name__ == "__main__":
-    print("🌟 啟動【雙引擎量化系統 V9.0 - 智能狙擊版】...")
+    print("🌟 啟動【雙引擎量化系統 V10.0 - 終極風控版】...")
     is_bull, curr_vix = get_market_regime()
     run_left_side_golden_pit(curr_vix)
     run_right_side_momentum(is_bull, curr_vix)
