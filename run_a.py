@@ -9,6 +9,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
+# 你的新 Google Web App URL
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzdFvvn32j46Z0oyfa0klqfJ1yNiY8WSXNi6jyaI9Qihe98m8zIkdCNNEU1XYEoLzBT/exec"
 
 CORE_TICKERS_RAW = [
@@ -27,29 +28,12 @@ def safe_convert(obj):
         return float(obj) if not np.isnan(obj) else 0.0
     return str(obj)
 
-# 核心安全提取函数：确保返回的是 Pandas Series
-def get_series(df, key):
-    try:
-        # 针对 yfinance 返回的 MultiIndex 结构做深度提取
-        if isinstance(df.columns, pd.MultiIndex):
-            # 如果 df 是全量数据，key 可能是 'Close'
-            res = df.xs(key, axis=1, level=1)
-        else:
-            res = df[key]
-        
-        # 无论如何，只取第一列并转换为 Series，防止多列导致的 Ambiguous 错误
-        if isinstance(res, pd.DataFrame):
-            res = res.iloc[:, 0]
-        return res.dropna()
-    except:
-        return pd.Series()
-
 # ==========================================
-# 2. 逻辑引擎 - 修复 Series 歧义版
+# 2. 逻辑引擎 - 核心分析函数
 # ==========================================
 def analyze_stock_safe(df_s, bench_series, t_code):
     try:
-        # 1. 提取基础序列并强制转换为单列 Series
+        # 提取基础序列并强制转换为单列 Series
         close_ser = df_s['Close'].dropna()
         if isinstance(close_ser, pd.DataFrame): close_ser = close_ser.iloc[:, 0]
         
@@ -64,40 +48,36 @@ def analyze_stock_safe(df_s, bench_series, t_code):
 
         if len(close_ser) < 60: return None
 
-        # 2. 提取单一数值点 (使用 float 强制转换，杜绝 Series 歧义)
+        # 提取单一数值点
         curr_price = float(close_ser.iloc[-1])
         prev_close = float(close_ser.iloc[-2])
         
-        # 3. 计算 RS 评级
+        # 1. 计算 RS 评级
         stock_ret = (curr_price / float(close_ser.iloc[-min(len(close_ser), 120)])) - 1
         bench_ret = (float(bench_series.iloc[-1]) / float(bench_series.iloc[-min(len(bench_series), 120)])) - 1
         rs_score = float(round((stock_ret - bench_ret + 1) * 85, 2))
 
-        # 4. 均线计算
+        # 2. 均线计算
         ma50 = close_ser.rolling(50).mean()
         ma50_curr = float(ma50.iloc[-1])
-        # 斜率判断
         ma50_prev = float(ma50.iloc[-6]) if len(ma50) > 6 else ma50_curr
         ma50_slope_val = (ma50_curr - ma50_prev) / ma50_prev * 100
 
-        # 5. 指标计算
+        # 3. 核心指标计算
         vol_avg = float(vol_ser.iloc[-21:-1].mean())
         vol_ratio = float(vol_ser.iloc[-1] / vol_avg) if vol_avg > 0 else 1.0
         
         recent_max_high = float(high_ser.tail(22).max())
         dist_high = float(((curr_price / recent_max_high) - 1) * 100)
         
-        curr_low = float(low_ser.iloc[-1])
-        curr_high = float(high_ser.iloc[-1])
-        amp = float((curr_high - curr_low) / prev_close * 100)
+        amp = float((float(high_ser.iloc[-1]) - float(low_ser.iloc[-1])) / prev_close * 100)
 
-        # 6. 分级判断 (现在所有变量都是 float，判断绝对安全)
+        # 4. 判定标签
         level = "⚪ 观察"
         act = "潜伏观察"
         win = "40%"
         guide = "等待回踩或地量"
 
-        # 判断是否在50日线附近 (±3%)
         is_near_ma50 = (ma50_curr * 0.97) <= curr_price <= (ma50_curr * 1.03)
         
         if rs_score > 85:
@@ -126,79 +106,71 @@ def analyze_stock_safe(df_s, bench_series, t_code):
             win, guide, rs_score
         ]
     except Exception as e:
-        # 如果还是报错，打印出具体的变量类型以便调试
         print(f"解析 {t_code} 失败: {str(e)}")
         return None
 
 # ==========================================
-# 3. 主流程
+# 3. 主流程 - 严格缩进对齐版
 # ==========================================
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    trace_id = f"V6-FIX-{uuid.uuid4().hex[:4].upper()}"
+    trace_id = f"VIPER-FINAL-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"📡 V60.5 修复版运行中 | ID: {trace_id}")
+    print(f"🚀 V60.6 终极版运行 | ID: {trace_id} | {dt_str}")
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        print("📥 下载基准数据...")
+        print("📥 下载基准数据 (000300.SS)...")
         idx_data = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
-        # 确保基准也是 Series
         bench_close = idx_data['Close']
         if isinstance(bench_close, pd.DataFrame): bench_close = bench_close.iloc[:, 0]
 
         print(f"📥 下载 {len(tickers)} 只标的数据...")
         all_data = yf.download(tickers, period="1y", group_by='ticker', progress=False, auto_adjust=True)
     except Exception as e:
-        print(f"❌ 数据下载失败: {e}"); return
+        print(f"❌ 数据获取失败: {e}")
+        return
 
     results = []
     for t_full in tickers:
         t_raw = t_full.split('.')[0]
         try:
-            # 提取单只股票的 DataFrame
             stock_df = all_data[t_full]
             if stock_df.empty: continue
             
             res_row = analyze_stock_safe(stock_df, bench_close, t_raw)
             if res_row:
                 results.append(res_row)
-                print(f"✅ {t_raw} 分析完成: {res_row[2]}")
+                print(f"✅ {t_raw}: {res_row[2]}")
         except:
             continue
 
-    # 排序并推送
+    # 按信号等级和RS评分排序
     results.sort(key=lambda x: (x[2], x[9]), reverse=True)
     
     header = [
-        ["🚀 V60.5 毒蛇狙击 (修复版)", "ID:", trace_id, "模式:", "强制类型校验", "更新:", dt_str, ""],
+        ["🚀 V60.6 毒蛇狙击 (终极版)", "ID:", trace_id, "策略:", "类型安全+自动化同步", "更新:", dt_str, ""],
         ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅", "MA50趋势", "预测胜率", "实战指引", "RS分"]
     ]
     
     if results:
         try:
             payload = json.loads(json.dumps(header + results, default=safe_convert))
+            print(f"📡 正在推送到 Google Sheets...")
             resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
-            print(f"🎉 成功! 已推送 {len(results)} 条数据到表单。")
+            
+            # 打印 Google 返回的内容
+            print(f"📡 Google 脚本响应: {resp.text}")
+            
+            if "Success" in resp.text:
+                print(f"🎉 成功! 数据已实时同步到表格。")
+            else:
+                print(f"⚠️ 脚本已接收但返回异常，请确认 Apps Script 部署。")
         except Exception as e:
-            print(f"❌ 推送失败: {e}")
+            print(f"❌ 网络推送失败: {e}")
     else:
-        print("⚠️ 未发现符合条件的股票或解析全部失败。")
+        print("⚠️ 未分析出有效结果，请检查数据源。")
 
 if __name__ == "__main__":
     main()
- if results:
-        try:
-            payload = json.loads(json.dumps(header + results, default=safe_convert))
-            resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
-            
-            # --- 新增调试行 ---
-            print(f"📡 Google返回内容: {resp.text}") 
-            
-            if "Success" in resp.text:
-                print(f"🎉 成功! 数据已写入表格。")
-            else:
-                print(f"⚠️ 脚本已接收但未成功写入，请检查Apps Script。")
-        except Exception as e:
-            print(f"❌ 网络传输失败: {e}")
