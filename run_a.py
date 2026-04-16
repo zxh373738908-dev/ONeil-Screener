@@ -11,7 +11,6 @@ warnings.filterwarnings('ignore')
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxcwtfGFZqWyulM2x63ytoYnuYzR-siWVCahjsIqdRbsuYjBac8YCuy7GTRlwd-YGmc/exec"
 
-# 扩充了代码池，确保即使部分票停牌也有数据
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
     "002475", "002594", "601899", "600030", "600900", "600150", "300274", "000333",
@@ -28,41 +27,77 @@ def safe_convert(obj):
         return float(obj) if not np.isnan(obj) else 0.0
     return str(obj)
 
-# ==========================================
-# 2. 逻辑引擎 - 零过滤全量输出版
-# ==========================================
-def analyze_stock_full_scan(df_s, bench_ser, t_code):
+# 核心安全提取函数：确保返回的是 Pandas Series
+def get_series(df, key):
     try:
-        # 兼容 yfinance 的多级索引列名
-        close = df_s['Close'].dropna()
-        if len(close) < 60: return None
+        # 针对 yfinance 返回的 MultiIndex 结构做深度提取
+        if isinstance(df.columns, pd.MultiIndex):
+            # 如果 df 是全量数据，key 可能是 'Close'
+            res = df.xs(key, axis=1, level=1)
+        else:
+            res = df[key]
         
-        curr_price = float(close.iloc[-1])
-        prev_close = float(close.iloc[-2])
-        high = df_s['High'].dropna()
-        vol = df_s['Volume'].dropna()
+        # 无论如何，只取第一列并转换为 Series，防止多列导致的 Ambiguous 错误
+        if isinstance(res, pd.DataFrame):
+            res = res.iloc[:, 0]
+        return res.dropna()
+    except:
+        return pd.Series()
 
-        # 1. 计算 RS (相对强度) - 只要有数据就计算
-        stock_ret = (curr_price / close.iloc[-min(len(close), 120)]) - 1
-        bench_ret = (bench_ser.iloc[-1] / bench_ser.iloc[-min(len(bench_ser), 120)]) - 1
-        rs_score = round((stock_ret - bench_ret + 1) * 85, 2)
+# ==========================================
+# 2. 逻辑引擎 - 修复 Series 歧义版
+# ==========================================
+def analyze_stock_safe(df_s, bench_series, t_code):
+    try:
+        # 1. 提取基础序列并强制转换为单列 Series
+        close_ser = df_s['Close'].dropna()
+        if isinstance(close_ser, pd.DataFrame): close_ser = close_ser.iloc[:, 0]
+        
+        high_ser = df_s['High'].dropna()
+        if isinstance(high_ser, pd.DataFrame): high_ser = high_ser.iloc[:, 0]
+        
+        low_ser = df_s['Low'].dropna()
+        if isinstance(low_ser, pd.DataFrame): low_ser = low_ser.iloc[:, 0]
+        
+        vol_ser = df_s['Volume'].dropna()
+        if isinstance(vol_ser, pd.DataFrame): vol_ser = vol_ser.iloc[:, 0]
 
-        # 2. 均线与斜率
-        ma50 = close.rolling(50).mean()
-        ma50_curr = ma50.iloc[-1]
-        ma50_slope = (ma50_curr - ma50.iloc[-5]) / ma50.iloc[-5] * 100 if len(ma50) > 5 else 0
+        if len(close_ser) < 60: return None
 
-        # 3. 核心指标
-        vol_ratio = float(vol.iloc[-1] / vol.iloc[-21:-1].mean()) if len(vol) > 21 else 1.0
-        dist_high = ((curr_price / high.tail(22).max()) - 1) * 100
-        amp = (high.iloc[-1] - df_s['Low'].dropna().iloc[-1]) / prev_close * 100
+        # 2. 提取单一数值点 (使用 float 强制转换，杜绝 Series 歧义)
+        curr_price = float(close_ser.iloc[-1])
+        prev_close = float(close_ser.iloc[-2])
+        
+        # 3. 计算 RS 评级
+        stock_ret = (curr_price / float(close_ser.iloc[-min(len(close_ser), 120)])) - 1
+        bench_ret = (float(bench_series.iloc[-1]) / float(bench_series.iloc[-min(len(bench_series), 120)])) - 1
+        rs_score = float(round((stock_ret - bench_ret + 1) * 85, 2))
 
-        # 4. 判定标签 (不再 return None，而是分类)
+        # 4. 均线计算
+        ma50 = close_ser.rolling(50).mean()
+        ma50_curr = float(ma50.iloc[-1])
+        # 斜率判断
+        ma50_prev = float(ma50.iloc[-6]) if len(ma50) > 6 else ma50_curr
+        ma50_slope_val = (ma50_curr - ma50_prev) / ma50_prev * 100
+
+        # 5. 指标计算
+        vol_avg = float(vol_ser.iloc[-21:-1].mean())
+        vol_ratio = float(vol_ser.iloc[-1] / vol_avg) if vol_avg > 0 else 1.0
+        
+        recent_max_high = float(high_ser.tail(22).max())
+        dist_high = float(((curr_price / recent_max_high) - 1) * 100)
+        
+        curr_low = float(low_ser.iloc[-1])
+        curr_high = float(high_ser.iloc[-1])
+        amp = float((curr_high - curr_low) / prev_close * 100)
+
+        # 6. 分级判断 (现在所有变量都是 float，判断绝对安全)
         level = "⚪ 观察"
         act = "潜伏观察"
         win = "40%"
         guide = "等待回踩或地量"
 
+        # 判断是否在50日线附近 (±3%)
         is_near_ma50 = (ma50_curr * 0.97) <= curr_price <= (ma50_curr * 1.03)
         
         if rs_score > 85:
@@ -87,11 +122,12 @@ def analyze_stock_full_scan(df_s, bench_ser, t_code):
 
         return [
             t_code, act, level, f"{dist_high:.1f}%", f"{vol_ratio:.2f}x", 
-            f"{amp:.1f}%", "📈 向上" if ma50_slope > 0 else "📉 向下/平", 
+            f"{amp:.1f}%", "📈 向上" if ma50_slope_val > 0 else "📉 向下", 
             win, guide, rs_score
         ]
     except Exception as e:
-        print(f"解析 {t_code} 出错: {e}")
+        # 如果还是报错，打印出具体的变量类型以便调试
+        print(f"解析 {t_code} 失败: {str(e)}")
         return None
 
 # ==========================================
@@ -100,53 +136,55 @@ def analyze_stock_full_scan(df_s, bench_ser, t_code):
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    trace_id = f"V6-FULL-{uuid.uuid4().hex[:4].upper()}"
+    trace_id = f"V6-FIX-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"📡 V60.4 信号扫描开始 | ID: {trace_id}")
+    print(f"📡 V60.5 修复版运行中 | ID: {trace_id}")
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
-    # 增加对指数的重试机制
     try:
-        print("📥 正在抓取市场基准 (CSI 300)...")
+        print("📥 下载基准数据...")
         idx_data = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
+        # 确保基准也是 Series
         bench_close = idx_data['Close']
-        
-        print(f"📥 正在抓取 {len(tickers)} 只标的数据...")
-        # 强制分批获取，防止 yfinance 一次性请求过多被拒
+        if isinstance(bench_close, pd.DataFrame): bench_close = bench_close.iloc[:, 0]
+
+        print(f"📥 下载 {len(tickers)} 只标的数据...")
         all_data = yf.download(tickers, period="1y", group_by='ticker', progress=False, auto_adjust=True)
     except Exception as e:
-        print(f"❌ 数据抓取中断: {e}"); return
+        print(f"❌ 数据下载失败: {e}"); return
 
     results = []
     for t_full in tickers:
         t_raw = t_full.split('.')[0]
-        # 处理 yfinance 返回的不同数据结构
         try:
+            # 提取单只股票的 DataFrame
             stock_df = all_data[t_full]
-            res_row = analyze_stock_full_scan(stock_df, bench_close, t_raw)
+            if stock_df.empty: continue
+            
+            res_row = analyze_stock_safe(stock_df, bench_close, t_raw)
             if res_row:
                 results.append(res_row)
-                print(f"✅ {t_raw}: {res_row[2]} (RS:{res_row[9]})")
+                print(f"✅ {t_raw} 分析完成: {res_row[2]}")
         except:
             continue
 
-    # 排序：进攻 > 准备 > 观察 > 破位
+    # 排序并推送
     results.sort(key=lambda x: (x[2], x[9]), reverse=True)
-
+    
     header = [
-        ["🚀 V60.4 终极扫描 (防空版)", "ID:", trace_id, "模式:", "全量展示/动态指引", "更新:", dt_str, ""],
+        ["🚀 V60.5 毒蛇狙击 (修复版)", "ID:", trace_id, "模式:", "强制类型校验", "更新:", dt_str, ""],
         ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅", "MA50趋势", "预测胜率", "实战指引", "RS分"]
     ]
     
-    if not results:
-        print("⚠️ 警告：分析完成但结果集为空，请检查 yfinance 网络。")
-    else:
+    if results:
         try:
             payload = json.loads(json.dumps(header + results, default=safe_convert))
             resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
-            print(f"🎉 成功同步 {len(results)} 条数据到表单! (HTTP {resp.status_code})")
+            print(f"🎉 成功! 已推送 {len(results)} 条数据到表单。")
         except Exception as e:
             print(f"❌ 推送失败: {e}")
+    else:
+        print("⚠️ 未发现符合条件的股票或解析全部失败。")
 
 if __name__ == "__main__":
     main()
