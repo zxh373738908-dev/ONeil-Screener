@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 # 1. 配置中心 (V12.0 机构增强版)
 # ==========================================
 # ！！！请在此处粘贴您的 Google 脚本 URL ！！！
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwP3SYIaCsxCRSWe-sI0wUcB3E9QGKH3vFZsvJUB8gh4oih_lktGBZv-WXGSHjylazG/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzKKzJXXvHQh_XogszEmbY1VpCesIKHvFbM8OiIPXOuTKo0PcSD-Ai__Zrq54ZWbvMH/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
