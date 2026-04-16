@@ -1,3 +1,34 @@
+import pandas as pd
+import numpy as np
+import gspread
+from google.oauth2.service_account import Credentials
+import datetime
+import warnings
+import yfinance as yf
+import requests
+import re
+import time
+from gspread_formatting import *
+
+warnings.filterwarnings('ignore')
+
+# ==========================================
+# 1. 配置中心
+# ==========================================
+SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
+TARGET_GID = 665566258  
+CREDS_FILE = "credentials.json"
+ACCOUNT_SIZE = 500000 # 假设 50 万港币总仓位
+MAX_RISK_PER_TRADE = 0.008 # 单笔损失控制在总仓位 0.8%
+
+def init_sheet():
+    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+    client = gspread.authorize(creds)
+    doc = client.open_by_key(SS_KEY)
+    for ws in doc.worksheets():
+        if str(ws.id) == str(TARGET_GID): return ws
+    return doc.get_worksheet(0)
+
 # ==========================================
 # 🧠 2. V750 增强演算引擎 (🚀主升浪 + 🔥底部起爆 版)
 # ==========================================
@@ -38,7 +69,7 @@ def calculate_advanced_v750(df, hsi_series):
         rs_velocity = (rs_line[-1] - rs_line[-10]) / rs_line[-10] * 100
         rs_nh = rs_line[-1] >= np.max(rs_line[-252:])
 
-        # 🔥优化点2：VCP 紧致度计算排除今天（防止今天大涨7%破坏紧密度的历史判定）
+        # 🔥优化点2：VCP 紧致度计算排除今天（防止今天大涨破坏历史判定）
         tightness = (np.std(close[-11:-1]) / np.mean(close[-11:-1])) * 100
         
         # 4. 机构能量 
@@ -50,7 +81,7 @@ def calculate_advanced_v750(df, hsi_series):
         action = "观察"
         prio = 50
         
-        # 🔥优化点3：新增底部机构建仓判定（捕捉图片中的底部放量大阳线）
+        # 🔥优化点3：新增底部机构建仓判定（捕捉底部放量大阳线）
         if is_bottom_reversal and vol_surge > 1.5 and cp > close[-2] * 1.03:
             action, prio = "🐉 底部巨龙(Reversal)", 93
         elif rs_nh and cp < np.max(close[-20:]) * 1.02 and tightness < 1.8: # 放宽紧致度
@@ -86,7 +117,7 @@ def calculate_advanced_v750(df, hsi_series):
 
         dist_poc = ((cp - poc_price) / poc_price) * 100
 
-        # 🔥优化点4：放宽港股延伸判定，尤其是底部刚起爆的股票允许较大偏离度
+        # 🔥优化点4：放宽港股延伸判定，尤其是底部起爆允许较大偏离度
         if action != "观察" and dist_poc > 15 and not is_bottom_reversal:
             action = "☠️ 极度延伸(禁买)"
             prio = 10  
@@ -96,7 +127,7 @@ def calculate_advanced_v750(df, hsi_series):
         pocket_pivot = False
         # 🔥优化点5：包含今天，寻找近3天（含今天）的大量抢筹
         for i in range(-3, 1):
-            if vol[i] > avg_vol20_series[i] * 1.5 and close[i] > open_p[i]: # 提高量能要求到1.5倍过滤噪音
+            if vol[i] > avg_vol20_series[i] * 1.5 and close[i] > open_p[i]:
                 pocket_pivot = True
                 break
 
@@ -107,7 +138,7 @@ def calculate_advanced_v750(df, hsi_series):
         if "主升浪" in action and "禁买" not in action:
             struct_stop = ma20 * 0.98 
         elif "底部" in action:
-            struct_stop = low[-1] * 0.98 # 底部起爆以当天/前一天低点做止损
+            struct_stop = low[-1] * 0.98 # 底部起爆以当天低点做止损
         else:
             struct_stop = ma50 * 0.99
             
@@ -149,9 +180,9 @@ def main():
     hsi_p, hsi_ma50 = hsi_series.iloc[-1], hsi_series.rolling(50).mean().iloc[-1]
     
     url = "https://scanner.tradingview.com/hongkong/scan"
-    # 🔥优化点7：降低市值过滤门槛，抓取前600只（将一些100亿左右的中盘股如TCL电子纳入）
+    # 🔥优化点7：降低市值过滤门槛，抓取前600只（80亿港币起）
     payload = {"columns":["name", "description", "close", "market_cap_basic", "sector"],
-               "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 8e9}], # 降到80亿港币
+               "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 8e9}],
                "range":[0, 600], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     try:
         resp = requests.post(url, json=payload, timeout=15).json().get('data',[])
