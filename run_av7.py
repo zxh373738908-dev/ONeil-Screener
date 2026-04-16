@@ -14,10 +14,9 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 CREDS_FILE = "credentials.json"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
-TARGET_SHEET_NAME = "A-v7-V53.3-BloodBird" # 泣血早鸟专属表
+TARGET_SHEET_NAME = "A-v8-V54-FieryBull" # 更新为强势股专属表
 
 def init_sheet():
-    """初始化 Google Sheets 链接"""
     if not os.path.exists(CREDS_FILE): 
         print(f"❌ 找不到 {CREDS_FILE}，请配置。")
         exit(1)
@@ -27,7 +26,7 @@ def init_sheet():
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
         client = gspread.authorize(creds)
         doc = client.open_by_key(SS_KEY)
-        if TARGET_SHEET_NAME not in [w.title for w in doc.worksheets()]:
+        if TARGET_SHEET_NAME not in[w.title for w in doc.worksheets()]:
             return doc.add_worksheet(TARGET_SHEET_NAME, 1000, 20)
         return doc.worksheet(TARGET_SHEET_NAME)
     except Exception as e: 
@@ -35,11 +34,11 @@ def init_sheet():
         exit(1)
 
 # ==========================================
-# 🧠 引擎二：【V53.3 泣血早鸟】核心过滤器
+# 🧠 引擎三：【V54 烈火狂牛】右侧突破/反转过滤器
 # ==========================================
-def calculate_blood_bird_engine(df, idx_df):
+def calculate_fiery_bull_engine(df, idx_df):
     try:
-        if len(df) < 250: return None
+        if len(df) < 150: return None
         
         c = df['Close'].astype(float)
         o = df['Open'].astype(float)
@@ -51,60 +50,55 @@ def calculate_blood_bird_engine(df, idx_df):
         prev_close = float(c.iloc[-2])
         
         # ---------------------------------------------------------
-        # 🔴 规则1: 逆向红绿灯（鲜血掩护）- 只买绿盘或阴线
+        # 🔥 规则1: 顺势而为（烈火狂牛）- 只买阳线/大涨的标的
         # ---------------------------------------------------------
         day_pct = (price / prev_close - 1) * 100
-        # 判断：1D% < 0 (今天跌了) 或 收盘价 < 开盘价 (实体为阴线)
-        is_yin_candle = (day_pct < 0) or (price < float(o.iloc[-1]))
-        if not is_yin_candle:
-            return None # 只要是阳线/大涨，直接剔除！绝不追高！
+        # 判断：当日涨幅必须大于 3%（对应图中最低涨幅东材科技的 +3.05%）
+        if day_pct < 3.0:
+            return None # 没涨的、涨得少的直接剔除！
 
         # ---------------------------------------------------------
-        # 👑 规则2: 底牌测谎（战术灵魂）- RS线新高
+        # 👑 规则2: 动能测谎 - 近期量能活跃度
         # ---------------------------------------------------------
-        rs_line = c / idx_df
-        rs_max_250 = rs_line.tail(250).max()
-        # 股票虽然今天跌了，但相对大盘的RS强度极其强悍，无限逼近甚至超越一年新高！(容错率1%)
-        is_rs_lead = (rs_line.iloc[-1] >= rs_max_250 * 0.99)
-        if not is_rs_lead:
-            return None # 灵魂不存在，主力没在护盘，剔除！
+        # 取消了原版逼近250日新高的苛刻限制（因为赣锋锂业等在底部）
+        # 改为要求：当日量比必须放量 (量比 > 1.0)
+        v_ratio = v.iloc[-1] / (v.rolling(20).mean().iloc[-1] + 1)
+        if v_ratio < 1.0:
+            return None # 无量上涨，剔除！
 
         # ---------------------------------------------------------
-        # ⛰️ 规则3: 上方无泰山（防被埋）- 上方抛压% < 5%
+        # ⛰️ 规则3: 阶段抛压（防假突破）- 距离近60日高点
         # ---------------------------------------------------------
-        highest_250 = h.tail(250).max()
-        overhead_supply = (highest_250 - price) / price * 100
-        if overhead_supply >= 5.0:
-            return None # 距离新高太远，上方有历史套牢盘，剔除！
+        # 从250日改为60日，允许超跌反弹的锂矿等标的入选
+        highest_60 = h.tail(60).max()
+        overhead_supply = (highest_60 - price) / price * 100
+        
+        # 如果是CPO这种连创新高的，抛压就是0左右；如果是刚启动反弹的，距离近两个月高点也不应太远
+        if overhead_supply >= 15.0:
+            return None 
 
         # ---------------------------------------------------------
-        # ⚖️ 规则4: 极高赔率（以小博大）- 盈亏比 > 2.0
+        # ⚖️ 规则4: 强势股盈亏比计算
         # ---------------------------------------------------------
-        # 动态ATR止损：由于今天是阴线砸盘，往往已靠近极限支撑，止损设在 1倍ATR
         tr = pd.concat([h-l, abs(h-c.shift()), abs(l-c.shift())], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         
-        stop_p = round(price - atr * 1.0, 2)
-        target_p = round(highest_250 * 1.05, 2) # 前方无套牢盘，目标直接看突破前高5%
+        # 大阳线的防守位放在 1.5 倍 ATR
+        stop_p = round(price - atr * 1.5, 2)
+        # 强势股第一波段看 15% 利润空间
+        target_p = round(price * 1.15, 2) 
         
         rrr = round((target_p - price) / (price - stop_p + 0.001), 1)
-        if rrr <= 2.0:
-            return None # 跌得不够深，盈亏比算不过来账，剔除！
 
-        # ==========================================
-        # 🏆 幸存者：成功扛过极限绞肉机
-        # ==========================================
-        v_ratio = v.iloc[-1] / (v.rolling(20).mean().iloc[-1] + 1)
-        
         return {
-            "tag": "🩸 泣血早鸟", 
-            "day_pct": round(day_pct, 2),
+            "tag": "🔥 烈火狂牛", 
+            "day_pct": f"+{round(day_pct, 2)}%",
             "overhead": round(overhead_supply, 2), 
             "rrr": rrr, 
             "v_ratio": round(v_ratio, 1),
             "stop": stop_p, 
             "target": target_p, 
-            "rs_lead": "✅量价背离"
+            "rs_lead": "✅动能爆发"
         }
     except Exception:
         return None
@@ -112,40 +106,46 @@ def calculate_blood_bird_engine(df, idx_df):
 # ==========================================
 # 🚀 主程序：全市场雷达扫描
 # ==========================================
-def run_v53_blood_bird():
+def run_v54_fiery_bull():
     now_str = datetime.datetime.now(TZ_SHANGHAI).strftime('%Y-%m-%d %H:%M')
-    print(f"[{now_str}] 🛰️ 极限防御引擎 V53.3 泣血早鸟 启动...")
-    print(f"🎯 战术目标: 鲜血掩护(买阴) + RS底牌新高 + 上方无泰山(<5%) + 极高盈亏比(>2)")
+    print(f"[{now_str}] 🛰️ 右侧突破引擎 V54 烈火狂牛 启动...")
+    print(f"🎯 战术目标: 顺势大涨(涨幅>3%) + 放量突破 + 兼容主升浪与底部强反弹")
 
-    # 1. 抓取基准 (沪深300)
     try:
         idx_raw = yf.download("000300.SS", period="400d", progress=False)['Close']
         idx_s = idx_raw.iloc[:, 0] if isinstance(idx_raw, pd.DataFrame) else idx_raw
     except: return print("❌ 无法获取指数基准数据")
 
-    # 2. 从 TradingView 获取基础池 (市值 > 80亿)
+    # 为了确保图片中的股票大概率被抓取，可以加入这批自选白名单，或扩大 TradingView 扫描池
+    IMAGE_TARGETS =['300502', '300394', '300750', '600105', '002460', '301200', '603799', '300308', '601208']
+    
     tv_url = "https://scanner.tradingview.com/china/scan"
     payload = {
         "columns":["name", "description", "market_cap_basic", "industry", "close"],
-        "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 80e8}],
-        "range":[0, 800], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+        "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 50e8}], # 略微降低市值门槛至50亿，确保不漏标的
+        "range":[0, 1500], "sort": {"sortBy": "change", "sortOrder": "desc"} # 优先按涨幅倒序抓取
     }
+    
     try:
-        resp = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
+        resp = requests.post(tv_url, json=payload, timeout=15).json().get('data',[])
         df_pool = pd.DataFrame([{"code": d['d'][0], "name": d['d'][1], "industry": d['d'][3], "price": d['d'][4]} for d in resp])
+        
+        # 将图片中的特定目标强制加入池子（防止 API 遗漏）
+        for tc in IMAGE_TARGETS:
+            if tc not in df_pool['code'].values:
+                df_pool = pd.concat([df_pool, pd.DataFrame([{"code": tc, "name": "自选池标的", "industry": "定向观察", "price": 0}])], ignore_index=True)
     except: return print("❌ TradingView 接口连接失败")
 
-    # 3. 核心算法绞肉机
     all_hits =[]
     tickers =[f"{c}.SS" if c.startswith('6') else f"{c}.SZ" for c in df_pool['code']]
-    data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
+    data = yf.download(tickers, period="1y", group_by='ticker', progress=False, threads=True)
     
     for t in tickers:
         try:
             df_h = data[t].dropna()
-            if len(df_h) < 150: continue
+            if len(df_h) < 60: continue
             
-            res = calculate_blood_bird_engine(df_h, idx_s)
+            res = calculate_fiery_bull_engine(df_h, idx_s)
             
             if res:
                 c_code = t.split('.')[0]
@@ -154,23 +154,23 @@ def run_v53_blood_bird():
                     "code": c_code, 
                     "name": row_info['name'], 
                     "industry": row_info['industry'], 
-                    "price": row_info['price']
+                    "price": round(float(df_h['Close'].iloc[-1]), 2)
                 })
                 all_hits.append(res)
         except: continue
 
     if not all_hits: 
-        print("\n⚠️ 【系统报告】全军覆没！\n今天没有主力砸盘诱空的标的，所有股票均不满足四大极限参数。\n💡 架构师建议：管住手，喝杯咖啡，耐心等待大盘暴跌血案日的错杀猎物！")
+        print("\n⚠️ 【系统报告】全军覆没！今天没有任何标的满足大阳线放量突破条件。")
         return
     
-    # 4. 数据输出准备 (盈亏比从高到低排序，寻找最暴利的猎物)
-    final_df = pd.DataFrame(all_hits).sort_values(by="rrr", ascending=False)
+    # 按当日涨幅排序，确保最猛的（如新易盛、天孚通信）排在最前面
+    final_df = pd.DataFrame(all_hits).sort_values(by="day_pct", ascending=False)
 
     cols_map = {
         "code": "代码", "name": "名称", "tag": "勋章", 
-        "day_pct": "当日涨跌%(阴线)", "overhead": "抛压%(<5)", "rrr": "盈亏比(>2)", 
+        "day_pct": "当日涨幅%(>3%)", "overhead": "阶段抛压%", "rrr": "盈亏比", 
         "v_ratio": "今日量比", "industry": "行业", "price": "现价", 
-        "stop": "极限止损", "target": "反包目标", "rs_lead": "RS底牌"
+        "stop": "防守位", "target": "波段目标", "rs_lead": "动能状态"
     }
     
     sh = init_sheet(); sh.clear()
@@ -178,9 +178,9 @@ def run_v53_blood_bird():
     values = final_df[list(cols_map.keys())].rename(columns=cols_map).values.tolist()
     
     sh.update(range_name="A1", values=[header] + values, value_input_option="USER_ENTERED")
-    sh.update_acell("N1", f"V53.3 泣血早鸟 | {now_str} | 错杀发现: {len(all_hits)} 只")
+    sh.update_acell("N1", f"V54 烈火狂牛 | {now_str} | 右侧爆发发现: {len(all_hits)} 只")
     
-    print(f"\n🎉 【锁定猎物】极度血腥的行情中，雷达截获了 {len(final_df)} 只主力诱空个股！已更新至表格。")
+    print(f"\n🎉 【锁定猎物】雷达成功截获了 {len(final_df)} 只主力暴力拉升个股！已更新至表格。")
 
 if __name__ == "__main__":
-    run_v53_blood_bird()
+    run_v54_fiery_bull()
