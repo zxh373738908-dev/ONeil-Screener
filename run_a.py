@@ -7,9 +7,9 @@ from datetime import timezone, timedelta
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 配置中心
+# 1. 配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzDzZmIHMbn8JZH0Yw-zww7Jh7C9HvqVJhefdeKIRKAmwd1t6MR3XHSg9YWVPB3gXiM/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzDzZmIHMbn8JZH0Yw-zww7Jh7C9HvqVJhefdeKIRKAmwd1t6MR3XHSg9YWVPB3gXiM/exec" # 请填入你上一步生成的URL
 
 CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
@@ -27,79 +27,112 @@ def safe_convert(obj):
         return float(obj) if not np.isnan(obj) else 0.0
     return str(obj)
 
-def analyze_stock(df_s, bench_series, t_code):
+# ==========================================
+# 2. 深度逻辑分析引擎
+# ==========================================
+def analyze_stock_pro(df_s, bench_series, t_code):
     try:
-        c = df_s['Close'].dropna()
+        # 数据清洗
+        c = df_s['Close'].ffill().dropna()
         if isinstance(c, pd.DataFrame): c = c.iloc[:, 0]
-        h = df_s['High'].dropna()
+        h = df_s['High'].ffill().dropna()
         if isinstance(h, pd.DataFrame): h = h.iloc[:, 0]
-        l = df_s['Low'].dropna()
+        l = df_s['Low'].ffill().dropna()
         if isinstance(l, pd.DataFrame): l = l.iloc[:, 0]
-        v = df_s['Volume'].dropna()
+        v = df_s['Volume'].ffill().dropna()
         if isinstance(v, pd.DataFrame): v = v.iloc[:, 0]
 
+        if len(c) < 250: return None
         curr, prev = float(c.iloc[-1]), float(c.iloc[-2])
         
-        # RS
-        s_ret = (curr / float(c.iloc[-min(len(c), 120)])) - 1
-        b_ret = (float(bench_series.iloc[-1]) / float(bench_series.iloc[-min(len(bench_series), 120)])) - 1
-        rs = float(round((s_ret - b_ret + 1) * 85, 2))
+        # 1. 增强型 RS 评分 (250日、60日、20日加权)
+        def get_ret(ser, days): return (ser.iloc[-1] / ser.iloc[-min(len(ser), days)]) - 1
+        s_ret = get_ret(c, 250)*0.3 + get_ret(c, 60)*0.4 + get_ret(c, 20)*0.3
+        b_ret = get_ret(bench_series, 250)*0.3 + get_ret(bench_series, 60)*0.4 + get_ret(bench_series, 20)*0.3
+        rs_score = round((s_ret - b_ret + 1) * 85, 2)
 
-        # MA50
+        # 2. 趋势斜率 (判定均线是否向上)
         ma50 = c.rolling(50).mean()
         m50_c = float(ma50.iloc[-1])
-        slope = (m50_c - float(ma50.iloc[-6])) / float(ma50.iloc[-6]) * 100 if len(ma50)>6 else 0
+        m50_p = float(ma50.iloc[-6]) # 5天前
+        slope = (m50_c - m50_p) / m50_p * 100
+        is_trend_up = slope > 0.05 
 
-        # 量价
-        v_r = float(v.iloc[-1] / v.iloc[-21:-1].mean())
+        # 3. 核心指标
+        vol_avg = v.iloc[-21:-1].mean()
+        v_r = float(v.iloc[-1] / vol_avg) if vol_avg > 0 else 1.0
         dist = float(((curr / h.tail(22).max()) - 1) * 100)
         amp = float((float(h.iloc[-1]) - float(l.iloc[-1])) / prev * 100)
 
+        # 4. 极致判定逻辑
         level, act, win, guide = "⚪ 观察", "潜伏观察", "40%", "等待回踩"
-        near_ma50 = (m50_c * 0.97) <= curr <= (m50_c * 1.03)
+        near_ma50 = (m50_c * 0.98) <= curr <= (m50_c * 1.02) # 缩窄至2%误差
         
-        if rs > 85:
-            if near_ma50 and v_r < 0.7:
-                level, act, win, guide = "🚀 进攻", "🐍 毒蛇出洞", "85%", "地量踩线，买入胜率高"
-            elif dist > -5:
-                level, act, win, guide = "🔥 强势", "禁追 (高位)", "60%", "高位强势，勿盲目追"
+        if rs_score >= 80:
+            if near_ma50:
+                if is_trend_up and v_r < 0.65:
+                    level, act, win, guide = "🐍 满血", "毒蛇出洞", "90%", "多头缩量踩线,极品"
+                elif not is_trend_up and v_r < 0.65:
+                    level, act, win, guide = "⚠️ 警惕", "弱势踩线", "55%", "均线走平,谨防破位"
+                else:
+                    level, act, win, guide = "⏳ 观察", "踩线待缩", "65%", "等待量比降至0.6以下"
+            elif dist > -6:
+                level, act, win, guide = "🔥 禁追", "强势整理", "60%", "位置太高,不接力"
             else:
-                level, act, win, guide = "🟡 准备", "等待缩量", "55%", "趋势强劲，等回踩缩量"
+                level, act, win, guide = "🟡 准备", "深蹲埋伏", "75%", "RS强+深度回调,待踩线"
         elif curr < m50_c * 0.96:
-            level, act, win, guide = "💀 破位", "放弃 (跌穿)", "10%", "跌破50日线，风险极大"
+            level, act, win, guide = "💀 破位", "速离放弃", "10%", "趋势已坏,坚决止损"
 
-        return [t_code, act, level, f"{dist:.1f}%", f"{v_r:.2f}x", f"{amp:.1f}%", 
-                "📈 向上" if slope > 0 else "📉 向下", win, guide, rs]
+        # 5. 返回格式化数据 (RS分转为带小数的字符串，防止日期错误)
+        return [
+            t_code, 
+            act, 
+            level, 
+            f"{dist:.2f}%", 
+            f"{v_r:.2f}x", 
+            f"{amp:.2f}%", 
+            "📈 向上" if is_trend_up else "📉 向下/平", 
+            win, 
+            guide, 
+            f"{rs_score:.2f}" # 强制保留两位小数，Google不会识别成日期
+        ]
     except: return None
 
+# ==========================================
+# 3. 主程序
+# ==========================================
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
     trace_id = f"VP-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"🚀 V60.10 扫描开始 | ID: {trace_id}")
+    print(f"🚀 V60.11 极致进化版 | ID: {trace_id}")
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        idx = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
+        idx = yf.download("000300.SS", period="2y", progress=False, auto_adjust=True)
         bench = idx['Close']
         if isinstance(bench, pd.DataFrame): bench = bench.iloc[:, 0]
-        all_data = yf.download(tickers, period="1y", group_by='ticker', progress=False, auto_adjust=True)
+        all_data = yf.download(tickers, period="2y", group_by='ticker', progress=False, auto_adjust=True)
     except Exception as e:
-        print(f"❌ 下载失败: {e}"); return
+        print(f"❌ 数据获取失败: {e}"); return
 
     results = []
     for t_full in tickers:
+        t_raw = t_full.split('.')[0]
         try:
-            res = analyze_stock(all_data[t_full], bench, t_full.split('.')[0])
-            if res: results.append(res); print(f"✅ {t_full.split('.')[0]}")
+            res = analyze_stock_pro(all_data[t_full], bench, t_raw)
+            if res: 
+                results.append(res)
+                print(f"✅ {t_raw} 分析完成")
         except: continue
 
-    results.sort(key=lambda x: (x[2], x[9]), reverse=True)
+    # 排序：按照胜率和RS分排序
+    results.sort(key=lambda x: (x[7], x[9]), reverse=True)
     
     header = [
-        ["🚀 V60.10 毒蛇量化", "ID:", trace_id, "策略:", "MA50地量回踩", "更新:", dt_str, "", "", ""], 
-        ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅", "MA50趋势", "预测胜率", "实战指引", "RS分"]
+        ["🚀 V60.11 毒蛇极致版", "ID:", trace_id, "策略:", "向上生命线+地量窄幅", "更新:", dt_str, "", "", ""], 
+        ["代码", "指令", "等级", "距高点", "量比", "振幅", "MA50斜率", "胜率预测", "实战指引", "RS强弱评分"]
     ]
     
     if results:
