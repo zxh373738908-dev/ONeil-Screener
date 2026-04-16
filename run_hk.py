@@ -18,21 +18,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 pd.options.mode.chained_assignment = None  # 忽略部分 Pandas 警告
 
 # ==========================================
-# 1. Google Sheets 初始化 (❗请填入你原有的账号验证代码)
+# 1. Google Sheets 初始化 
 # ==========================================
-def init_sheet(https://script.google.com/macros/s/AKfycby1pIM7iO43lcLQpOmi5LCJIn3VN9a0Ilf9amoy1EtQV_GBXJkk_A4PpsrJxKzH7i51/exec):
+from oauth2client.service_account import ServiceAccountCredentials
+
+def init_sheet():
     """
     初始化并返回 Google Sheets 的工作表对象。
-    👉 请将这里的代码替换为你自己原有的 gspread 鉴权逻辑！
     """
-    # 示例代码：
-    # from oauth2client.service_account import ServiceAccountCredentials
-    # scope =['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    # creds = ServiceAccountCredentials.from_json_keyfile_name('你的密钥文件.json', scope)
-    # client = gspread.authorize(creds)
-    # return client.open("HK-Share Screener").sheet1
+    # 1. 设置 API 权限范围
+    scope =['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     
-    raise NotImplementedError("❌ 请先在此处填入你的 init_sheet() 谷歌表格鉴权代码！")
+    # 2. 读取你的 JSON 密钥文件
+    # 注意：你需要确保你的 Github Actions 环境里有这个 credentials.json 文件
+    # 或者你原来叫什么名字（比如 token.json / google_key.json），请在这里替换！
+    creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+    
+    # 3. 授权并打开表格
+    client = gspread.authorize(creds)
+    
+    # 返回你对应的表格名（请确保你的 JSON 邮箱已经被添加到了该表格的编辑者中）
+    return client.open("HK-Share Screener").sheet1
 
 # ==========================================
 # 2. 核心量化算法 (高级趋势与动能判定)
