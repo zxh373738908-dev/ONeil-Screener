@@ -11,7 +11,8 @@ warnings.filterwarnings('ignore')
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxcwtfGFZqWyulM2x63ytoYnuYzR-siWVCahjsIqdRbsuYjBac8YCuy7GTRlwd-YGmc/exec"
 
-CORE_TICKERS_RAW =[
+# 核心股票池
+CORE_TICKERS_RAW = [
     "600519", "300750", "601138", "300502", "603501", "688041", "002371", "300308",
     "002475", "002594", "601899", "600030", "600900", "600150", "300274", "000333",
     "688981", "300763", "002415", "603259", "601318", "000651", "600585", "000725",
@@ -38,9 +39,9 @@ def get_safe_col(df, key):
     return pd.Series()
 
 # ==========================================
-# 2. V50.1 缩量毒蛇引擎 (绝望深坑+生命线测谎)
+# 2. V60.2 优化版逻辑引擎
 # ==========================================
-def analyze_stock_viper(df_in, bench_ser, t_name):
+def analyze_stock_viper_v2(df_in, bench_ser, t_name):
     try:
         close = get_safe_col(df_in, 'Close').astype(float)
         high = get_safe_col(df_in, 'High').astype(float)
@@ -48,62 +49,89 @@ def analyze_stock_viper(df_in, bench_ser, t_name):
         vol = get_safe_col(df_in, 'Volume').astype(float)
         
         if close.empty or len(close) < 250: return None
+        
         curr_price = float(close.iloc[-1])
         prev_close = float(close.iloc[-2])
         
-        # --- A. 大将底色 (只做真龙) ---
+        # --- 1. 均线状态与斜率 (趋势强度) ---
+        ma50_series = close.rolling(50).mean()
+        ma50_curr = ma50_series.iloc[-1]
+        # 计算过去5天的斜率 (百分比变化)
+        ma50_slope = (ma50_curr - ma50_series.iloc[-6]) / ma50_series.iloc[-6] * 100
+        
+        # --- 2. RS 强者恒强评级 ---
         def get_p(s, d): return float((s.iloc[-1] / s.iloc[-d]) - 1)
         s_p = get_p(close, 250)*0.4 + get_p(close, 60)*0.3 + get_p(close, 20)*0.3
         b_p = get_p(bench_ser, 250)*0.4 + get_p(bench_ser, 60)*0.3 + get_p(bench_ser, 20)*0.3
         rs_score = round((s_p - b_p + 1) * 85, 2)
         
-        # --- B. 绝望的深度 (黄金坑位 -15% 到 -8%) ---
-        recent_high = float(high.tail(22).max()) # 近一个月最高点
-        dist_high_pct = ((curr_price / recent_high) - 1) * 100 
+        # --- 3. 波动率压缩 (振幅) ---
+        amplitude = (high.iloc[-1] - low.iloc[-1]) / prev_close * 100
         
-        # --- C. 绝对窒息 (引信核武 < 0.6) ---
-        # 使用前20个交易日均量作为基准（不包含今天）
+        # --- 4. 核心指标 ---
+        recent_high = float(high.tail(22).max())
+        dist_high_pct = ((curr_price / recent_high) - 1) * 100 
         avg_vol_20 = vol.iloc[-21:-1].mean()
         vol_ratio = float(vol.iloc[-1] / avg_vol_20) if avg_vol_20 > 0 else 1.0
         
-        # --- D. 均线蹦床 (50日生命线精准托底) ---
-        ma50 = close.rolling(50).mean().iloc[-1]
-        
-        # 神级代码：价格必须在 SMA50 的 0.98 到 1.02 之间 (误差不超过上下2%)
-        on_ma50_trampoline = (ma50 * 0.98) <= curr_price <= (ma50 * 1.02)
-        dist_ma50_pct = ((curr_price / ma50) - 1) * 100
-        ma_status = "✅ 完美踩线" if on_ma50_trampoline else f"❌ 偏离 {dist_ma50_pct:+.1f}%"
-
         # ==========================================
-        # 🎯 毒蛇极致过滤判定 🎯
+        # 🎯 进攻与防守判定逻辑
         # ==========================================
-        action = "潜伏观察"
+        # 核心参数
         is_leader = rs_score >= 80
-        is_golden_pit = -15 <= dist_high_pct <= -8
-        is_sleep_vol = vol_ratio < 0.6
+        is_at_ma50 = (ma50_curr * 0.98) <= curr_price <= (ma50_curr * 1.02)
+        is_ma50_up = ma50_slope > 0.05 # 均线斜率微幅向上
+        is_quiet = vol_ratio < 0.65 and amplitude < 3.0 # 地量且极窄振幅
+        
+        action = "潜伏观察"
+        signal_level = "⚪ 待机"
+        defense_guide = "保持关注"
+        win_rate = "50%"
 
-        if is_leader and is_golden_pit:
-            if is_sleep_vol and on_ma50_trampoline:
-                action = "🐍 毒蛇出洞 (满血击杀)"
-            elif is_sleep_vol:
-                action = "📉 缩量深蹲 (偏离50日线)"
-            elif on_ma50_trampoline:
-                action = "⚠️ 踩线放量 (等待缩量)"
+        # 进攻模式
+        if is_leader and is_at_ma50:
+            if is_ma50_up and is_quiet:
+                action = "🔥 进攻 (毒蛇狙击点)"
+                signal_level = "🚀 强烈进攻"
+                defense_guide = "以今日最低价止损"
+                win_rate = "85%"
+            elif is_ma50_up:
+                action = "🎯 准备 (等待极度缩量)"
+                signal_level = "🟡 准备阶段"
+                defense_guide = "不破50日线不入"
+                win_rate = "65%"
             else:
-                action = "💦 洗盘未尽 (量大且偏离)"
-        elif is_leader and dist_high_pct > -8:
-             action = "🔥 跌得不够 (禁追)"
-        elif dist_high_pct < -15:
-             action = "💀 破位深跌 (跌穿防线)"
-        elif not is_leader:
-             action = "🗑️ 弱势跟风 (剔除)"
-            
+                action = "📉 踩线 (均线走平趋势弱)"
+                signal_level = "🔵 低位震荡"
+                defense_guide = "轻仓试探"
+                win_rate = "55%"
+        
+        # 防守模式
+        if curr_price < ma50_curr * 0.97:
+            action = "💀 防守 (跌穿生命线)"
+            signal_level = "🚫 撤退"
+            defense_guide = "立即止损离场"
+            win_rate = "10%"
+        elif vol_ratio > 1.8 and curr_price < prev_close:
+            action = "⚠️ 预警 (放量下跌)"
+            signal_level = "🔴 风险预警"
+            defense_guide = "减仓观望"
+            win_rate = "30%"
+        elif dist_high_pct > -7:
+            action = "🔥 禁追 (高位整理)"
+            signal_level = "⏳ 等待回撤"
+            defense_guide = "切勿追高"
+
         return {
             "rs": rs_score, 
             "act": action, 
-            "dist": dist_high_pct,
-            "vol_r": vol_ratio, 
-            "ma_stat": ma_status
+            "dist": f"{dist_high_pct:.1f}%",
+            "vol_r": f"{vol_ratio:.2f}x", 
+            "ma_slope": "📈 向上" if is_ma50_up else "📉 走平/向下",
+            "amp": f"{amplitude:.1f}%",
+            "level": signal_level,
+            "defense": defense_guide,
+            "win": win_rate
         }
     except Exception as e:
         return None
@@ -114,54 +142,54 @@ def analyze_stock_viper(df_in, bench_ser, t_name):
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    trace_id = f"VIPER-X-{uuid.uuid4().hex[:4].upper()}"
+    trace_id = f"VIPER-PRO-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"🐍 V50.1 缩量毒蛇(极致版) | ID: {trace_id} | {dt_str}")
-    tickers =[format_ticker(t) for t in CORE_TICKERS_RAW]
+    print(f"🚀 V60.2 终极毒蛇狙击 | ID: {trace_id} | {dt_str}")
+    tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
-        print(f"⏳ 正在下载数据，锁定主力底牌...")
         data = yf.download(tickers, period="2y", group_by='ticker', progress=False, auto_adjust=True)
         idx_df = yf.download("000300.SS", period="2y", progress=False, auto_adjust=True)
         bench_close = get_safe_col(idx_df, 'Close')
-        print(f"✅ 数据下载完成。")
     except Exception as e:
         print(f"❌ 数据获取错误: {e}"); return
 
-    results =[]
+    results = []
     for t_full in tickers:
         try:
             t_raw = t_full.split('.')[0]
             df_s = data[t_full] if len(tickers) > 1 else data
-            res = analyze_stock_viper(df_s, bench_close, t_raw)
+            res = analyze_stock_viper_v2(df_s, bench_close, t_raw)
             if res:
-                # 剔除完全不符合底色的辣鸡股，保持表单干净
-                if "剔除" in res['act'] or "破位深跌" in res['act']:
-                    continue
-                    
+                # 过滤掉完全没戏的弱势股
+                if res['rs'] < 60: continue
+                
                 results.append([
                     t_raw, 
                     res['act'], 
-                    f"{res['dist']:.2f}%",   # 回撤深度 (-15% ~ -8%)
-                    f"{res['vol_r']:.2f}x",  # 今日量比 (<0.6)
-                    res['ma_stat'],          # 50日均线踩踏情况 (0.98~1.02)
-                    res['rs'],               # 强者恒强评级 (>=80)
-                    "🎯 满血击杀" if "毒蛇出洞" in res['act'] else "⏳ 尚未达标", 
-                    dt_str
+                    res['level'],      # 进攻/防守等级
+                    res['dist'],       # 回撤深度
+                    res['vol_r'],      # 量比
+                    res['amp'],        # 振幅 (波动挤压)
+                    res['ma_slope'],   # 均线斜率
+                    res['win'],        # 预测胜率
+                    res['defense'],    # 实战指引
+                    res['rs']          # RS分数
                 ])
-        except Exception as e:
-            continue
+        except: continue
 
-    # 优先展示出信号的标的，其次按RS强弱排序
-    results.sort(key=lambda x: (1 if "🎯" in x[6] else 0, float(x[5])), reverse=True)
+    # 排序：按进攻等级和胜率排序
+    results.sort(key=lambda x: (x[2], x[9]), reverse=True)
 
-    header = [["🐍 V50.1 缩量毒蛇 (大师狙击版)", "ID:", trace_id, "策略:", "专抓50日生命线极度缩量黄金坑", "更新:", dt_str, ""],["代码", "交易指令", "距近期高点(-8%~-15%)", "今日量比(<0.6)", "50日均线蹦床(±2%)", "RS评级(>=80)", "终极判定", "北京时间"]
+    header = [
+        ["🚀 V60.2 终极毒蛇 (进攻版)", "ID:", trace_id, "策略:", "50日线+波动挤压+斜率过滤", "更新:", dt_str, ""],
+        ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅(挤压)", "MA50趋势", "胜率预测", "实战指引", "RS分"]
     ]
     
     try:
         payload = json.loads(json.dumps(header + results, default=safe_convert))
         resp = requests.post(WEBAPP_URL, json=payload, timeout=30)
-        print(f"🎉 毒蛇信号推送完成，正在同步至表单... HTTP {resp.status_code}")
+        print(f"🎉 信号同步完成! 状态: {resp.status_code}")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
 
