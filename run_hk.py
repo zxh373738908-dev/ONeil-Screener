@@ -1,47 +1,16 @@
-import pandas as pd
 import numpy as np
-import gspread
-from google.oauth2.service_account import Credentials
-import datetime
-import warnings
-import yfinance as yf
-import requests
-import re
-from gspread_formatting import *
+import pandas as pd
 
-warnings.filterwarnings('ignore')
-
-# ==========================================
-# 1. 配置中心
-# ==========================================
-SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
-# 建议在 Google Sheet 中手动新建两个工作表，名字分别为 "V750_防御" 和 "V850_进攻"
-TAB_NAME_V750 = "V750_防御"
-TAB_NAME_V850 = "V850_进攻"
-CREDS_FILE = "credentials.json"
-ACCOUNT_SIZE = 500000 
-MAX_RISK_PER_TRADE = 0.008 
-
-def get_worksheet(doc, title):
-    try:
-        return doc.worksheet(title)
-    except:
-        return doc.add_worksheet(title=title, rows="100", cols="20")
-
-def init_sheets():
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-    client = gspread.authorize(creds)
-    doc = client.open_by_key(SS_KEY)
-    return get_worksheet(doc, TAB_NAME_V750), get_worksheet(doc, TAB_NAME_V850)
-
-# ==========================================
-# 🧠 2. 核心演算引擎 (V750 & V850)
-# ==========================================
-def process_engine(df, hsi_series, mode="V750"):
-    try:
-        df = df.dropna(subset=['Close'])
-        if len(df) < 252: return None
+def analyze_stock(df, benchmark_series, symbol="Unknown", ACCOUNT_SIZE=100000, MAX_RISK_PER_TRADE=0.01):
+    """
+    量化选股核心引擎 - (VCP + 欧奈尔 + 口袋枢轴 + 筹码POC)
+    """
+    # 【优化1：数据有效性拦截】数据太少（如刚上市几天）直接跳过，防止数组越界
+    if df is None or len(df) < 60:
+        return None
         
+    try:
+        # 获取底层 numpy 数组提速
         close = df['Close'].values.astype(float)
         open_p = df['Open'].values.astype(float)
         high = df['High'].values.astype(float)
@@ -49,199 +18,160 @@ def process_engine(df, hsi_series, mode="V750"):
         vol = df['Volume'].values.astype(float)
         cp = close[-1]
         
-        # 基础指标
-        ma10, ma20, ma50, ma200 = np.mean(close[-10:]), np.mean(close[-20:]), np.mean(close[-50:]), np.mean(close[-200:])
-        avg_vol20 = np.mean(vol[-20:])
-        vol_surge = vol[-1] / avg_vol20
-        turnover = cp * vol[-1] # 当日成交额 (近似值)
-
-        # RS 与 紧致度
-        hsi_val = hsi_series.reindex(df.index).ffill().values
-        rs_line = close / hsi_val
-        rs_velocity = (rs_line[-1] - rs_line[-10]) / rs_line[-10] * 100
-        tightness = (np.std(close[-10:]) / np.mean(close[-10:])) * 100
-
-        # 战法判定逻辑
-        is_stage_2 = (cp > ma50 > ma200)
-        rs_nh = rs_line[-1] >= np.max(rs_line[-252:])
+        # 针对次新股或停牌股的长度自适应 (不足252天的取当前最大长度)
+        L = len(close)
+        len200 = min(L, 200)
+        len252 = min(L, 252)
+        len126 = min(L, 126)
         
+        # 1. 趋势模板与生命线计算
+        ma10 = np.mean(close[-min(L, 10):])
+        ma20 = np.mean(close[-min(L, 20):])
+        ma50 = np.mean(close[-min(L, 50):])
+        ma200 = np.mean(close[-len200:])
+        
+        # Stage 2 阶段判定 (放宽条件，允许长期横盘后刚站上年线)
+        is_stage_2 = (cp > ma50) and (cp > ma200) and (ma50 > ma200 * 0.95)
+        is_bottom_reversal = (cp > ma50) and (ma200 > cp) and (cp > np.min(close[-min(L, 60):]) * 1.15)
+
+        # 主升浪特征
+        is_main_uptrend = (
+            (cp > ma10) and (cp > ma20) and 
+            (ma10 > ma50) and (ma20 > ma50) and 
+            (ma20 > np.mean(close[-min(L, 25):-5])) and 
+            (cp >= np.max(close[-min(L, 60):]) * 0.85)
+        )
+
+        # 2. RS 相对强度测算 (引入基准指数对比)
+        # 【优化2：处理基准缺失或不对齐导致的 NaN 问题】
+        bench_val = benchmark_series.reindex(df.index).ffill().bfill().values
+        # 【优化3：安全除法，防止 bench_val 为 0】
+        rs_line = np.nan_to_num(close / np.maximum(bench_val, 1e-5), nan=1.0)
+        
+        # 10日前RS对比（注意长度安全）
+        idx_10 = -min(L, 10)
+        rs_velocity = (rs_line[-1] - rs_line[idx_10]) / np.maximum(rs_line[idx_10], 1e-5) * 100
+        rs_nh = rs_line[-1] >= np.max(rs_line[-len126:]) 
+
+        # 3. VCP 紧致度计算
+        recent_10_closes = close[-min(L, 10):]
+        # 使用最大值限制分母，防止均值为0
+        tightness = (np.std(recent_10_closes) / np.maximum(np.mean(recent_10_closes), 1e-5)) * 100
+        
+        # 4. 机构能量 (量能潮)
+        avg_vol20 = np.mean(vol[-min(L, 20):])
+        vol_surge = vol[-1] / np.maximum(avg_vol20, 1e-5)
+        vdu = vol[-1] < avg_vol20 * 0.65 
+
+        # ---- 【🌟 参数中心：便于后续修改与回测】 ----
+        THR_TIGHT = 4.5        # 紧致度极限 (A股创业板可放宽至 5.0)
+        THR_SURGE_BRK = 1.5    # 突破要求爆量倍数
+        THR_SURGE_REV = 1.8    # 底部反转要求爆量倍数
+        THR_BIAS_MA10 = 15     # 短线乖离率警戒线
+        THR_POC_DIST = 25      # 筹码偏离警戒线
+
+        # 5. 综合战法判定树
         action = "观察"
         prio = 50
         
-        # 1. 战法识别
-        if rs_nh and cp < np.max(close[-20:]) * 1.02 and tightness < 1.4:
-            action, prio = "👁️ 奇點先行", 95
-        elif is_stage_2 and rs_nh and rs_velocity > 0:
-            action, prio = "💎 雙重共振", 88
-        elif rs_nh and cp >= np.max(close[-252:]) and vol_surge > 1.3:
-            action, prio = "🚀 巔峰突破", 92
-        elif (cp > ma10 > ma20 > ma50):
-            action, prio = "🔥 主升浪", 85
+        if rs_nh and cp < np.max(close[-min(L, 20):]) * 1.05 and tightness < THR_TIGHT:
+            action, prio = "👁️ 奇點先行(Stealth)", 95
+        elif is_stage_2 and vdu and tightness < THR_TIGHT:
+            action, prio = "🐉 老龍回頭(V-Dry)", 90
+        elif rs_nh and cp >= np.max(close[-len126:]) and vol_surge > THR_SURGE_BRK:
+            action, prio = "🚀 巔峰突破(Breakout)", 92
+        elif is_stage_2 and rs_nh and rs_velocity > 1.0:
+            action, prio = "💎 雙重共振(Leader)", 88
+        elif is_bottom_reversal and vol_surge > THR_SURGE_REV:
+            action, prio = "🌋 困境起爆(Reversal)", 85
 
-        # ---- 【模式差异化处理】 ----
-        if mode == "V850":
-            # 进攻版逻辑：取消筹码否决，强制成交额过滤
-            if turnover < 4.5e8 or turnover > 5.5e9: # 约5亿-55亿区间
-                return None
-            
-            # 狂暴评分：RS 动量占 60%，成交量占 20%
-            final_score = prio + (rs_velocity * 2.5) + (vol_surge * 5) + (1.0 / tightness)
-            dist_poc = ((cp - np.mean(close[-126:])) / np.mean(close[-126:])) * 100 # 仅参考
-        else:
-            # 防御版逻辑：包含 POC 禁令
-            hist_close = close[-126:]
-            hist_vol = vol[-126:]
-            bins = np.linspace(np.min(hist_close), np.max(hist_close), 50)
+        # 主升浪叠加 Buff
+        if is_main_uptrend:
+            if action == "观察":
+                action, prio = "🚀 主升浪(Uptrend)", 94
+            else:
+                action = action.replace(")", " + 🚀主升浪)")
+                prio += 10
+
+        # 6. 【补丁4：筹码峰 (POC) 计算】
+        hist_close = close[-len126:]
+        hist_vol = vol[-len126:]
+        hist_min, hist_max = np.min(hist_close), np.max(hist_close)
+        
+        if hist_max > hist_min:
+            bins = np.linspace(hist_min, hist_max, 50)
+            indices = np.clip(np.digitize(hist_close, bins) - 1, 0, 49)
             vol_bins = np.zeros(50)
-            np.add.at(vol_bins, np.clip(np.digitize(hist_close, bins)-1, 0, 49), hist_vol)
-            poc_price = bins[np.argmax(vol_bins)]
-            dist_poc = ((cp - poc_price) / poc_price) * 100
-            
-            if dist_poc > 8: 
-                action = "☠️ 极度延伸"
-                prio = 10
-            
-            final_score = prio + (rs_velocity * 0.6) + (10 / np.maximum(tightness, 0.1))**2
+            np.add.at(vol_bins, indices, hist_vol)
+            poc_idx = np.argmax(vol_bins)
+            poc_price = bins[poc_idx]
+        else:
+            poc_price = hist_close[-1]
 
-        # 止损与仓位
-        adr_20 = np.mean((high[-20:] - low[-20:]) / close[-20:]) * 100
-        final_stop = max(cp * (1 - adr_20 * 0.01 * 1.6), ma20 * 0.98)
-        suggested_shares = (ACCOUNT_SIZE * MAX_RISK_PER_TRADE) // (cp - final_stop) if cp > final_stop else 0
+        dist_poc = ((cp - poc_price) / np.maximum(poc_price, 1e-5)) * 100
+        bias_ma10 = (cp - ma10) / np.maximum(ma10, 1e-5) * 100
+
+        # 一票否决权：高空缺氧绝对禁买
+        if action != "观察" and (bias_ma10 > THR_BIAS_MA10 and dist_poc > THR_POC_DIST):
+            action = "☠️ 极度延伸(禁买)"
+            prio = 10 
+
+        # 7. 【补丁5：口袋枢轴 (Pocket Pivot)】
+        # 【优化4：全面向量化替代 for 循环，提升计算速度】
+        lookback_days = min(L, 20)
+        avg_vol20_series = pd.Series(vol).rolling(window=20, min_periods=1).mean().values
+        
+        recent_vol = vol[-3:]
+        recent_avg = avg_vol20_series[-3:]
+        recent_close = close[-3:]
+        recent_open = open_p[-3:]
+        
+        # 向量化判断：近三天是否存在任意一天放量1.3倍且收阳线
+        pocket_pivot = np.any((recent_vol > recent_avg * 1.3) & (recent_close > recent_open))
+
+        # 8. 多重结构止损计算
+        adr_days = min(L, 20)
+        adr_20 = np.mean((high[-adr_days:] - low[-adr_days:]) / np.maximum(close[-adr_days:], 1e-5)) * 100
+        adr_stop = cp * (1 - adr_20 * 0.01 * 1.5)
+        
+        if "主升浪" in action and "禁买" not in action:
+            struct_stop = ma20 * 0.98 
+        else:
+            struct_stop = ma50 * 0.98
+            
+        final_stop = max(adr_stop, struct_stop) 
+
+        # 9. 建议仓位管理 (Kelly Criterion 简化版)
+        risk_per_share = cp - final_stop
+        suggested_shares = 0
+        if risk_per_share > 0:
+            suggested_shares = (ACCOUNT_SIZE * MAX_RISK_PER_TRADE) // risk_per_share
+
+        # 构造原始相对强度 raw_rs (用 max 防止越界)
+        rs_raw_val = (
+            cp / np.maximum(close[-min(L, 63)], 1e-5) * 2 + 
+            cp / np.maximum(close[-min(L, 126)], 1e-5) + 
+            cp / np.maximum(close[-len252], 1e-5)
+        )
 
         return {
-            "Ticker": "", "Action": action, "Final_Score": round(final_score, 2),
-            "Price": cp, "Shares": int(suggested_shares), "Stop": round(final_stop, 2),
-            "Tight": round(tightness, 2), "Vol_Ratio": round(vol_surge, 2), 
-            "RS_Vel": round(rs_velocity, 2), "Dist_POC%": round(dist_poc, 2),
-            "Turnover(M)": round(turnover/1e6, 0), "Sector": "", "is_bull": cp > ma200
+            "Symbol": symbol,              # 返回股票代码，便于后续 DataFrame 合并
+            "Action": action, 
+            "Score": prio,                 # 更名为 Score 更直观
+            "Price": round(cp, 2), 
+            "Tight%": round(tightness, 2), 
+            "Vol_Ratio": round(vol_surge, 2), 
+            "ADR%": round(adr_20, 2), 
+            "Stop_Price": round(final_stop, 2),
+            "Shares": int(suggested_shares), 
+            "RS_Vel": round(rs_velocity, 2),
+            "Dist_POC%": round(dist_poc, 2),
+            "PocketPivot": "🔥 是" if pocket_pivot else "否",
+            "Is_Bull": bool(cp > ma200),   # 转换为标准 bool
+            "RS_Raw": round(rs_raw_val, 2)
         }
-    except: return None
-
-# ==========================================
-# 🚀 3. 主程序
-# ==========================================
-def main():
-    now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%m-%d %H:%M')
-    print(f"[{now_str}] 🚀 V850 狂暴先锋 & V750 联袂启动...")
-    
-    # 1. 环境分析
-    hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
-    hsi_series = hsi_raw.iloc[:,0] if isinstance(hsi_raw, pd.DataFrame) else hsi_raw
-    hsi_cp = hsi_series.iloc[-1]
-    hsi_ma20 = hsi_series.rolling(20).mean().iloc[-1]
-    hsi_ma50 = hsi_series.rolling(50).mean().iloc[-1]
-    
-    # 进攻开关
-    market_mode = "⚔️ 进攻 (V850 激活)" if hsi_cp > hsi_ma20 else "🛡️ 防御 (谨慎出击)"
-    
-    # 2. 扫描数据源
-    url = "https://scanner.tradingview.com/hongkong/scan"
-    payload = {"columns":["name", "sector"], "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 1e10}], "range":[0, 450]}
-    resp = requests.post(url, json=payload).json().get('data',[])
-    df_pool = pd.DataFrame([{"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][1]} for d in resp])
-    
-    tickers = [str(c).zfill(4)+".HK" for c in df_pool['code']]
-    data = yf.download(tickers, period="2y", group_by='ticker', progress=False, threads=True)
-
-    # 3. 运行双引擎
-    v750_results, v850_results = [], []
-    
-    for t in tickers:
-        try:
-            ticker_data = data[t]
-            code_raw = t.split('.')[0].lstrip('0')
-            sector = df_pool[df_pool['code']==code_raw].iloc[0]['sector'] or "其他"
-            
-            # 运行 V750
-            res_v750 = process_engine(ticker_data, hsi_series, mode="V750")
-            if res_v750 and res_v750['is_bull'] and res_v750['Action'] != "观察":
-                res_v750.update({"Ticker": t.split('.')[0], "Sector": sector})
-                v750_results.append(res_v750)
-                
-            # 运行 V850
-            res_v850 = process_engine(ticker_data, hsi_series, mode="V850")
-            if res_v850 and res_v850['Action'] != "观察":
-                res_v850.update({"Ticker": t.split('.')[0], "Sector": sector})
-                v850_results.append(res_v850)
-        except: continue
-
-    # 4. 写入 Google Sheets
-    ws_v750, ws_v850 = init_sheets()
-    
-    output_configs = [
-        {"ws": ws_v750, "data": v750_results, "title": "V750 防御版 (稳健/紧致度优先)"},
-        {"ws": ws_v850, "data": v850_results, "title": "V850 狂暴先锋 (进攻/动量优先)"}
-    ]
-
-    cols = ["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "Dist_POC%", "Turnover(M)", "Sector"]
-
-    for config in output_configs:
-        ws = config["ws"]
-        ws.clear()
-        if not config["data"]: continue
         
-        df_final = pd.DataFrame(config["data"]).sort_values(by="Final_Score", ascending=False).head(50)
-        
-        # 表头信息
-        header = [[f"🏰 {config['title']}", f"大盘状态: {market_mode}", f"刷新: {now_str}", "风控: 单笔0.8%"]]
-        ws.update(range_name="A1", values=header)
-        ws.update(range_name="A3", values=[cols] + df_final[cols].values.tolist(), value_input_option="USER_ENTERED")
-        
-        # 基础格式化
-        set_frozen(ws, rows=3)
-        format_cell_range(ws, 'A3:L3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0.2, 0.2, 0.2)))
-        
-        # 条件格式 (基础格式化)
-        set_frozen(ws, rows=3)
-        format_cell_range(ws, 'A3:L3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0.2, 0.2, 0.2)))
-        
-        rules = get_conditional_format_rules(ws)
-        
-        # 1. 针对 V850 的 RS 极速动量 - 金色提醒 (数值类型)
-        if "V850" in config["title"]:
-            rules.append(ConditionalFormatRule(
-                ranges=[GridRange.from_a1_range('I4:I100', ws)],
-                booleanRule=BooleanRule(
-                    condition=BooleanCondition('NUMBER_GREATER', ['15']),
-                    format=cellFormat(backgroundColor=color(1, 0.9, 0.6), textFormat=textFormat(bold=True))
-                )
-            ))
-
-        # 2. 分开处理：火箭 (🚀) 巅峰突破 - 红色高亮
-        rules.append(ConditionalFormatRule(
-            ranges=[GridRange.from_a1_range('B4:B100', ws)],
-            booleanRule=BooleanRule(
-                condition=BooleanCondition('TEXT_CONTAINS', ['🚀']),
-                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)))
-            )
-        ))
-
-        # 3. 分开处理：火焰 (🔥) 主升浪 - 红色高亮
-        rules.append(ConditionalFormatRule(
-            ranges=[GridRange.from_a1_range('B4:B100', ws)],
-            booleanRule=BooleanRule(
-                condition=BooleanCondition('TEXT_CONTAINS', ['🔥']),
-                format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0)))
-            )
-        ))
-
-        # 4. 奇点先行 (👁️) - 紫色背景 (原有逻辑)
-        rules.append(ConditionalFormatRule(
-            ranges=[GridRange.from_a1_range('B4:B100', ws)],
-            booleanRule=BooleanRule(
-                condition=BooleanCondition('TEXT_CONTAINS', ['👁️']),
-                format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True))
-            )
-        ))
-
-        # 5. 针对极度延伸 (☠️) - 灰色删除线 (针对 V750)
-        rules.append(ConditionalFormatRule(
-            ranges=[GridRange.from_a1_range('B4:B100', ws)],
-            booleanRule=BooleanRule(
-                condition=BooleanCondition('TEXT_CONTAINS', ['☠️']),
-                format=cellFormat(backgroundColor=color(0.85, 0.85, 0.85), 
-                                 textFormat=textFormat(strikethrough=True, foregroundColor=color(0.5, 0.5, 0.5)))
-            )
-        ))
-
-        rules.save()
+    except Exception as e:
+        # 【优化5：精细化报错输出，方便定位是哪只股票卡住了代码】
+        print(f"❌ [Error] 分析股票 {symbol} 时发生异常: {str(e)}")
+        return None
