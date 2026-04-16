@@ -13,111 +13,131 @@ SS_KEY = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 CREDS_FILE = "credentials.json"
 TARGET_SHEET_NAME = "A-v7-V53.3-BloodBird"
 TZ_SHANGHAI = datetime.timezone(datetime.timedelta(hours=8))
-
-# 策略阈值（如果觉得结果太少，可以微调这里）
-RSI_STRICT = 30
-BIAS_STRICT = -8.0  # 修改为-8%，对大盘股更友好
 # ==========================================
 
 def init_sheet():
     creds = Credentials.from_service_account_file(CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     client = gspread.authorize(creds)
-    doc = client.open_by_key(SS_KEY)
-    try: return doc.worksheet(TARGET_SHEET_NAME)
-    except: return doc.add_worksheet(TARGET_SHEET_NAME, 1000, 20)
+    return client.open_by_key(SS_KEY).worksheet(TARGET_SHEET_NAME)
 
-def get_stock_pool():
-    tv_url = "https://scanner.tradingview.com/china/scan"
-    payload = {
-        "columns": ["name", "description", "industry", "close", "market_cap_basic"],
-        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 80e8}],
-        "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
-        "range": [0, 500]
-    }
-    try:
-        resp = requests.post(tv_url, json=payload, timeout=15).json()
-        return resp.get('data', [])
-    except: return []
+def get_market_data():
+    """获取沪深300作为基准"""
+    idx = yf.download("000300.SS", period="260d", progress=False)['Close']
+    return idx
 
 def run_v53_optimizer():
     now = datetime.datetime.now(TZ_SHANGHAI)
-    print(f"[{now.strftime('%H:%M:%S')}] 🚀 开始 V53.3 增强版扫描...")
-    
-    raw_data = get_stock_pool()
-    if not raw_data: return
+    print(f"[{now.strftime('%H:%M:%S')}] 🚀 启动 V53.3 强势领涨股早鸟扫描...")
 
-    # 1. 预处理代码列表
-    stock_map = {}
+    # 1. 获取基准与股票池
+    benchmark = get_market_data()
+    
+    tv_url = "https://scanner.tradingview.com/china/scan"
+    payload = {
+        "columns": ["name", "description", "industry", "close", "market_cap_basic", "volume"],
+        "filter": [{"left": "market_cap_basic", "operation": "greater", "right": 100e8}], # 提高到100亿，过滤垃圾股
+        "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+        "range": [0, 600]
+    }
+    raw_data = requests.post(tv_url, json=payload, timeout=15).json().get('data', [])
+    
     tickers = []
+    meta = {}
     for item in raw_data:
         code = item['s'].split(':')[-1]
         yf_code = f"{code}.SS" if code.startswith('6') else f"{code}.SZ"
         tickers.append(yf_code)
-        stock_map[yf_code] = {"name": item['d'][1], "industry": item['d'][2], "symbol": code}
+        meta[yf_code] = {"name": item['d'][1], "industry": item['d'][2], "symbol": code}
 
-    # 2. 批量下载 (分块以防请求过大)
-    print(f"📥 正在获取 {len(tickers)} 只标的的 K 线数据...")
-    data = yf.download(tickers, period="60d", interval="1d", group_by='ticker', progress=True, threads=True)
-
+    # 2. 批量下载数据
+    all_data = yf.download(tickers, period="260d", group_by='ticker', progress=True, threads=True)
+    
     results = []
-    candidates_debug = [] # 用于记录最接近条件的股票
+    rs_scores = []
 
-    # 3. 核心计算
+    # 3. 第一遍循环：计算 RS 分数
+    print("📊 正在计算 RS 评级与紧致度...")
     for yf_code in tickers:
         try:
-            # 提取单只股票的 Close
-            if yf_code not in data or data[yf_code].empty: continue
-            df = data[yf_code].dropna(subset=['Close'])
-            if len(df) < 20: continue
-
-            close = df['Close']
-            curr_price = float(close.iloc[-1])
+            df = all_data[yf_code].dropna()
+            if len(df) < 120: continue
             
-            # RSI 计算
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
+            # RS 评分逻辑 (加权：1月*0.4 + 3月*0.2 + 6月*0.2 + 12月*0.2)
+            c = df['Close']
+            perf = (c.iloc[-1]/c.iloc[-22]*0.4) + (c.iloc[-1]/c.iloc[-66]*0.2) + \
+                   (c.iloc[-1]/c.iloc[-132]*0.2) + (c.iloc[-1]/c.iloc[-250]*0.2)
+            rs_scores.append({"code": yf_code, "score": perf})
+        except: continue
 
-            # BIAS 20 计算
-            ma20 = close.rolling(20).mean().iloc[-1]
-            bias = ((curr_price - ma20) / ma20) * 100
+    # 转换为百分位排名 (0-99)
+    rs_df = pd.DataFrame(rs_scores)
+    rs_df['rank'] = rs_df['score'].rank(pct=True) * 99
 
-            # 调试记录：记录全市场最超跌的前5名
-            candidates_debug.append({"name": stock_map[yf_code]['name'], "rsi": rsi, "bias": bias})
+    # 4. 第二遍循环：精选强势形态
+    for yf_code in tickers:
+        try:
+            df = all_data[yf_code].dropna()
+            if len(df) < 50: continue
+            
+            close = df['Close']
+            vol = df['Volume']
+            
+            # A. 核心指标计算
+            curr_price = float(close.iloc[-1])
+            ma50 = close.rolling(50).mean().iloc[-1]
+            bias_50 = ((curr_price - ma50) / ma50) * 100
+            
+            # B. 紧致度 (最近10天收盘价的标准差/均值，越小越紧)
+            tightness = (close.iloc[-10:].std() / close.iloc[-10:].mean()) * 100
+            
+            # C. 量比 (今日量 / 5日均量)
+            vol_ratio = vol.iloc[-1] / vol.iloc[-6:-1].mean()
+            
+            # D. RS 线新高 (个股/指数 比值)
+            rs_line = close / benchmark.reindex(close.index).ffill()
+            is_rs_high = "是" if rs_line.iloc[-1] >= rs_line.iloc[-120:].max() else "否"
+            
+            # E. RS 评级
+            this_rank = rs_df[rs_df['code'] == yf_code]['rank'].values[0]
 
-            # 判断逻辑
-            if rsi < RSI_STRICT and bias < BIAS_STRICT:
+            # --- 筛选逻辑 (早鸟发现核心) ---
+            # 1. RS评级 > 85 (属于市场前15%的强势股)
+            # 2. 价格在50日线上方 (bias_50 > -2) 且不太远
+            # 3. 量比放大 (> 1.2)
+            if this_rank > 80 and bias_50 > -5 and vol_ratio > 1.1:
+                
+                # 计算止损与目标 (ATR简易版)
+                atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+                stop_loss = curr_price - (2 * atr)
+                target = curr_price + (6 * atr)
+                win_loss_ratio = round((target - curr_price) / (curr_price - stop_loss), 2)
+
                 results.append({
-                    "代码": stock_map[yf_code]['symbol'],
-                    "名称": stock_map[yf_code]['name'],
+                    "RS评级": int(this_rank),
+                    "代码": meta[yf_code]['symbol'],
+                    "名称": meta[yf_code]['name'],
                     "现价": round(curr_price, 2),
-                    "RSI": round(rsi, 2),
-                    "乖离率": f"{round(bias, 2)}%",
-                    "行业": stock_map[yf_code]['industry'],
-                    "状态": "🔥 泣血早鸟信号"
+                    "量比": round(vol_ratio, 2),
+                    "紧致度": f"{round(tightness, 2)}%",
+                    "50日乖离": f"{round(bias_50, 1)}%",
+                    "盈亏比": win_loss_ratio,
+                    "RS线新高": is_rs_high,
+                    "止损": round(stop_loss, 2),
+                    "目标": round(target, 2),
+                    "行业": meta[yf_code]['industry'],
+                    "更新时间": now.strftime('%H:%M')
                 })
         except: continue
 
-    # 4. 排序并展示调试信息
-    candidates_debug = sorted(candidates_debug, key=lambda x: x['rsi'])[:5]
-    print("\n💡 当前市场最接近超跌的标的:")
-    for c in candidates_debug:
-        print(f"   - {c['name']}: RSI={c['rsi']:.1f}, 乖离={c['bias']:.1f}%")
-
-    # 5. 写入 Google Sheets
-    sh = init_sheet()
-    sh.clear()
-    
-    if not results:
-        msg = f"最后扫描: {now.strftime('%H:%M:%S')} (未发现极端超跌信号)"
-        sh.update_acell("A1", msg)
-        print(f"⚠️ {msg}")
+    # 5. 排序并写入
+    if results:
+        df_final = pd.DataFrame(results).sort_values("RS评级", ascending=False)
+        sh = init_sheet()
+        sh.clear()
+        sh.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+        print(f"✅ 成功提取 {len(df_final)} 只强势早鸟股！")
     else:
-        df_res = pd.DataFrame(results)
-        sh.update([df_res.columns.values.tolist()] + df_res.values.tolist())
-        sh.update_acell("N1", f"发现时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"✅ 成功发现 {len(results)} 只标的！")
+        print("⚠️ 未发现符合条件的强势启动标的。")
 
 if __name__ == "__main__":
     run_v53_optimizer()
