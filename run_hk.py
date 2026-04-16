@@ -1,177 +1,191 @@
-import numpy as np
 import pandas as pd
+import numpy as np
+import requests
+import re
+import yfinance as yf
+import datetime
+import logging
 
-def analyze_stock(df, benchmark_series, symbol="Unknown", ACCOUNT_SIZE=100000, MAX_RISK_PER_TRADE=0.01):
+# ==========================================
+# 0. 系统配置与日志初始化
+# ==========================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+pd.options.mode.chained_assignment = None  # 忽略部分 Pandas 警告
+
+# ==========================================
+# 1. 核心量化算法 (原 calculate_advanced_v750 的实现)
+# ==========================================
+def calculate_advanced_v750(df, hsi_series):
     """
-    量化选股核心引擎 - (VCP + 欧奈尔 + 口袋枢轴 + 筹码POC)
+    量化核心逻辑：判断主升浪、相对强度(RS)与成交量异动
+    返回字典格式结果或 None
     """
-    # 【优化1：数据有效性拦截】数据太少（如刚上市几天）直接跳过，防止数组越界
-    if df is None or len(df) < 60:
-        return None
-        
     try:
-        # 获取底层 numpy 数组提速
-        close = df['Close'].values.astype(float)
-        open_p = df['Open'].values.astype(float)
-        high = df['High'].values.astype(float)
-        low = df['Low'].values.astype(float)
-        vol = df['Volume'].values.astype(float)
-        cp = close[-1]
+        if len(df) < 150: return None # 剔除次新股
         
-        # 针对次新股或停牌股的长度自适应 (不足252天的取当前最大长度)
-        L = len(close)
-        len200 = min(L, 200)
-        len252 = min(L, 252)
-        len126 = min(L, 126)
+        # 计算技术指标
+        close = df['Close']
+        vol = df['Volume']
         
-        # 1. 趋势模板与生命线计算
-        ma10 = np.mean(close[-min(L, 10):])
-        ma20 = np.mean(close[-min(L, 20):])
-        ma50 = np.mean(close[-min(L, 50):])
-        ma200 = np.mean(close[-len200:])
+        ma20 = close.rolling(20).mean()
+        ma50 = close.rolling(50).mean()
+        ma150 = close.rolling(150).mean()
+        vol_ma50 = vol.rolling(50).mean()
         
-        # Stage 2 阶段判定 (放宽条件，允许长期横盘后刚站上年线)
-        is_stage_2 = (cp > ma50) and (cp > ma200) and (ma50 > ma200 * 0.95)
-        is_bottom_reversal = (cp > ma50) and (ma200 > cp) and (cp > np.min(close[-min(L, 60):]) * 1.15)
-
-        # 主升浪特征
-        is_main_uptrend = (
-            (cp > ma10) and (cp > ma20) and 
-            (ma10 > ma50) and (ma20 > ma50) and 
-            (ma20 > np.mean(close[-min(L, 25):-5])) and 
-            (cp >= np.max(close[-min(L, 60):]) * 0.85)
-        )
-
-        # 2. RS 相对强度测算 (引入基准指数对比)
-        # 【优化2：处理基准缺失或不对齐导致的 NaN 问题】
-        bench_val = benchmark_series.reindex(df.index).ffill().bfill().values
-        # 【优化3：安全除法，防止 bench_val 为 0】
-        rs_line = np.nan_to_num(close / np.maximum(bench_val, 1e-5), nan=1.0)
+        current_price = close.iloc[-1]
+        current_vol = vol.iloc[-1]
         
-        # 10日前RS对比（注意长度安全）
-        idx_10 = -min(L, 10)
-        rs_velocity = (rs_line[-1] - rs_line[idx_10]) / np.maximum(rs_line[idx_10], 1e-5) * 100
-        rs_nh = rs_line[-1] >= np.max(rs_line[-len126:]) 
-
-        # 3. VCP 紧致度计算
-        recent_10_closes = close[-min(L, 10):]
-        # 使用最大值限制分母，防止均值为0
-        tightness = (np.std(recent_10_closes) / np.maximum(np.mean(recent_10_closes), 1e-5)) * 100
+        # 1. 趋势多头排列 (Minervini 模板核心)
+        trend_bull = (current_price > ma20.iloc[-1]) and \
+                     (ma20.iloc[-1] > ma50.iloc[-1]) and \
+                     (ma50.iloc[-1] > ma150.iloc[-1])
+                     
+        # 2. 成交量异动 (今日量 > 50日均量的 1.2倍)
+        vol_ratio = current_vol / vol_ma50.iloc[-1] if vol_ma50.iloc[-1] > 0 else 0
         
-        # 4. 机构能量 (量能潮)
-        avg_vol20 = np.mean(vol[-min(L, 20):])
-        vol_surge = vol[-1] / np.maximum(avg_vol20, 1e-5)
-        vdu = vol[-1] < avg_vol20 * 0.65 
-
-        # ---- 【🌟 参数中心：便于后续修改与回测】 ----
-        THR_TIGHT = 4.5        # 紧致度极限 (A股创业板可放宽至 5.0)
-        THR_SURGE_BRK = 1.5    # 突破要求爆量倍数
-        THR_SURGE_REV = 1.8    # 底部反转要求爆量倍数
-        THR_BIAS_MA10 = 15     # 短线乖离率警戒线
-        THR_POC_DIST = 25      # 筹码偏离警戒线
-
-        # 5. 综合战法判定树
+        # 3. 相对大盘强度 (RS)
+        # 个股近60日涨幅 / 恒指近60日涨幅
+        stock_ret = current_price / close.iloc[-60] - 1
+        hsi_ret = hsi_series.iloc[-1] / hsi_series.iloc[-60] - 1
+        rs_raw = stock_ret - hsi_ret
+        
+        # 综合打分 (动能 + 趋势)
+        score = (vol_ratio * 10) + (rs_raw * 100)
+        
+        # 判断 Action
         action = "观察"
-        prio = 50
-        
-        if rs_nh and cp < np.max(close[-min(L, 20):]) * 1.05 and tightness < THR_TIGHT:
-            action, prio = "👁️ 奇點先行(Stealth)", 95
-        elif is_stage_2 and vdu and tightness < THR_TIGHT:
-            action, prio = "🐉 老龍回頭(V-Dry)", 90
-        elif rs_nh and cp >= np.max(close[-len126:]) and vol_surge > THR_SURGE_BRK:
-            action, prio = "🚀 巔峰突破(Breakout)", 92
-        elif is_stage_2 and rs_nh and rs_velocity > 1.0:
-            action, prio = "💎 雙重共振(Leader)", 88
-        elif is_bottom_reversal and vol_surge > THR_SURGE_REV:
-            action, prio = "🌋 困境起爆(Reversal)", 85
-
-        # 主升浪叠加 Buff
-        if is_main_uptrend:
-            if action == "观察":
-                action, prio = "🚀 主升浪(Uptrend)", 94
-            else:
-                action = action.replace(")", " + 🚀主升浪)")
-                prio += 10
-
-        # 6. 【补丁4：筹码峰 (POC) 计算】
-        hist_close = close[-len126:]
-        hist_vol = vol[-len126:]
-        hist_min, hist_max = np.min(hist_close), np.max(hist_close)
-        
-        if hist_max > hist_min:
-            bins = np.linspace(hist_min, hist_max, 50)
-            indices = np.clip(np.digitize(hist_close, bins) - 1, 0, 49)
-            vol_bins = np.zeros(50)
-            np.add.at(vol_bins, indices, hist_vol)
-            poc_idx = np.argmax(vol_bins)
-            poc_price = bins[poc_idx]
-        else:
-            poc_price = hist_close[-1]
-
-        dist_poc = ((cp - poc_price) / np.maximum(poc_price, 1e-5)) * 100
-        bias_ma10 = (cp - ma10) / np.maximum(ma10, 1e-5) * 100
-
-        # 一票否决权：高空缺氧绝对禁买
-        if action != "观察" and (bias_ma10 > THR_BIAS_MA10 and dist_poc > THR_POC_DIST):
-            action = "☠️ 极度延伸(禁买)"
-            prio = 10 
-
-        # 7. 【补丁5：口袋枢轴 (Pocket Pivot)】
-        # 【优化4：全面向量化替代 for 循环，提升计算速度】
-        lookback_days = min(L, 20)
-        avg_vol20_series = pd.Series(vol).rolling(window=20, min_periods=1).mean().values
-        
-        recent_vol = vol[-3:]
-        recent_avg = avg_vol20_series[-3:]
-        recent_close = close[-3:]
-        recent_open = open_p[-3:]
-        
-        # 向量化判断：近三天是否存在任意一天放量1.3倍且收阳线
-        pocket_pivot = np.any((recent_vol > recent_avg * 1.3) & (recent_close > recent_open))
-
-        # 8. 多重结构止损计算
-        adr_days = min(L, 20)
-        adr_20 = np.mean((high[-adr_days:] - low[-adr_days:]) / np.maximum(close[-adr_days:], 1e-5)) * 100
-        adr_stop = cp * (1 - adr_20 * 0.01 * 1.5)
-        
-        if "主升浪" in action and "禁买" not in action:
-            struct_stop = ma20 * 0.98 
-        else:
-            struct_stop = ma50 * 0.98
+        if trend_bull and vol_ratio > 1.2 and rs_raw > 0:
+            action = "🚀主升浪" if vol_ratio > 2.0 else "👁️奇点突破"
             
-        final_stop = max(adr_stop, struct_stop) 
-
-        # 9. 建议仓位管理 (Kelly Criterion 简化版)
-        risk_per_share = cp - final_stop
-        suggested_shares = 0
-        if risk_per_share > 0:
-            suggested_shares = (ACCOUNT_SIZE * MAX_RISK_PER_TRADE) // risk_per_share
-
-        # 构造原始相对强度 raw_rs (用 max 防止越界)
-        rs_raw_val = (
-            cp / np.maximum(close[-min(L, 63)], 1e-5) * 2 + 
-            cp / np.maximum(close[-min(L, 126)], 1e-5) + 
-            cp / np.maximum(close[-len252], 1e-5)
-        )
-
         return {
-            "Symbol": symbol,              # 返回股票代码，便于后续 DataFrame 合并
-            "Action": action, 
-            "Score": prio,                 # 更名为 Score 更直观
-            "Price": round(cp, 2), 
-            "Tight%": round(tightness, 2), 
-            "Vol_Ratio": round(vol_surge, 2), 
-            "ADR%": round(adr_20, 2), 
-            "Stop_Price": round(final_stop, 2),
-            "Shares": int(suggested_shares), 
-            "RS_Vel": round(rs_velocity, 2),
-            "Dist_POC%": round(dist_poc, 2),
-            "PocketPivot": "🔥 是" if pocket_pivot else "否",
-            "Is_Bull": bool(cp > ma200),   # 转换为标准 bool
-            "RS_Raw": round(rs_raw_val, 2)
+            "is_bull": trend_bull,
+            "Action": action,
+            "Score": score,
+            "rs_raw": rs_raw,
+            "Price": round(current_price, 2),
+            "Vol_Ratio": round(vol_ratio, 2),
+            "RS_Vel": round(rs_raw, 3),
+            "Stop": round(current_price * 0.92, 2), # 默认8%止损
+            "Shares": int(100000 / current_price),  # 假设10w资金单笔建议股数
+            "Tight": "Yes" if close.iloc[-10:].std() / close.iloc[-10:].mean() < 0.05 else "No"
         }
-        
     except Exception as e:
-        # 【优化5：精细化报错输出，方便定位是哪只股票卡住了代码】
-        print(f"❌ [Error] 分析股票 {symbol} 时发生异常: {str(e)}")
         return None
+
+# ==========================================
+# 2. 策略执行主类
+# ==========================================
+class QuantumScanner:
+    def __init__(self):
+        self.hsi_p = 0
+        self.hsi_ma50 = 0
+        self.hsi_series = None
+        self.weather = "❄️ 观望"
+        self.df_pool = pd.DataFrame()
+        
+    def fetch_benchmark(self):
+        logging.info("1. 正在获取大盘基准...")
+        hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
+        # 兼容 Pandas 多种返回结构
+        self.hsi_series = hsi_raw.iloc[:,0] if isinstance(hsi_raw, pd.DataFrame) else hsi_raw
+        self.hsi_p = self.hsi_series.iloc[-1]
+        self.hsi_ma50 = self.hsi_series.rolling(50).mean().iloc[-1]
+        self.weather = "☀️ 激进" if self.hsi_p > self.hsi_ma50 else "❄️ 观望"
+        logging.info(f"大盘环境: {self.weather} (收盘:{self.hsi_p:.0f}, MA50:{self.hsi_ma50:.0f})")
+
+    def scan_tradingview(self):
+        logging.info("2. 正在扫描 TradingView 全市场票池...")
+        url = "https://scanner.tradingview.com/hongkong/scan"
+        payload = {
+            "columns":["name", "description", "close", "market_cap_basic", "sector"],
+            "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 8e9}], # 80亿以上
+            "range": [0, 1000], 
+            "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=15).json().get('data', [])
+            self.df_pool = pd.DataFrame([
+                {"code": re.sub(r'[^0-9]', '', d['d'][0]), "sector": d['d'][4] or "其他"} 
+                for d in resp
+            ])
+            logging.info(f"TV粗筛完成，获取到 {len(self.df_pool)} 只基础标的。")
+        except Exception as e:
+            logging.error(f"TradingView 获取失败: {e}")
+            raise
+
+    def process_and_rank(self):
+        logging.info("3. 正在拉取 Yahoo Finance 详情并执行量化测算...")
+        final_list = []
+        tickers =[str(c).zfill(4) + ".HK" for c in self.df_pool['code']]
+        
+        # 批量下载数据
+        data = yf.download(tickers, period="1y", group_by='ticker', progress=False, threads=True, auto_adjust=False)
+        
+        # 获取含有数据的股票列名
+        available_tickers = data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else[]
+        
+        for t in tickers:
+            try:
+                if t not in available_tickers: continue
+                
+                # 清洗停牌或缺失数据
+                stock_data = data[t].dropna()
+                if len(stock_data) < 100: continue 
+                
+                res = calculate_advanced_v750(stock_data, self.hsi_series)
+                
+                if res and res.get('is_bull') and res.get('Action') != "观察":
+                    code_raw = t.split('.')[0].lstrip('0')
+                    sector = self.df_pool[self.df_pool['code']==code_raw].iloc[0]['sector']
+                    res.update({"Ticker": t.split('.')[0], "Sector": sector})
+                    final_list.append(res)
+            except Exception as e:
+                # 屏蔽单一股票的错误，防止打断整个循环
+                continue
+
+        if not final_list:
+            logging.warning("当前无股票满足突破/主升浪条件。")
+            return pd.DataFrame()
+
+        res_df = pd.DataFrame(final_list)
+        
+        # 4. 排序与动态配额
+        logging.info("4. 正在执行动态配额与板块评级...")
+        res_df['Final_Score'] = res_df['Score'] + res_df['rs_raw'].rank(pct=True)*25
+        
+        # 多头市场每个板块允许 8 只，空头市场只允许 3 只
+        sector_limit = 8 if self.weather == "☀️ 激进" else 3 
+        
+        top_picks = res_df.sort_values(by="Final_Score", ascending=False).groupby('Sector').head(sector_limit)
+        return top_picks.head(60)
+
+    def export_results(self, df):
+        if df.empty: return
+        
+        logging.info("5. 结果汇总:")
+        cols =["Ticker", "Action", "Final_Score", "Price", "Shares", "Stop", "Tight", "Vol_Ratio", "RS_Vel", "Sector"]
+        output_df = df[cols]
+        
+        # 在终端打印美化过的表格
+        print("\n" + "="*80)
+        print(f"🏰 V45-V750 量子领袖版 | 环境: {self.weather} | 时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print("="*80)
+        print(output_df.to_string(index=False))
+        print("="*80)
+        
+        # 如果你有 Google Sheets 配置，可以在这里接入 GSpread 代码
+        # df.to_csv("Quantum_Picks.csv", index=False) # 本地备份
+
+# ==========================================
+# 3. 运行入口
+# ==========================================
+if __name__ == "__main__":
+    scanner = QuantumScanner()
+    try:
+        scanner.fetch_benchmark()
+        scanner.scan_tradingview()
+        results = scanner.process_and_rank()
+        scanner.export_results(results)
+        logging.info("✅ 任务流完全结束。")
+    except Exception as e:
+        logging.error(f"❌ 程序运行阻断: {e}")
