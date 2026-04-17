@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycby1pIM7iO43lcLQpOmi5LCJIn3VN9a0Ilf9amoy1EtQV_GBXJkk_A4PpsrJxKzH7i51/exec"
 TARGET_SHEET = "super"
 
-# 偽裝請求抓取維基百科標普500與納指100，解決 403 Forbidden
+# 抓取 S&P 500 與 Nasdaq 100 股票池
 try:
     print("📡 正在獲取全市場 S&P 500 與 Nasdaq 100 股票池...")
     req = urllib.request.Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})
@@ -32,7 +32,11 @@ except Exception as e:
     print(f"⚠️ 獲取名單失敗，使用備用大型股池... ({e})")
     UNIVERSE =["AAPL", "MSFT", "GOOGL", "AVGO", "CAVA", "FIVE", "MCK", "PWR", "VRT", "HWM", "NVDA", "META", "TSLA", "AMD"]
 
-EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'Credit Services']
+# 🛑 核心優化 1：擴大封殺範圍，徹底排除收息股、週期股、金融股
+EXCLUDED_INDUSTRIES =[
+    'Banks', 'Insurance', 'Financial', 'Credit', 
+    'Real Estate', 'REIT', 'Utilities', 'Energy', 'Oil & Gas'
+]
 
 def sync_to_google_sheet(sheet_name, matrix):
     try:
@@ -51,13 +55,12 @@ def get_return(series, days):
     return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
 
 # ==========================================
-# 2. 核心量化模型 (漏斗過濾機制)
+# 2. 核心量化模型 (強勢動量漏斗版)
 # ==========================================
 def run_super_growth_funnel():
     print("\n" + "="*50)
-    print("🚀[超級成長股 - 漏斗過濾版] 啟動掃描...")
+    print("🚀 [超級成長股 - 強勢動量糾偏版] 啟動掃描...")
     
-    # 獲取大盤基準 (移除了 session 參數)
     try:
         spy_close = yf.download("SPY", period="1y", interval="1d", progress=False)['Close']
         if isinstance(spy_close, pd.DataFrame): spy_close = spy_close['SPY']
@@ -65,8 +68,7 @@ def run_super_growth_funnel():
     except:
         spy_ret = {5: 0, 20: 0, 60: 0} 
 
-    print(f"📡 批量下載股票技術特徵 (這可能需要幾十秒)...")
-    # 移除了 session 參數
+    print(f"📡 批量下載股票技術特徵...")
     hist_data = yf.download(UNIVERSE, period="1y", interval="1d", progress=False, threads=True)
     
     close_df = hist_data['Close']
@@ -75,7 +77,6 @@ def run_super_growth_funnel():
     valid_technical_pool = {}
     rs_scores = {}
 
-    # 【漏斗 1】：技術面與動量一票否決
     for t in UNIVERSE:
         try:
             if t not in close_df.columns: continue
@@ -86,11 +87,11 @@ def run_super_growth_funnel():
             price = float(c.iloc[-1])
             ma20, ma50, ma200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            if not (ma20 > ma50 and ma50 > ma200): continue
+            # 🛑 核心優化 2：增加 price > ma50，防止抓到剛暴跌但均線還沒死叉的假多頭
+            if not (price > ma50 and ma20 > ma50 and ma50 > ma200): continue
             if v.tail(40).mean() * price < 20_000_000: continue
             
             ret_5, ret_20, ret_60, ret_120 = get_return(c, 5), get_return(c, 20), get_return(c, 60), get_return(c, 120)
-            
             rs_scores[t] = (ret_20 * 0.4) + (ret_60 * 0.3) + (ret_120 * 0.3)
             
             valid_technical_pool[t] = {
@@ -109,14 +110,11 @@ def run_super_growth_funnel():
     print(f"✅ 技術過濾剩餘 {len(valid_technical_pool)} 隻，開始並行獲取基本面...")
     
     def fetch_info(t):
-        try: 
-            ticker = yf.Ticker(t)
-            # 移除了 ticker.session 賦值，讓 yfinance 自己處理
-            return t, ticker.info
+        try: return t, yf.Ticker(t).info
         except: return t, {}
         
     infos = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         for t, info in executor.map(fetch_info, valid_technical_pool.keys()):
             infos[t] = info
 
@@ -124,11 +122,19 @@ def run_super_growth_funnel():
     for t, info in infos.items():
         if not info: continue
         
+        # 行業與規模過濾
         if info.get('totalRevenue', 0) < 1_000_000_000: continue
-        if any(ex.lower() in str(info.get('sector', '')).lower() for ex in EXCLUDED_INDUSTRIES): continue
+        industry_str = str(info.get('industry', ''))
+        sector_str = str(info.get('sector', ''))
+        
+        if any(ex.lower() in industry_str.lower() or ex.lower() in sector_str.lower() for ex in EXCLUDED_INDUSTRIES): 
+            continue
         if info.get('marketCap', 0) == 0: continue
         
+        # 🛑 核心優化 3：硬性要求營收必須正向增長 (真正的成長股)
         rev_growth = info.get('revenueGrowth', 0) or 0
+        if rev_growth <= 0: continue
+        
         op_margin = info.get('operatingMargins', 0) or 0
         fcf = info.get('freeCashflow', 0) or 0
         rev = info.get('totalRevenue', 1)
@@ -140,20 +146,28 @@ def run_super_growth_funnel():
         
         data = valid_technical_pool[t]
         data.update({
-            "Ticker": t, "Industry": str(info.get('industry', ''))[:15], 
+            "Ticker": t, "Industry": industry_str[:15], 
             "Market Cap": info.get('marketCap') / 1_000_000,
             "RS Rank": rs_ranks[t], "FG Score": fg_score
         })
         fundamental_candidates.append(data)
 
-    fundamental_candidates.sort(key=lambda x: x['FG Score'], reverse=True)
-    top_tier_pool = fundamental_candidates[:30]
+    # 🛑 核心優化 4：先保證動量強勢 (RS Rank > 75)，再挑市值最小的！
+    # 這樣選出來的才是「活潑且強勢」的超級成長股，而不是跌在地板上的冷門小盤股
+    strong_momentum_pool = [x for x in fundamental_candidates if x['RS Rank'] >= 75]
+    
+    # 防禦機制：如果大盤極度糟糕，滿足 RS > 75 的不到 10 隻，則降級選取排名前 15 隻強勢股
+    if len(strong_momentum_pool) < 10:
+        strong_momentum_pool = sorted(fundamental_candidates, key=lambda x: x['RS Rank'], reverse=True)[:15]
 
-    top_10 = sorted(top_tier_pool, key=lambda x: x['Market Cap'])[:10]
+    # 在「確認是強勢股」的池子裡，挑選市值最小的 10 隻
+    top_10 = sorted(strong_momentum_pool, key=lambda x: x['Market Cap'])[:10]
+    
+    # 最終輸出時按 RS Rank 降序，方便一眼看出誰最強
     top_10.sort(key=lambda x: x['RS Rank'], reverse=True)
 
     # ==========================================
-    # 3. 輸出至 Google Sheets (嚴格對齊矩陣)
+    # 3. 輸出至 Google Sheets
     # ==========================================
     col_len = 11
     row1 =["SuperGrowth Portfolio", f"更新: {datetime.datetime.now().strftime('%Y-%m-%d')}", "REL=相對SPY報酬"] + [""] * (col_len - 3)
