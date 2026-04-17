@@ -17,12 +17,6 @@ warnings.filterwarnings('ignore')
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycby1pIM7iO43lcLQpOmi5LCJIn3VN9a0Ilf9amoy1EtQV_GBXJkk_A4PpsrJxKzH7i51/exec"
 TARGET_SHEET = "super"
 
-# 建立全局 Session 偽裝，解決 Invalid Crumb 報錯
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
-
 # 偽裝請求抓取維基百科標普500與納指100，解決 403 Forbidden
 try:
     print("📡 正在獲取全市場 S&P 500 與 Nasdaq 100 股票池...")
@@ -63,16 +57,17 @@ def run_super_growth_funnel():
     print("\n" + "="*50)
     print("🚀[超級成長股 - 漏斗過濾版] 啟動掃描...")
     
-    # 獲取大盤基準
+    # 獲取大盤基準 (移除了 session 參數)
     try:
-        spy_close = yf.download("SPY", period="1y", interval="1d", session=session, progress=False)['Close']
+        spy_close = yf.download("SPY", period="1y", interval="1d", progress=False)['Close']
         if isinstance(spy_close, pd.DataFrame): spy_close = spy_close['SPY']
         spy_ret = {5: get_return(spy_close, 5), 20: get_return(spy_close, 20), 60: get_return(spy_close, 60)}
     except:
-        spy_ret = {5: 0, 20: 0, 60: 0} # 容錯處理
+        spy_ret = {5: 0, 20: 0, 60: 0} 
 
     print(f"📡 批量下載股票技術特徵 (這可能需要幾十秒)...")
-    hist_data = yf.download(UNIVERSE, period="1y", interval="1d", session=session, progress=False, threads=True)
+    # 移除了 session 參數
+    hist_data = yf.download(UNIVERSE, period="1y", interval="1d", progress=False, threads=True)
     
     close_df = hist_data['Close']
     vol_df = hist_data['Volume']
@@ -116,7 +111,7 @@ def run_super_growth_funnel():
     def fetch_info(t):
         try: 
             ticker = yf.Ticker(t)
-            ticker.session = session
+            # 移除了 ticker.session 賦值，讓 yfinance 自己處理
             return t, ticker.info
         except: return t, {}
         
@@ -139,7 +134,6 @@ def run_super_growth_funnel():
         rev = info.get('totalRevenue', 1)
         fcf_margin = fcf / rev if rev > 0 else 0
         
-        # 放寬了強勢股的淨利潤要求，避免錯殺高增長公司
         if op_margin <= -0.1: continue 
             
         fg_score = (rev_growth * 100) + (op_margin * 100) + (fcf_margin * 100)
@@ -155,14 +149,12 @@ def run_super_growth_funnel():
     fundamental_candidates.sort(key=lambda x: x['FG Score'], reverse=True)
     top_tier_pool = fundamental_candidates[:30]
 
-    # 從 Top 30 裡挑選市值最小的 10 隻
     top_10 = sorted(top_tier_pool, key=lambda x: x['Market Cap'])[:10]
     top_10.sort(key=lambda x: x['RS Rank'], reverse=True)
 
     # ==========================================
     # 3. 輸出至 Google Sheets (嚴格對齊矩陣)
     # ==========================================
-    # ⚠️ 這裡非常關鍵：確保上下行的陣列長度嚴格等於 11，防止 Google Sheets 報錯！
     col_len = 11
     row1 =["SuperGrowth Portfolio", f"更新: {datetime.datetime.now().strftime('%Y-%m-%d')}", "REL=相對SPY報酬"] + [""] * (col_len - 3)
     row2 =["Ticker", "Industry", "Price", "Market Cap(M)", "RS Rank", "5D%", "20D%", "60D%", "REL 5", "REL 20", "REL 60"]
