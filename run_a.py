@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
-# 【重要】请替换为你刚才新部署得到的 URL
+# 已更新为你提供的最新 URL
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyYfpfYNyRhXcyZrfIHEyErECMM82xkCKfZm71RUZ1YL6Xjr5Kca3ruoVJzxcNAwH9q/exec"
 
 CORE_TICKERS_RAW = [
@@ -28,9 +28,9 @@ def safe_convert(obj):
     return str(obj)
 
 # ==========================================
-# 2. V60.15 狙击引擎 (逻辑继承自 V14)
+# 2. V60.16 分析引擎 (极致预判版)
 # ==========================================
-def analyze_stock_v15(df_s, bench_series, t_code):
+def analyze_stock_v16(df_s, bench_series, t_code):
     try:
         c = df_s['Close'].ffill().dropna()
         if isinstance(c, pd.DataFrame): c = c.iloc[:, 0]
@@ -41,50 +41,58 @@ def analyze_stock_v15(df_s, bench_series, t_code):
         if len(c) < 60: return None
         curr, prev = float(c.iloc[-1]), float(c.iloc[-2])
         
-        # 1. RS 评分
+        # 1. RS 评分与趋势
         def get_safe_ret(ser, d):
             return (ser.iloc[-1] / ser.iloc[-min(len(ser), d)]) - 1
-        rs = round((get_safe_ret(c, 120)*0.4 + get_safe_ret(c, 20)*0.6 - 
+        rs = round((get_safe_ret(c, 120)*0.3 + get_safe_ret(c, 20)*0.7 - 
                     get_safe_ret(bench_series, 20)*1.0 + 1) * 85, 2)
         
-        # 2. 均线
+        # 2. 均线系统 (双生命线)
+        ma10 = c.rolling(10).mean().iloc[-1]
         ma20 = c.rolling(20).mean().iloc[-1]
         ma50 = c.rolling(50).mean().iloc[-1]
         
-        # 3. 核心抓手：静默收缩
-        v_r = float(v.iloc[-1] / v.iloc[-21:-1].mean())
-        amp = (float(h.iloc[-1]) - float(l.iloc[-1])) / prev * 100 
-        dist_h = ((curr / h.tail(10).max()) - 1) * 100 
+        # 3. 统计指标 (起跳前夜的生理指标)
+        v_r = float(v.iloc[-1] / v.iloc[-21:-1].mean()) # 量比
+        amp = (float(h.iloc[-1]) - float(l.iloc[-1])) / prev * 100 # 今日振幅
+        dist_h = ((curr / h.tail(10).max()) - 1) * 100 # 距离高点
         
-        level, act, win, guide = "⚪ 观察", "潜伏观察", "45%", "无明显信号"
+        level, act, win, guide = "⚪ 观察", "潜伏观察", "45%", "暂无起跳前兆"
         
-        # 判定：谁是起跳黑马
-        is_squeeze = amp < 2.5 and v_r < 0.65
-        is_strong_trend = curr > ma20 and ma20 > ma50
+        # 核心判定：寻找那根压到底的弹簧
+        is_high_rs = rs > 92
+        is_tight_vcp = amp <= 2.3 and v_r < 0.65 # 振幅压得够不够死
+        is_bull_trend = curr > ma10 and ma10 > ma20 and ma20 > ma50
         
-        if rs > 90 and is_strong_trend:
-            if is_squeeze and -3 < dist_h <= 0.1:
-                level, act, win, guide = "🚀 进攻", "静默狙击", "88%", "极窄波动+地量,随时爆发"
-            elif ma20 * 0.985 <= curr <= ma20 * 1.015:
-                level, act, win, guide = "🎯 进攻", "生命线支撑", "82%", "20日线精准支撑"
+        # --- A类：起跳前夜 (神谕信号) ---
+        if is_high_rs and is_bull_trend:
+            if is_tight_vcp and -2.5 < dist_h <= 0.2:
+                level, act, win, guide = "🚀 进攻", "静默起跳前夜", "90%", "极窄波动+冰点地量，爆发在即"
+            elif ma10 * 0.99 <= curr <= ma10 * 1.01 or ma20 * 0.99 <= curr <= ma20 * 1.01:
+                level, act, win, guide = "🎯 进攻", "双线共振支撑", "85%", "强势股回踩关键均线，博弈反抽"
             else:
-                level, act, win, guide = "🟡 准备", "强势整理", "65%", "趋势向上,等横盘"
-        elif rs > 75 and ma50 * 0.98 <= curr <= ma50 * 1.02 and v_r < 0.6:
-            level, act, win, guide = "🐍 潜伏", "毒蛇出洞", "75%", "50日线地量"
+                level, act, win, guide = "🟡 准备", "强势蓄力中", "65%", "RS评分极高，等窄幅横盘买点"
+        
+        # --- B类：深挖坑毒蛇 (左侧机会) ---
+        elif rs > 75:
+            if ma50 * 0.98 <= curr <= ma50 * 1.02 and v_r < 0.6:
+                level, act, win, guide = "🐍 潜伏", "毒蛇出洞", "75%", "50日生命线托底地量，捡钱位"
+            elif dist_h < -8:
+                level, act, win, guide = "准备", "调整到位", "55%", "超跌回补机会，等缩量"
 
         return [t_code, act, level, f"{dist_h:.2f}%", f"{v_r:.2f}x", f"{amp:.2f}%", 
-                "多头排列" if (ma20 > ma50) else "震荡", f"{win}", guide, f"{rs:.2f}"]
+                "多头主升" if is_bull_trend else "震荡/分化", f"{win}", guide, f"{rs:.2f}"]
     except: return None
 
 # ==========================================
-# 3. 主程序
+# 3. 主流程
 # ==========================================
 def main():
     tz = timezone(timedelta(hours=8))
     dt_str = datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    trace_id = f"V15-{uuid.uuid4().hex[:4].upper()}"
+    trace_id = f"VP-V16-{uuid.uuid4().hex[:4].upper()}"
     
-    print(f"🚀 V60.15 运行 | 目标: A-Share screener | ID: {trace_id}")
+    print(f"🚀 V60.16 神谕版运行 | 目标: A-Share screener | ID: {trace_id}")
     tickers = [format_ticker(t) for t in CORE_TICKERS_RAW]
     
     try:
@@ -92,20 +100,21 @@ def main():
         idx = yf.download("000300.SS", period="1y", progress=False, auto_adjust=True)
         bench = idx['Close'].ffill().iloc[:,0] if isinstance(idx['Close'], pd.DataFrame) else idx['Close'].ffill()
     except Exception as e:
-        print(f"❌ 失败: {e}"); return
+        print(f"❌ 下载失败: {e}"); return
 
     results = []
     for t_full in tickers:
         t_raw = t_full.split('.')[0]
         try:
-            res = analyze_stock_v15(data[t_full], bench, t_raw)
+            res = analyze_stock_v16(data[t_full], bench, t_raw)
             if res: results.append(res); print(f"✅ {t_raw}")
         except: continue
 
+    # 排序逻辑：胜率 > RS评分
     results.sort(key=lambda x: (float(x[7].replace('%','')), float(x[9])), reverse=True)
     
     header = [
-        ["🚀 V60.15 黎明狙击", "ID:", trace_id, "策略:", "定向同步 A-Share screener", "更新:", dt_str, "", "", ""], 
+        ["🚀 V60.16 预判大师", "ID:", trace_id, "模式:", "静默狙击+起跳前夜", "更新:", dt_str, "", "", ""], 
         ["代码", "交易指令", "信号等级", "距高点", "量比", "振幅", "趋势背景", "胜率预测", "实战指引", "RS分"]
     ]
     
