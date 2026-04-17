@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 # 1. 配置中心
 # ==========================================
 # 【重要】请替换为你刚才新部署得到的 URL
-WEBAPP_URL = "这里粘贴你最新部署的URL"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyYfpfYNyRhXcyZrfIHEyErECMM82xkCKfZm71RUZ1YL6Xjr5Kca3ruoVJzxcNAwH9q/exec"
 
 CORE_TICKERS_RAW = [
     "300502", "300308", "300394", "688313", "002428", "003031", "600519", "300750",
