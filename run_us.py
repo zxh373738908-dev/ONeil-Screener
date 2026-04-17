@@ -32,7 +32,7 @@ def robust_json_clean(val):
         if val is None or pd.isna(val): return ""
         if isinstance(val, (float, int, np.floating, np.integer)):
             if not math.isfinite(val): return 0.0
-            return float(round(val, 3)) if isinstance(val, float) else int(val)
+            return float(round(val, 2)) if isinstance(val, float) else int(val)
         return str(val)
     except: return str(val)
 
@@ -83,70 +83,84 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
     except: return None
 
 # ==========================================
-# 3. 视觉与输出引擎 (修复 APIError 版)
+# 3. 终极视觉输出引擎 (V8.5)
 # ==========================================
 def final_output(res, vix, breadth, weather, status_msg="审计完成"):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-        sh = gspread.authorize(creds).open_by_key(SHEET_ID).worksheet("Screener")
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 1. 彻底清空数据和格式 (不使用 AUTOMATIC 枚举，避免报错)
         sh.clear()
-        sh.format("A1:Z100", {
+        
+        # 1. 设置基础格式 (居中对齐 + 字体)
+        sh.format("A1:J100", {
             "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "bold": False}
+            "textFormat": {"foregroundColor": {"red": 0.1, "green": 0.1, "blue": 0.1}, "fontSize": 10},
+            "horizontalAlignment": "CENTER"
         })
         
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         
         header = [
-            ["🏰 [V750 巅峰 8.2 - 绿涨红警修复版]", "", "Update(北京):", bj_time],
+            ["🏰 [V750 巅峰 8.5 - 终极看板版]", "", "Update(北京):", bj_time],
             ["当前天气:", weather, "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", round(vix, 2)],
-            ["运行状态:", status_msg, "策略说明:", "🟩 动量领涨 / 🟨 极速反包 / 🟥 核爆预警"]
+            ["运行状态:", status_msg, "策略说明:", "🟩 强势领涨 / 🟨 极速反包 / 🟥 逼空预警"]
         ]
         sh.update(values=header, range_name="A1")
+        sh.format("A1:A3", {"horizontalAlignment": "LEFT", "textFormat": {"bold": True}})
         
         if res:
             df = pd.DataFrame(res)
             cols = ["Ticker", "Action", "Score", "Price", "建议买入(股)", "止损位", "EMA10乖离", "成交额(M)", "Short_SqZ", "期权异动"]
             df = df[cols]
-            # 写入表头和数据
             sh.update(values=[df.columns.tolist()] + [[robust_json_clean(c) for c in r] for r in df.values.tolist()], range_name="A5")
             
-            # 设置深色表头
+            # 2. 表头黑色科技感格式
             sh.format("A5:J5", {
-                "backgroundColor": {"red": 0.15, "green": 0.15, "blue": 0.15}, 
+                "backgroundColor": {"red": 0.1, "green": 0.1, "blue": 0.1}, 
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
             })
             
-            # 2. 批量涂色：美股标准绿涨红跌
+            # 3. 批量涂色
             formats = []
             for i, r in enumerate(res):
                 row_idx = i + 6
                 action = r.get("Action", "")
                 sqz = str(r.get("Short_SqZ", ""))
                 
-                # 绿色：动量爆发/双重共振
+                # 绿色行
                 if "🚀" in action or "💎" in action:
-                    formats.append({"range": f"A{row_idx}:J{row_idx}", "format": {"backgroundColor": {"red": 0.88, "green": 0.96, "blue": 0.88}}})
-                # 黄色：极速反包
+                    formats.append({"range": f"A{row_idx}:J{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 1.0, "blue": 0.9}}})
+                # 黄色行
                 elif "⚔️" in action:
                     formats.append({"range": f"A{row_idx}:J{row_idx}", "format": {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 0.9}}})
-                
-                # 红色：核爆警示 (最高优先级)
+                # 红色预警行
                 if "核爆区" in sqz:
                     formats.append({
                         "range": f"A{row_idx}:J{row_idx}", 
                         "format": {
-                            "backgroundColor": {"red": 1.0, "green": 0.88, "blue": 0.88},
+                            "backgroundColor": {"red": 1.0, "green": 0.9, "blue": 0.9},
                             "textFormat": {"foregroundColor": {"red": 0.8, "green": 0, "blue": 0}, "bold": True}
                         }
                     })
+            if formats: sh.batch_format(formats)
+
+            # 4. 自动调整列宽 (gspread 基础命令)
+            # 这里的数字是像素：Ticker 60, Action 120, Score 60, Price 80, 买入 80, 止损 80, 乖离 80, 成交 80, Short 100, 期权 80
+            widths = [60, 120, 60, 80, 100, 80, 100, 100, 120, 80]
+            requests = []
+            for i, width in enumerate(widths):
+                requests.append({
+                    "updateDimensionProperties": {
+                        "range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+                        "properties": {"pixelSize": width},
+                        "fields": "pixelSize"
+                    }
+                })
+            client.open_by_key(SHEET_ID).batch_update({"requests": requests})
             
-            if formats:
-                sh.batch_format(formats)
-            
-        print(f"✅ 审计报告已下达至 Sheets!")
+        print(f"✅ 终极看板刷新成功! 时间: {bj_time}")
     except Exception as e:
         print(f"❌ 报告生成失败: {e}")
         traceback.print_exc()
@@ -161,7 +175,6 @@ def run_v750_apex_sentinel():
         vix = m["^VIX"].iloc[-1]
         spy_h = m["SPY"].iloc[-1] > m["SPY"].tail(50).mean()
         
-        print("🔍 正在拉取标普名单...")
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
             tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
@@ -169,7 +182,6 @@ def run_v750_apex_sentinel():
             tickers = CORE_LEADERS
         
         tickers = list(set(tickers + CORE_LEADERS))
-        print(f"📥 正在下载 {len(tickers)} 只股票的历史数据...")
         data = yf.download(tickers + ["SPY"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
 
@@ -185,19 +197,16 @@ def run_v750_apex_sentinel():
                     "Ticker": t, "Action": v['action'], "Score": round(v['score'], 2), 
                     "Price": f"${v['price']:.2f}", "建议买入(股)": v['shares'], 
                     "止损位": f"${v['stop']:.2f}", "EMA10乖离": f"{v['dist_ema10']*100:.1f}%", 
-                    "成交额(M)": f"${v['dollar_vol']/1_000_000:.1f}M"
+                    "成交额(M)": f"'{v['dollar_vol']/1_000_000:.1f}M" # 强制加单引号防止自动格式化
                 })
         
-        print(f"🔎 诊断: 成功下载 {len(tickers)} 只，筛选出 {len(cands)} 只符合形态。")
-
         if not cands:
             final_output([], vix, 50, "☁️", status_msg="审计完成：未发现符合形态个股")
             return
 
-        final_seeds = pd.DataFrame(cands).sort_values("Score", ascending=False).head(10)
+        final_seeds = pd.DataFrame(cands).sort_values("Score", ascending=False).head(15)
         results = []
         for _, row in final_seeds.iterrows():
-            print(f"💎 正在穿透审计: {row['Ticker']}...")
             try:
                 inf = yf.Ticker(row['Ticker']).info
                 sp = inf.get('shortPercentOfFloat', 0) or 0
