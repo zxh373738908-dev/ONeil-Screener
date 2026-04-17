@@ -162,7 +162,7 @@ def run_v750_apex_sentinel():
     except:
         return
 
-    valid_ts =[t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else["SPY"]
+    valid_ts = [t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else ["SPY"]
     breadth_c, valid_count = 0, 0
     for t in valid_ts[:250]:
         try:
@@ -173,7 +173,7 @@ def run_v750_apex_sentinel():
         except: continue
     breadth = (breadth_c / valid_count * 100) if valid_count > 0 else 50.0
 
-    print(f"🚀[2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
+    print(f"🚀 [2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
     candidates =[]
     for t in valid_ts:
         try:
