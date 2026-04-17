@@ -43,30 +43,34 @@ def safe_div(n, d):
     except: return 0.0
 
 # ==========================================
-# 2. V750 巅峰引擎 6.0 (逼空绞肉机)
+# 2. V750 巅峰引擎 7.0 (逼空绞肉机 + VWAP成本线)
 # ==========================================
 def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
     try:
         close, high, low, vol = df['Close'], df['High'], df['Low'], df['Volume']
         
-        # 🟢 机构级流动性与价格护城河
         current_price = close.iloc[-1]
         dollar_vol = (vol.tail(5) * close.tail(5)).mean()
         
         if current_price < 10.0 or dollar_vol < 10_000_000:
-            return None # 剔除毛票和弱流动性股票
+            return None
 
         ma20 = close.rolling(20).mean()
         ma50 = close.rolling(50).mean()
         ma150 = close.rolling(150).mean()
         ma200 = close.rolling(200).mean()
-        ema10 = close.ewm(span=10, adjust=False).mean() # 🔥 引入极速线 EMA10
+        ema10 = close.ewm(span=10, adjust=False).mean() 
         vol_ma20 = vol.rolling(20).mean()
+        
+        # 🚀 新增：计算近 3 日短线资金真实成交重心 (Anchored VWAP 近似)
+        typical_price = (high.tail(3) + low.tail(3) + close.tail(3)) / 3
+        volume_tail = vol.tail(3)
+        short_term_vwap = safe_div((typical_price * volume_tail).sum(), volume_tail.sum())
+        if short_term_vwap == 0: short_term_vwap = current_price
         
         is_stage_2 = bool(current_price > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1] and ma200.iloc[-1] > ma200.iloc[-20])
         
         rs_line = (close / spy_df).ffill()
-        
         rs_3m = safe_div(current_price, close.iloc[-63])
         rs_score = (rs_3m * 2) + safe_div(current_price, close.iloc[-126]) + safe_div(current_price, close.iloc[-252])
         rs_nh = bool(rs_line.iloc[-1] >= rs_line.tail(252).max())
@@ -76,15 +80,12 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
         ud_ratio = safe_div(up_vol, dn_vol)
 
         tightness = safe_div(close.tail(10).std(), close.tail(10).mean()) * 100
-        
         daily_range = high.iloc[-1] - low.iloc[-1]
         close_quality = safe_div(current_price - low.iloc[-1], daily_range)
         is_good_close = bool(close_quality > 0.55 or daily_range == 0)
 
-        # 🔪 砍掉旧版 50MA 距离逻辑，新增 Dist_EMA10%
         dist_ema10_pct = safe_div(current_price - ema10.iloc[-1], ema10.iloc[-1])
 
-        # 🐣 潜龙早鸣：不追高 + EMA10极速线确认
         is_early_bird = bool(
             spy_is_healthy and 
             is_good_close and  
@@ -93,21 +94,21 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
             ma20.iloc[-1] > ma50.iloc[-1] * 0.98 and 
             vol.iloc[-1] > vol_ma20.iloc[-1] * 1.5 and 
             rs_3m > 1.05 and 
-            ud_ratio > 1.05  # 🔥 放宽至 1.05 匹配游资进攻姿态
+            ud_ratio > 1.05  
         )
         
-        # ⚔️ 早盘诱空反包：下探跌破 EMA10 后，被强力拉回均线之上形成好收盘
+        # ⚔️ 升级版早盘诱空反包：必须强力收复近3日主力 VWAP 成本线
         is_morning_trap = bool(
             is_good_close and 
             low.iloc[-1] < ema10.iloc[-1] and 
             current_price > ema10.iloc[-1] and
+            current_price > short_term_vwap and  # 🔥 引入真实日内博弈护城河
             vol.iloc[-1] > vol_ma20.iloc[-1] * 0.8
         )
         
         action = "观察"
         rs_stealth = bool(rs_nh and current_price < close.tail(20).max() * 1.02)
         
-        # 🎯 新版进攻行动指令网络
         if is_morning_trap: action = "⚔️ 早盘诱空反包"
         elif is_early_bird and not is_stage_2: action = "🐣 潜龙早鸣(防追高)"
         elif rs_stealth and tightness < 1.5: action = "👁️ 奇点先行(RS Stealth)"
@@ -129,7 +130,7 @@ def calculate_v750_apex_engine(df, spy_df, spy_is_healthy):
     except: return None
 
 # ==========================================
-# 3. 自动化扫描引擎 (含空头数据探测)
+# 3. 自动化扫描引擎 (深度优化提速版)
 # ==========================================
 def run_v750_apex_sentinel():
     print(f"📡 [1/3] V750 巅峰指挥部：正在探测...")
@@ -143,7 +144,6 @@ def run_v750_apex_sentinel():
         spy_macro = macro["SPY"].dropna()
         spy_is_healthy = bool(spy_macro.iloc[-1] > spy_macro.tail(50).mean()) if len(spy_macro) > 50 else True
     except Exception as e:
-        print(f"⚠️ 宏观数据获取失败，使用默认值: {e}")
         vix = 20.0
         spy_is_healthy = True
 
@@ -160,23 +160,20 @@ def run_v750_apex_sentinel():
     try:
         spy_df = data["SPY"]["Close"].dropna()
     except:
-        print("❌ 无法获取 SPY 参照数据，程序终止。")
         return
 
-    valid_ts =[t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else ["SPY"]
-    breadth_c = 0
-    valid_count = 0
+    valid_ts =[t for t in tickers if t in data.columns.levels[0]] if isinstance(data.columns, pd.MultiIndex) else["SPY"]
+    breadth_c, valid_count = 0, 0
     for t in valid_ts[:250]:
         try:
             c = data[t]["Close"].dropna()
             if len(c) > 50:
                 valid_count += 1
-                if float(c.iloc[-1]) > float(c.tail(50).mean()):
-                    breadth_c += 1
+                if float(c.iloc[-1]) > float(c.tail(50).mean()): breadth_c += 1
         except: continue
     breadth = (breadth_c / valid_count * 100) if valid_count > 0 else 50.0
 
-    print(f"🚀 [2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
+    print(f"🚀[2/3] 执行审计 (SPY健康: {spy_is_healthy} / VIX: {vix:.2f} / 宽度: {breadth:.1f}%)...")
     candidates =[]
     for t in valid_ts:
         try:
@@ -185,10 +182,7 @@ def run_v750_apex_sentinel():
             
             v750 = calculate_v750_apex_engine(df, spy_df, spy_is_healthy)
             if not v750 or v750['action'] == "观察": continue
-            
             if vix > 29 and "🚀" in v750['action']: continue
-            
-            # 🔥 放行符合任意强烈形态的战将
             if not v750['is_stage_2'] and not v750['is_early_bird'] and not v750['is_morning_trap']: continue
 
             candidates.append({
@@ -197,23 +191,26 @@ def run_v750_apex_sentinel():
                 "Score": round(v750['score'], 2), 
                 "Sector": ticker_sector_map.get(t, "Other"), 
                 "Price": f"${v750['price']:.2f}",               
-                "建议买入": v750['shares'], 
+                "建议买入": f"{v750['shares']} 股",  
                 "止损位": f"${v750['stop']:.2f}",                 
-                "U/D比": round(v750['ud'], 2), 
-                "紧致度": v750['tight'], 
+                "U/D比": f"{v750['ud']:.2f}",       
+                "紧致度": f"{v750['tight']:.2f}%",    
                 "ADR%": v750['adr'],
                 "RS新高": "🌟" if v750['rs_nh'] else "-", 
                 "Stock_Dollar_Vol": v750['dollar_vol'],
-                "Dist_EMA10%": f"{v750['dist_ema10_pct']*100:.2f}%"  # 🔥 新增极速线乖离
+                "Dist_EMA10%": f"{v750['dist_ema10_pct']*100:.2f}%"
             })
         except: continue
 
     if not candidates: final_output([], vix, breadth, "平稳"); return
     
     cand_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
-    final_seeds = cand_df.groupby("Sector").head(2).sort_values(by="Score", ascending=False).head(10)
+    
+    # 🚀 突破限制：为了照顾 Polygon 免费版 API (每分钟5次)，只提取全市场战力评分最强的前 5 只怪物进行期权审计！
+    # 这样运行总时长会被锁定在 1 分钟以内，防止超时崩溃
+    final_seeds = cand_df.head(5) 
 
-    print(f"🔥 [3/3] 正在审计期权异动及【空头燃料】...")
+    print(f"🔥 [3/3] 正在审计期权异动及【空头燃料】(锁定最强 TOP 5)...")
     results =[]
     weather = "☀️ 极佳" if (breadth > 60 and vix < 21) else "⛈️ 风险" if (breadth < 40 or vix > 28) else "☁️ 震荡"
 
@@ -222,24 +219,27 @@ def run_v750_apex_sentinel():
         uoa_status, call_pct, opt_vol = get_apex_uoa_intel(ticker)
         os_ratio = safe_div(opt_vol, row['Stock_Dollar_Vol'])
         
-        # 🛡️ 分步抓取，防止单一项报错崩溃
-        t_info = yf.Ticker(ticker)
+        e_str = "未知"
         try:
+            t_info = yf.Ticker(ticker)
             cal = t_info.calendar
-            e_str = cal.iloc[0, 0].date().strftime('%m-%d') if (cal is not None and not cal.empty) else "未知"
-        except: 
-            e_str = "未知"
+            if isinstance(cal, dict) and 'Earnings Date' in cal:
+                dates = cal['Earnings Date']
+                if dates and len(dates) > 0: e_str = dates[0].strftime('%m-%d')
+            elif hasattr(cal, 'iloc') and not cal.empty:
+                e_str = cal.iloc[0, 0].date().strftime('%m-%d') if hasattr(cal.iloc[0, 0], 'date') else cal.iloc[0, 0].strftime('%m-%d')
+        except: pass
             
+        # 🚀 稳健升级：完美防御 YFinance 爬虫被封锁时的 NoneType 报错
         try:
             info = t_info.info
-            short_pct = info.get('shortPercentOfFloat') or 0
-            short_ratio = info.get('shortRatio') or 0
-        except:
-            short_pct, short_ratio = 0, 0
+            short_pct = float(info.get('shortPercentOfFloat') or 0.0)
+            short_ratio = float(info.get('shortRatio') or 0.0)
+        except Exception as e: 
+            short_pct, short_ratio = 0.0, 0.0
 
-        # 🔥 逼空预警判定核弹区
         is_sqz = (short_pct > 0.05) and (short_ratio > 3)
-        sqz_label = f"{short_pct*100:.2f}% ({round(short_ratio, 1)}D)"
+        sqz_label = f"{short_pct*100:.2f}%({short_ratio:.1f}D)"
         if is_sqz: sqz_label += " 【🔥空头核爆区】"
 
         rating = "💎SSS" if (call_pct > 64 and "🔥" in uoa_status and "👁️" in row['Action']) else \
@@ -248,14 +248,14 @@ def run_v750_apex_sentinel():
         row_dict = row.to_dict()
         row_dict.update({
             "财报日": e_str, 
-            "期权看涨%": call_pct, 
+            "期权看涨%": f"{call_pct:.1f}%", 
             "期权异动": uoa_status, 
             "期现比": f"{round(os_ratio*100, 1)}%", 
             "评级": rating,
-            "Short_SqZ": sqz_label  # 🔥 载入空头燃料数据
+            "Short_SqZ": sqz_label
         })
         results.append(row_dict)
-        time.sleep(12.5) 
+        time.sleep(12.5) # 必须保留，这是向 Polygon 免费白嫖数据的过路费 
 
     final_output(results, vix, breadth, weather)
 
@@ -282,15 +282,18 @@ def final_output(res, vix, breadth, weather):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 清除旧数据，并暴力重置背景色为纯白色 (防止上次运行遗留红框)
         sh.clear()
-        sh.format("A1:Z100", {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}, "bold": False}})
+        sh.format("A1:Z100", {
+            "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, 
+            "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}, "bold": False},
+            "numberFormat": {"type": "AUTOMATIC"}  
+        })
         
         beijing_tz = datetime.timezone(datetime.timedelta(hours=8))
         bj_time_str = datetime.datetime.now(beijing_tz).strftime('%Y-%m-%d %H:%M')
 
         header = [
-            ["🏰[V750 哨兵巅峰 6.0 - 逼空绞肉机]", "", "Update(北京时间):", bj_time_str],["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],["大师指令:", "已开启 6.0 逼空引擎：彻底抛弃 50MA 飞刀，只在 EMA10 极速线狙击高换手逼空猎物！Short>5% 且 DtC>3 将触发核爆预警。"],
+            ["🏰[V750 哨兵巅峰 7.0 - 终极逼空绞肉机]", "", "Update(北京时间):", bj_time_str],["当前天气:", weather, "宽度(50MA):", f"{round(breadth, 1)}%", "VIX指数:", round(vix, 2)],["大师指令:", "已开启 7.0 极速防崩引擎：抓取 TOP5 猎物。融合 VWAP 主力成本线辅助反包判定。API并发批量涂色生效中。"],
             ["", "", "", ""]
         ]
         sh.update(values=header, range_name="A1")
@@ -298,31 +301,13 @@ def final_output(res, vix, breadth, weather):
         
         if res:
             df = pd.DataFrame(res)
-            # 🔥 新版输出列，加入 Short_SqZ 和 Dist_EMA10%
             cols =["Ticker", "评级", "Action", "Short_SqZ", "Dist_EMA10%", "期权异动", "Price", "建议买入", "止损位", "U/D比", "紧致度", "期权看涨%", "期现比", "财报日", "Sector"]
             df = df[[c for c in cols if c in df.columns]]
             sh.update(values=[df.columns.tolist()] + [[robust_json_clean(c) for c in r] for r in df.values.tolist()], range_name="A5")
             
-            # 表头底色
             sh.format("A5:O5", {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "textFormat": {"bold": True}})
             
-            # 🚨 动态读取哪行带有空头核爆区标签，并将全行喷刷为血红色
+            # 🚀 降维打击：Google Sheets API 批量涂色，1次请求搞定，彻底粉碎 429 崩溃限制
             red_rows =[i + 6 for i, r in enumerate(res) if "【🔥空头核爆区】" in r.get("Short_SqZ", "")]
-            for row_idx in red_rows:
-                sh.format(f"A{row_idx}:O{row_idx}", {
-                    "backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}, # 淡血红底色
-                    "textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0.0, "blue": 0.0}} # 深红加粗字体
-                })
-        else:
-            sh.update_acell("A5", "📭 全域审计完成：当前环境未探测到符合形态的信号。")
-            
-        print(f"🎉 V750 巅峰 6.0 逼空绞肉机 指令下达！(北京时间: {bj_time_str})")
-    except Exception as e: 
-        print(f"❌ 写入失败: {e}")
-
-if __name__ == "__main__":
-    try:
-        run_v750_apex_sentinel()
-    except Exception as e:
-        print(f"🚨 程序遭遇致命错误崩溃: {e}")
-        traceback.print_exc()
+            if red_rows:
+                formats_payload =
