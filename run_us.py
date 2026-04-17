@@ -155,7 +155,7 @@ def run_v750_apex_sentinel():
     except:
         tickers = CORE_LEADERS; ticker_sector_map = {t: "Leaders" for t in tickers}
 
-    data = yf.download(list(set(tickers + ["SPY"])), period="2y", group_by='ticker', threads=True, progress=False)
+    data = yf.download(list(set(tickers +["SPY"])), period="2y", group_by='ticker', threads=True, progress=False)
     
     try:
         spy_df = data["SPY"]["Close"].dropna()
@@ -207,7 +207,6 @@ def run_v750_apex_sentinel():
     cand_df = pd.DataFrame(candidates).sort_values(by="Score", ascending=False)
     
     # 🚀 突破限制：为了照顾 Polygon 免费版 API (每分钟5次)，只提取全市场战力评分最强的前 5 只怪物进行期权审计！
-    # 这样运行总时长会被锁定在 1 分钟以内，防止超时崩溃
     final_seeds = cand_df.head(5) 
 
     print(f"🔥 [3/3] 正在审计期权异动及【空头燃料】(锁定最强 TOP 5)...")
