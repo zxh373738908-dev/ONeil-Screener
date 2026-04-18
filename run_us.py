@@ -56,7 +56,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V14.0)
+# 3. 终极视觉输出引擎 (V14.1)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -68,7 +68,7 @@ def final_output(results, vix, breadth):
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header =[
-            ["🏰[V14.0 绝杀 - 暴力共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 触发绝对红突"]
+            ["🏰[V14.1 绝杀 - 暴力共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 触发绝对红突"]
         ]
         sh.update(values=header, range_name="A1")
 
@@ -84,7 +84,7 @@ def final_output(results, vix, breadth):
                 if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
-                elif c == "Resonance": r.append(str(int(val))) # 绝对保证写进去的是整数的字符串
+                elif c == "Resonance": r.append(str(int(val))) # 绝对保证写进去的是整数
                 else: r.append(str(val))
             data_rows.append(r)
 
@@ -123,7 +123,7 @@ def final_output(results, vix, breadth):
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V14.0 刷新成功！请到 Google Sheets 查看。")
+        print(f"✅ V14.1 刷新成功！请到 Google Sheets 查看。")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -131,13 +131,17 @@ def final_output(results, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全域扫描 (V14.0)...")
+    print("📡 开启全域扫描 (V14.1)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
+        try:
+            tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
+        except:
+            tickers = CORE_LEADERS
+            
         tickers = list(set(tickers + CORE_LEADERS))
         
-        data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
+        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
@@ -160,14 +164,13 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # 1. 第一轮循环：只抓取基础数据
+        # 1. 抓取基础数据
         print("🏢 正在抓取公司行业基础数据...")
         final_list =[]
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
-                # 强制清除两边空格
                 ind = str(inf.get('industry', 'N/A')).strip()
                 mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
             except:
@@ -178,26 +181,22 @@ def run_sentinel():
             d['MktCap'] = mkt
             final_list.append(d)
         
-        # 2. 核心大绝招：提取所有行业，用原生 Python List 暴力计算出现次数
+        # 2. 暴力提取计算
         all_industries = [item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         
-        print("\n📊 === 终端数据验证 (如果这里是 4，表格里就一定是 4) ===")
-        
-        # 3. 第二轮循环：把计算出的共振数原封不动塞进字典
+        print("\n📊 === 终端数据验证 (如果这里>1，表格里就一定>1) ===")
         for item in final_list:
             current_industry = item['Industry']
             if current_industry == "N/A":
                 item['Resonance'] = 1
             else:
-                # 暴力硬数：这个名字在刚才抓到的列表里出现了几次？
                 actual_count = all_industries.count(current_industry)
                 item['Resonance'] = actual_count
                 
             print(f"{item['Ticker']:<5} | {item['Industry']:<30} | Resonance: {item['Resonance']}")
-            
-        print("========================================================\n")
+        print("======================================================\n")
         
-        # 4. 把含有正确 Resonance 的 final_list 传给输出函数
+        # 3. 输出
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
