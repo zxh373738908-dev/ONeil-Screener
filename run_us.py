@@ -19,7 +19,7 @@ creds_file = "credentials.json"
 CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
 # ==========================================
-# 🛡️ 核心 V750 巅峰引擎 (V10.5)
+# 🛡️ 核心引擎 (V11.0)
 # ==========================================
 def get_metrics(df, spy_df):
     try:
@@ -34,7 +34,6 @@ def get_metrics(df, spy_df):
         
         # VCP 紧缩特征
         is_vcp = bool(adr_20 < adr_60 * 0.8)
-        # RS Score (加权强度)
         rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-252]))
         
         action = "观察"
@@ -59,9 +58,9 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出 (V10.5 阶梯预警版)
+# 3. 终极输出 (V11.0)
 # ==========================================
-def final_output(results, vix, breadth):
+def final_output(df_final, vix, breadth):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
@@ -71,28 +70,28 @@ def final_output(results, vix, breadth):
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header = [
-            ["🏰[V10.5 巅峰 - 完美共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 为主线热点 (红色)"]
+            ["🏰[V11.0 绝杀 - 强效共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 为主线热点 (红色)"]
         ]
         sh.update(values=header, range_name="A1")
 
-        if not results: return
-        df = pd.DataFrame(results)
+        if df_final.empty: return
+        
         cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
         data_rows = [cols_order]
-        for _, row in df.iterrows():
+        for _, row in df_final.iterrows():
             r =[]
             for c in cols_order:
                 val = row.get(c, "")
                 if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in ["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
+                elif c == "Resonance": r.append(str(int(val))) # 强制整型转字符串
                 else: r.append(str(val))
             data_rows.append(r)
 
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # 视觉美化
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
         formats =[]
@@ -100,7 +99,6 @@ def final_output(results, vix, breadth):
             row_idx = i + 6
             action_text = data_rows[i+1][3]
             opt_text = data_rows[i+1][10]
-            # 安全提取 Resonance 数值
             try: res_val = int(data_rows[i+1][4])
             except: res_val = 1
             
@@ -110,16 +108,14 @@ def final_output(results, vix, breadth):
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1}}})
             
-            # 期权高亮
+            # 期权异动
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
                 
-            # --- 阶梯式共振 (Resonance) 高亮 ---
+            # 阶梯式共振高亮
             if res_val >= 3:
-                # ≥3 深红色加粗
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif res_val == 2:
-                # =2 紫色加粗
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.5, "green": 0, "blue": 0.5}}}})
         
         if formats: sh.batch_format(formats)
@@ -128,7 +124,7 @@ def final_output(results, vix, breadth):
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ 看板 10.5 刷新成功！共振识别已深度激活。")
+        print(f"✅ V11.0 刷新成功！共振识别已彻底修复。")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -136,7 +132,7 @@ def final_output(results, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全量扫描 (V10.5)...")
+    print("📡 开启全量扫描 (V11.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
@@ -163,47 +159,32 @@ def run_sentinel():
 
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
-        df_top = df_all.sort_values("Score", ascending=False).head(28)
+        df_top = df_all.sort_values("Score", ascending=False).head(28).copy()
         
-        # --- V10.5: 绝对严谨的行业标准化与统计 ---
-        temp_list =[]
-        print("🏢 正在抓取并清洗行业数据...")
+        print("🏢 正在抓取并清洗行业数据 (使用底层 Pandas 聚类)...")
         
-        for _, row in df_top.iterrows():
+        # 1. 初始化空列
+        df_top['Industry'] = "N/A"
+        df_top['MktCap'] = "0"
+        
+        # 2. 逐一获取信息
+        for idx, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
-                # 强制去除两端空格，并转为首字母大写的标准格式
                 raw_ind = str(inf.get('industry', 'N/A'))
-                ind = raw_ind.strip().title()
-                mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
-                time.sleep(0.05) # 防被墙
-            except:
-                ind, mkt = "N/A", "0"
-            
-            d = row.to_dict()
-            d.update({"Industry": ind, "MktCap": mkt})
-            temp_list.append(d)
-        
-        # 原生 Python 字典统计，绝不漏判
-        ind_counts = {}
-        for item in temp_list:
-            clean_ind = item['Industry']
-            if clean_ind != "N/A" and clean_ind != "N/a":
-                ind_counts[clean_ind] = ind_counts.get(clean_ind, 0) + 1
-        
-        print(f"📊 当前热点板块分布: {ind_counts}")
-        
-        # 写入 Resonance
-        for item in temp_list:
-            clean_ind = item['Industry']
-            item['Resonance'] = ind_counts.get(clean_ind, 1)
-        
-        final_output(temp_list, vix, (breadth_cnt/len(tickers)*100))
-        
-    except Exception as e:
-        print(f"🚨 崩溃: {e}")
-        traceback.print_exc()
+                # 核心杀招：去两端空格，全部首字母大写
+                ind_clean = raw_ind.strip().title()
+                df_top.at[idx, 'Industry'] = ind_clean
+                df_top.at[idx, 'MktCap'] = f"{inf.get('marketCap', 0)/1e6:,.0f}"
+                time.sleep(0.05)
+            except: pass
 
-if __name__ == "__main__":
-    run_sentinel()
+        # 3. PANDAS 原生统计，直接利用 transform('count') 绝对不可能错
+        df_top['Resonance'] = df_top.groupby('Industry')['Industry'].transform('count')
+        
+        # 屏蔽 N/A 的共振
+        df_top.loc[df_top['Industry'] == 'N/A', 'Resonance'] = 1
+        
+        # --- 终端打印预览：让你直接看到有没有成功！ ---
+        print("\n📊 === 当前提取的共振数据预览 ===")
