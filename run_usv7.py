@@ -4,13 +4,15 @@ import numpy as np
 import datetime
 import requests
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
 # 1. 配置中心
 # ==========================================
-WEBAPP_URL = "你的_GOOGLE_SCRIPT_URL" # 填入你的URL
+# 替换为你的 Google Script 部署 URL
+WEBAPP_URL = "https://script.google.com/macros/s/你的ID/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
@@ -18,142 +20,138 @@ CORE_TICKERS = [
     "ANET", "HOOD", "BITF", "LLY", "SOXL", "ARM", "MU", "TSM"
 ]
 
-def get_performance(series, days):
-    if len(series) < days + 1: return 0
+# ==========================================
+# 2. 核心逻辑插件
+# ==========================================
+def get_perf(series, days):
+    """计算指定周期的涨跌幅"""
+    if len(series) < days + 1: return 0.0
     return ((series.iloc[-1] / series.iloc[-(days+1)]) - 1) * 100
 
-# ==========================================
-# 2. 机构级逻辑引擎 V14.0
-# ==========================================
-def calculate_v14_logic(ticker_obj, df, spy_df):
+def process_ticker(symbol, spy_data):
+    """单标的深度分析引擎"""
     try:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.index = df.index.tz_localize(None)
-        df = df.dropna(subset=['Close'])
+        tk = yf.Ticker(symbol)
+        # 获取 1 年的历史数据 (足以覆盖 60D 和 200D 指标)
+        df = tk.history(period="1y")
+        if df.empty or len(df) < 65: return None
         
-        if len(df) < 65: return None
+        info = tk.info
+        close = df['Close']
+        high = df['High']
+        low = df['Low']
+        vol = df['Volume']
         
-        close = df['Close'].astype(float)
-        high = df['High'].astype(float)
-        low = df['Low'].astype(float)
-        volume = df['Volume'].astype(float)
-        curr_price = float(close.iloc[-1])
+        # --- 1. 技术指标计算 ---
+        curr_price = close.iloc[-1]
+        ma20 = close.rolling(20).mean()
+        ma50 = close.rolling(50).mean()
+        ema10 = close.ewm(span=10).mean()
         
-        # 1. 基础指标
-        ma20 = close.rolling(window=20).mean()
-        ma20_curr = ma20.iloc[-1]
-        ema10 = close.ewm(span=10, adjust=False).mean().iloc[-1]
-        sma50 = close.rolling(window=50).mean().iloc[-1]
-        
-        # 2. 乖离与量比
-        ext = ((curr_price - ma20_curr) / ma20_curr) * 100
-        vol_ratio = volume.iloc[-1] / volume.tail(20).mean()
+        # ADR (20日平均波幅)
         adr = ((high - low) / low).tail(20).mean() * 100
-
-        # 3. 涨幅计算
-        p5d = get_performance(close, 5)
-        p20d = get_performance(close, 20)
-        p60d = get_performance(close, 60)
+        # 量比 (今日成交量 / 20日均量)
+        vol_ratio = vol.iloc[-1] / vol.tail(20).mean()
+        # 乖离率 (偏离20日线幅度)
+        bias = ((curr_price - ma20.iloc[-1]) / ma20.iloc[-1]) * 100
         
-        # 4. 相对强度 R20/R60 (vs SPY)
-        spy_close = spy_df.reindex(close.index).ffill()
-        spy_20p = get_performance(spy_close, 20)
-        spy_60p = get_performance(spy_close, 60)
+        # --- 2. 相对强度与涨幅 ---
+        p5d = get_perf(close, 5)
+        p20d = get_perf(close, 20)
+        p60d = get_perf(close, 60)
+        
+        spy_20p = get_perf(spy_data, 20)
+        spy_60p = get_perf(spy_data, 60)
         r20 = p20d - spy_20p
         r60 = p60d - spy_60p
 
-        # 5. 趋势与评分
-        is_s2 = curr_price > ema10 > ma20_curr > sma50
+        # --- 3. V13 多因子评分系统 ---
         score = 0
+        # 趋势得分 (S2结构: 价格 > 10 > 20 > 50)
+        is_s2 = curr_price > ema10.iloc[-1] > ma20.iloc[-1] > ma50.iloc[-1]
         if is_s2: score += 3
-        if curr_price > close.iloc[-2]: score += 1
+        elif curr_price > ma20.iloc[-1]: score += 1
+        
+        # 强度得分
         if r20 > 0: score += 1
-        if vol_ratio > 1.2: score += 1
+        if r60 > 0: score += 1
+        # 量价确认
+        if vol_ratio > 1.2 and close.iloc[-1] > close.iloc[-2]: score += 1
         
-        # 6. 决策逻辑
+        # --- 4. 动作与共振判定 ---
         action = "WAIT"
-        if score >= 5: action = "STRONG BUY"
-        elif score >= 3: action = "HOLD/ADD"
-        elif curr_price < ma20_curr: action = "REDUCE"
+        if score >= 5: action = "🚀STRONG BUY"
+        elif score >= 3: action = "⚖️HOLD/ADD"
+        elif curr_price < ma20.iloc[-1]: action = "⚠️REDUCE"
         
-        # 7. 共振信号
         resonance = "No"
-        if (curr_price > ema10) and (vol_ratio > 1) and (r20 > 0):
+        if is_s2 and vol_ratio > 1.1 and r20 > 5:
             resonance = "🔥TRIPLE"
 
-        # 8. 获取Info (行业/市值)
-        info = ticker_obj.info
-        industry = info.get('industry', 'N/A')
-        mkt_cap = info.get('marketCap', 0) / 1e9 # 十亿美元
-        
-        return {
-            "Industry": industry,
-            "Score": score,
-            "Action": action,
-            "Resonance": resonance,
-            "ADR": round(adr, 2),
-            "Vol_Ratio": round(vol_ratio, 2),
-            "Bias": round(ext, 2),
-            "MktCap": f"{mkt_cap:.1f}B",
-            "RS_Rank": round(score * 16.6, 1),
-            "Options": "Yes" if info.get('optionsExpirationDates') else "No",
-            "Price": round(curr_price, 2),
-            "5D": f"{p5d:.2f}%",
-            "20D": f"{p20d:.2f}%",
-            "60D": f"{p60d:.2f}%",
-            "R20": round(r20, 2),
-            "R60": round(r60, 2)
-        }
+        # --- 5. 格式化输出 ---
+        return [
+            symbol,
+            info.get('industry', 'Index/ETF'),
+            score,
+            action,
+            resonance,
+            round(adr, 2),
+            round(vol_ratio, 2),
+            round(bias, 2),
+            f"{info.get('marketCap', 0)/1e9:.1f}B",
+            round(score * 16.6, 1), # RS_Rank 模拟
+            "Yes" if info.get('optionsExpirationDates') else "No",
+            round(curr_price, 2),
+            f"{p5d:.2f}%",
+            f"{p20d:.2f}%",
+            f"{p60d:.2f}%",
+            round(r20, 2),
+            round(r60, 2)
+        ]
     except Exception as e:
-        print(f"Error logic: {e}")
+        print(f"Error processing {symbol}: {e}")
         return None
 
 # ==========================================
-# 3. 主程序
+# 3. 执行主引擎
 # ==========================================
-def run_v14_engine():
-    print(f"🚀 V14.0 终端启动 | {datetime.datetime.now().strftime('%H:%M:%S')}")
+def run_v13_terminal():
+    print(f"🏰 V13 机构终端启动 | {datetime.datetime.now().strftime('%H:%M:%S')}")
     
-    spy_raw = yf.download("SPY", period="2y", progress=False)
-    spy_df = spy_raw['Close'] if not isinstance(spy_raw.columns, pd.MultiIndex) else spy_raw['Close'].iloc[:, 0]
-
+    # 获取大盘基准
+    spy = yf.download("SPY", period="1y", progress=False)['Close']
+    
+    # 多线程加速获取数据
     results = []
-    for t in CORE_TICKERS:
-        try:
-            tk = yf.Ticker(t)
-            df_t = tk.history(period="2y") # 使用history保证与info同步
-            res = calculate_v14_logic(tk, df_t, spy_df)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_ticker, t, spy) for t in CORE_TICKERS]
+        for f in futures:
+            res = f.result()
             if res:
-                print(f"✅ {t} 处理完毕")
-                results.append([
-                    t, res['Industry'], res['Score'], res['Action'], res['Resonance'],
-                    res['ADR'], res['Vol_Ratio'], res['Bias'], res['MktCap'],
-                    res['RS_Rank'], res['Options'], res['Price'], 
-                    res['5D'], res['20D'], res['60D'], res['R20'], res['R60']
-                ])
-        except Exception as e:
-            print(f"❌ {t} 失败: {e}")
+                print(f"✅ {res[0]} 分析完成")
+                results.append(res)
 
-    # 排序 (评分 > R20)
+    # 排序：评分(Score) > 相对强度(R20)
     results.sort(key=lambda x: (x[2], x[15]), reverse=True)
 
-    # 构造表头
-    header = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+    # 构造矩阵标题
+    header = [
+        "Ticker", "Industry", "Score", "Action", "Resonance", 
+        "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", 
+        "Options", "Price", "5D", "20D", "60D", "R20", "R60"
+    ]
     
-    # 输出或发送
-    final_output = [header] + results
-    
-    # 打印前3行看样板
-    for row in final_output[:5]:
-        print(row)
+    final_matrix = [header] + results
 
-    # 发送至 Google Sheets (可选)
+    # 发送云端或打印预览
     try:
-        requests.post(WEBAPP_URL, json=final_output, timeout=15)
-        print("🎉 云端同步完成")
+        response = requests.post(WEBAPP_URL, json=final_matrix, timeout=15)
+        print(f"🎉 同步成功: {response.status_code}")
     except:
-        print("⚠️ 云端同步跳过 (未配置URL或超时)")
+        print("⚠️ 云端同步跳过 (未配置URL)")
+        # 打印前5行示例
+        for row in final_matrix[:6]:
+            print(row)
 
 if __name__ == "__main__":
-    run_v14_engine()
+    run_v13_terminal()
