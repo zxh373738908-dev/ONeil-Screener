@@ -8,11 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置 (已填入你最新的 URL)
+# 1. 核心配置 (已更新为你最新的 URL)
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbytbf0t8IJFowrH7_PL0X3TEGwJUvdhHkMF7fXhiWBXquI1wBOi7MgAAzVmUhRY_56H/exec"
 
-# 现代核心股票池 (绝对没有 SNDK 等退市股)
+# 核心股票池
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
     "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
@@ -67,7 +67,7 @@ def process_ticker(symbol, spy_data):
     except: return None
 
 def run_v20_engine():
-    # 注意看这一行！如果你运行后看不到这句话，说明你没保存文件！
+    # 只要你保存了文件，运行后第一句话绝对是这句！
     print(f"🚀 [V20.0 Dashboard] 引擎正式启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
     
     spy = yf.download("SPY", period="1y", progress=False)['Close']
