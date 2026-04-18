@@ -3,15 +3,14 @@ import pandas as pd
 import numpy as np
 import datetime
 import requests
-import json
 import warnings
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 (V13.0 机构优化版)
+# 1. 配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbynfNFyXdV_k5mUtKLgczdYDOxy2BSSbGW1FEOYQ7qypg7FbNCxd5NM6OE4bQA8c2uj/exec"
+WEBAPP_URL = "你的_GOOGLE_SCRIPT_URL" # 填入你的URL
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
@@ -19,19 +18,21 @@ CORE_TICKERS = [
     "ANET", "HOOD", "BITF", "LLY", "SOXL", "ARM", "MU", "TSM"
 ]
 
+def get_performance(series, days):
+    if len(series) < days + 1: return 0
+    return ((series.iloc[-1] / series.iloc[-(days+1)]) - 1) * 100
+
 # ==========================================
-# 2. 机构级逻辑引擎 (量价+乖离+趋势)
+# 2. 机构级逻辑引擎 V14.0
 # ==========================================
-def calculate_v13_logic(df, spy_df):
+def calculate_v14_logic(ticker_obj, df, spy_df):
     try:
-        # 处理多重索引
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        # 抹除时区
         df.index = df.index.tz_localize(None)
         df = df.dropna(subset=['Close'])
         
-        if len(df) < 60: return None
+        if len(df) < 65: return None
         
         close = df['Close'].astype(float)
         high = df['High'].astype(float)
@@ -39,95 +40,120 @@ def calculate_v13_logic(df, spy_df):
         volume = df['Volume'].astype(float)
         curr_price = float(close.iloc[-1])
         
-        # --- 均线系统 ---
-        ema10 = close.ewm(span=10, adjust=False).mean().iloc[-1]
+        # 1. 基础指标
         ma20 = close.rolling(window=20).mean()
         ma20_curr = ma20.iloc[-1]
+        ema10 = close.ewm(span=10, adjust=False).mean().iloc[-1]
         sma50 = close.rolling(window=50).mean().iloc[-1]
         
-        # --- [新] 乖离率: 偏离20日线幅度 ---
-        extension = ((curr_price - ma20_curr) / ma20_curr) * 100
+        # 2. 乖离与量比
+        ext = ((curr_price - ma20_curr) / ma20_curr) * 100
+        vol_ratio = volume.iloc[-1] / volume.tail(20).mean()
+        adr = ((high - low) / low).tail(20).mean() * 100
+
+        # 3. 涨幅计算
+        p5d = get_performance(close, 5)
+        p20d = get_performance(close, 20)
+        p60d = get_performance(close, 60)
         
-        # --- [新] 量比: 今日量 vs 20日均量 ---
-        avg_vol = volume.tail(20).mean()
-        vol_ratio = volume.iloc[-1] / avg_vol
-        
-        # --- S2 趋势判定 ---
+        # 4. 相对强度 R20/R60 (vs SPY)
+        spy_close = spy_df.reindex(close.index).ffill()
+        spy_20p = get_performance(spy_close, 20)
+        spy_60p = get_performance(spy_close, 60)
+        r20 = p20d - spy_20p
+        r60 = p60d - spy_60p
+
+        # 5. 趋势与评分
         is_s2 = curr_price > ema10 > ma20_curr > sma50
-        is_bull_side = curr_price > sma50 and not is_s2
-        trend_str = "🏆S2主升浪" if is_s2 else ("✅多头震荡" if is_bull_side else "❌破位/弱势")
-        
-        # --- 综合评分 (0-6) ---
         score = 0
-        if is_s2: score += 2
+        if is_s2: score += 3
         if curr_price > close.iloc[-2]: score += 1
-        if close.iloc[-1] > close.rolling(window=250).max().iloc[-1] * 0.9: score += 1
+        if r20 > 0: score += 1
+        if vol_ratio > 1.2: score += 1
         
-        # RS 强度
-        spy_c = spy_df.astype(float)
-        spy_aligned = spy_c.reindex(close.index).ffill()
-        rs_line = (close / spy_aligned).dropna()
-        if not rs_line.empty and rs_line.iloc[-1] > rs_line.tail(20).max() * 0.98: 
-            score += 2
+        # 6. 决策逻辑
+        action = "WAIT"
+        if score >= 5: action = "STRONG BUY"
+        elif score >= 3: action = "HOLD/ADD"
+        elif curr_price < ma20_curr: action = "REDUCE"
         
-        # ADR 计算
-        adr = float(((high - low) / low).tail(20).mean() * 100)
+        # 7. 共振信号
+        resonance = "No"
+        if (curr_price > ema10) and (vol_ratio > 1) and (r20 > 0):
+            resonance = "🔥TRIPLE"
+
+        # 8. 获取Info (行业/市值)
+        info = ticker_obj.info
+        industry = info.get('industry', 'N/A')
+        mkt_cap = info.get('marketCap', 0) / 1e9 # 十亿美元
         
         return {
-            "Price": curr_price,
+            "Industry": industry,
             "Score": score,
-            "Trend": trend_str,
-            "ADR": adr,
-            "Ext": round(extension, 1),
-            "VolR": round(vol_ratio, 1),
-            "RS": round(float(score * 16.6), 1)
+            "Action": action,
+            "Resonance": resonance,
+            "ADR": round(adr, 2),
+            "Vol_Ratio": round(vol_ratio, 2),
+            "Bias": round(ext, 2),
+            "MktCap": f"{mkt_cap:.1f}B",
+            "RS_Rank": round(score * 16.6, 1),
+            "Options": "Yes" if info.get('optionsExpirationDates') else "No",
+            "Price": round(curr_price, 2),
+            "5D": f"{p5d:.2f}%",
+            "20D": f"{p20d:.2f}%",
+            "60D": f"{p60d:.2f}%",
+            "R20": round(r20, 2),
+            "R60": round(r60, 2)
         }
-    except:
+    except Exception as e:
+        print(f"Error logic: {e}")
         return None
 
 # ==========================================
-# 3. 执行主引擎
+# 3. 主程序
 # ==========================================
-def run_v13_engine():
-    print(f"🚀 V1000 13.0 增强版启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+def run_v14_engine():
+    print(f"🚀 V14.0 终端启动 | {datetime.datetime.now().strftime('%H:%M:%S')}")
     
-    try:
-        spy_raw = yf.download("SPY", period="2y", progress=False)
-        if isinstance(spy_raw.columns, pd.MultiIndex): spy_raw.columns = spy_raw.columns.get_level_values(0)
-        spy_raw.index = spy_raw.index.tz_localize(None)
-        spy_df = spy_raw['Close']
-    except:
-        print("❌ SPY获取失败"); return
+    spy_raw = yf.download("SPY", period="2y", progress=False)
+    spy_df = spy_raw['Close'] if not isinstance(spy_raw.columns, pd.MultiIndex) else spy_raw['Close'].iloc[:, 0]
 
     results = []
     for t in CORE_TICKERS:
         try:
-            df_t = yf.download(t, period="2y", progress=False)
-            res = calculate_v13_logic(df_t, spy_df)
+            tk = yf.Ticker(t)
+            df_t = tk.history(period="2y") # 使用history保证与info同步
+            res = calculate_v14_logic(tk, df_t, spy_df)
             if res:
-                print(f"✅ {t} 分析完成 (评分:{res['Score']} | 量比:{res['VolR']}x)")
+                print(f"✅ {t} 处理完毕")
                 results.append([
-                    t, round(res['Price'], 2), res['Score'], res['Trend'], 
-                    f"{res['ADR']:.2f}%", f"{res['VolR']}x", f"{res['Ext']}%", res['RS']
+                    t, res['Industry'], res['Score'], res['Action'], res['Resonance'],
+                    res['ADR'], res['Vol_Ratio'], res['Bias'], res['MktCap'],
+                    res['RS_Rank'], res['Options'], res['Price'], 
+                    res['5D'], res['20D'], res['60D'], res['R20'], res['R60']
                 ])
-        except: continue
+        except Exception as e:
+            print(f"❌ {t} 失败: {e}")
 
-    if not results: return
+    # 排序 (评分 > R20)
+    results.sort(key=lambda x: (x[2], x[15]), reverse=True)
 
-    # 排序：评分 > RS强度
-    results.sort(key=lambda x: (x[2], x[7]), reverse=True)
+    # 构造表头
+    header = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
     
-    # 构造 8 列矩阵 (与 Google 脚本匹配)
-    header = [
-        ["🏰 V13 机构终端", "更新时间:", datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), "", "", "", "", ""],
-        ["代码", "现价", "评分", "趋势状态", "ADR%", "量比(20d)", "乖离率(20d)", "RS强度"]
-    ]
+    # 输出或发送
+    final_output = [header] + results
     
+    # 打印前3行看样板
+    for row in final_output[:5]:
+        print(row)
+
+    # 发送至 Google Sheets (可选)
     try:
-        requests.post(WEBAPP_URL, json=header + results, timeout=15)
-        print(f"🎉 同步成功！当前 S2 标的数量: {len([r for r in results if '🏆' in r[3]])}")
+        requests.post(WEBAPP_URL, json=final_output, timeout=15)
+        print("🎉 云端同步完成")
     except:
-        print("❌ 同步云端失败")
+        print("⚠️ 云端同步跳过 (未配置URL或超时)")
 
 if __name__ == "__main__":
-    run_v13_engine()
+    run_v14_engine()
