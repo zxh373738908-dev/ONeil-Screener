@@ -1,72 +1,104 @@
-function doPost(e) {
-  try {
-    var data = JSON.parse(e.postData.contents);
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName("us Screener");
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import datetime
+import requests
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+
+warnings.filterwarnings('ignore')
+
+# ==========================================
+# 1. 配置中心
+# ==========================================
+# 填入你最新的 Google 部署 URL
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyx_gg83asnE8IgdPJFrsRTnOp85IWdd1RJmboFYKLnWGJ23dnhUWvI069wGDIePMer/exec"
+
+CORE_TICKERS = [
+    "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
+    "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
+    "ANET", "HOOD", "BITF", "LLY", "SOXL", "ARM", "MU", "TSM"
+]
+
+def get_perf(series, days):
+    try:
+        if len(series) < days + 1: return 0.0
+        return ((float(series.iloc[-1]) / float(series.iloc[-(days+1)])) - 1) * 100
+    except: return 0.0
+
+def process_ticker(symbol, spy_data):
+    try:
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="1y")
+        if df.empty: return None
+        
+        df.index = df.index.tz_localize(None)
+        close = df['Close'].astype(float)
+        high = df['High'].astype(float)
+        low = df['Low'].astype(float)
+        vol = df['Volume'].astype(float)
+        curr_price = float(close.iloc[-1])
+        
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
+        ema10 = float(close.ewm(span=10, adjust=False).mean().iloc[-1])
+        
+        adr = float(((high - low) / low).tail(20).mean() * 100)
+        vol_ratio = float(vol.iloc[-1] / vol.tail(20).mean())
+        bias = ((curr_price - ma20) / ma20) * 100
+        
+        p5d, p20d, p60d = get_perf(close, 5), get_perf(close, 20), get_perf(close, 60)
+        r20 = p20d - get_perf(spy_data, 20)
+        r60 = p60d - get_perf(spy_data, 60)
+
+        score = 0
+        is_s2 = (curr_price > ema10 > ma20 > ma50)
+        if is_s2: score += 3
+        elif curr_price > ma20: score += 1
+        if r20 > 0: score += 1
+        if r60 > 0: score += 1
+        if vol_ratio > 1.1 and curr_price > float(close.iloc[-2]): score += 1
+        
+        action = "WAIT"
+        if score >= 5: action = "🚀 STRONG BUY"
+        elif score >= 3: action = "⚖️ HOLD/ADD"
+        if curr_price < ma20: action = "⚠️ REDUCE"
+        
+        resonance = "🔥TRIPLE" if (is_s2 and vol_ratio > 1.2 and r20 > 5) else "No"
+
+        info = tk.info
+        return [
+            symbol, info.get('industry', 'N/A'), score, action, resonance,
+            round(adr, 2), round(vol_ratio, 2), round(bias, 2),
+            f"{info.get('marketCap', 0)/1e9:.1f}B", round(score * 16.6, 1),
+            "Yes" if info.get('optionsExpirationDates') else "No",
+            round(curr_price, 2), f"{p5d:.2f}%", f"{p20d:.2f}%", f"{p60d:.2f}%", 
+            round(r20, 2), round(r60, 2)
+        ]
+    except: return None
+
+def run_v13_terminal():
+    print("🏰 V13 终端数据采集启动...")
+    spy_raw = yf.download("SPY", period="1y", progress=False)
+    if isinstance(spy_raw.columns, pd.MultiIndex): spy_raw.columns = spy_raw.columns.get_level_values(0)
+    spy_data = spy_raw['Close'].astype(float)
     
-    if (!sheet) { sheet = ss.insertSheet("us Screener"); }
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_ticker, t, spy_data) for t in CORE_TICKERS]
+        for f in futures:
+            res = f.result()
+            if res: results.append(res)
 
-    sheet.clear();
-    // 写入数据
-    sheet.getRange(1, 1, data.length, data[0].length).setValues(data);
+    results.sort(key=lambda x: (x[2], x[15]), reverse=True)
+    header = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+    final_matrix = [header] + results
 
-    // 调用美化插件
-    applyProfessionalFormatting(sheet, data.length, data[0].length);
+    try:
+        response = requests.post(WEBAPP_URL, json=final_matrix, timeout=20)
+        print(f"🎉 同步完成 | 状态: {response.text}")
+    except Exception as e:
+        print(f"⚠️ 同步失败: {e}")
 
-    return ContentService.createTextOutput("Success");
-  } catch (err) {
-    return ContentService.createTextOutput("Error: " + err.toString());
-  }
-}
-
-function applyProfessionalFormatting(sheet, rows, cols) {
-  // 1. 设置行高（增加垂直间距）
-  sheet.setRowHeight(1, 35); // 表头高度
-  sheet.setRowHeights(2, rows - 1, 28); // 数据行高度，让文字不拥挤
-
-  // 2. 核心：设置列宽 (按图11.30 比例精调)
-  // [A:Ticker, B:Industry, C:Score, D:Action, E:Resonance, F:ADR, G:Vol, H:Bias, I:MktCap...]
-  var widths = [70, 160, 60, 130, 90, 70, 80, 70, 90, 80, 70, 80, 75, 75, 75, 75, 75];
-  for (var i = 0; i < widths.length; i++) {
-    sheet.setColumnWidth(i + 1, widths[i]);
-  }
-
-  // 3. 全局文字样式
-  var fullRange = sheet.getRange(1, 1, rows, cols);
-  fullRange.setFontFamily("Roboto")
-           .setVerticalAlignment("middle")
-           .setHorizontalAlignment("center")
-           .setFontSize(10);
-
-  // 4. 表头样式 (深色背景，白字)
-  var headerRange = sheet.getRange(1, 1, 1, cols);
-  headerRange.setBackground("#333333")
-             .setFontColor("#FFFFFF")
-             .setFontWeight("bold")
-             .setFontSize(11);
-
-  // 5. 自动冻结表头
-  sheet.setFrozenRows(1);
-
-  // 6. 条件格式：Action 建议美化 (可选)
-  // 逻辑：如果包含 STRONG 则字体加粗
-  var actionRange = sheet.getRange(2, 4, rows - 1, 1);
-  var rule = SpreadsheetApp.newConditionalFormatRule()
-    .whenTextContains("STRONG")
-    .setFontWeight("bold")
-    .setFontColor("#d93025") // 红色加粗显示
-    .setRanges([actionRange])
-    .build();
-  
-  var rules = sheet.getConditionalFormatRules();
-  rules.push(rule);
-  sheet.setConditionalFormatRules(rules);
-
-  // 7. 斑马纹交替背景
-  sheet.getRange(2, 1, rows - 1, cols).setBackground(null); // 先清除
-  for (var r = 2; r <= rows; r++) {
-    if (r % 2 == 0) {
-      sheet.getRange(r, 1, 1, cols).setBackground("#f8f9fa");
-    }
-  }
-}
+if __name__ == "__main__":
+    run_v13_terminal()
