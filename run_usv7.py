@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings('ignore')
 
 # ⚠️ 记得替换为你新部署的 URL!
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwmJBwnJ0t80CchiZYUG4hhA8LU_DDmay7Cgb0NG02Ox9rfMi2WsMkiAyxPWQ49ji0x/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwDNP_UEZQJ-LhWRzEnCKl-jc-YzhHFWfNxWKr8YNaSH8V9hpkSbh1wg86FCqVpXuSo/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
