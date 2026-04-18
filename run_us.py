@@ -18,7 +18,7 @@ creds_file = "credentials.json"
 CORE_LEADERS = ["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
 # ==========================================
-# 🛡️ 核心 V750 巅峰引擎 (V10.3)
+# 🛡️ 核心 V750 巅峰引擎 (加入 VCP 逻辑)
 # ==========================================
 def get_metrics(df, spy_df):
     try:
@@ -33,27 +33,22 @@ def get_metrics(df, spy_df):
         ma50 = float(close.rolling(50).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1])
         
-        # 2. VCP 紧缩形态判断 (波动率收缩)
-        # 逻辑：短期波幅缩窄至长期的 80% 以下
+        # 2. VCP 紧缩形态识别 (波幅收缩)
         is_vcp = bool(adr_20 < adr_60 * 0.8)
         
         # 3. RS Score (1年加权)
         rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-252]))
         
-        # 4. 趋势动作识别
+        # 4. 状态判断
         action = "观察"
-        if curr >= close.tail(126).max() * 0.98 and vol_r > 1.2:
-            action = "🚀 动量爆发"
-        elif is_vcp and curr > ma50:
-            action = "🌀 VCP紧缩"
-        elif curr > ma50 > ma200:
-            action = "💎 核心趋势"
-        elif vol_r > 2.2 and curr > low.iloc[-1]:
-            action = "⚔️ 极速反包"
+        if curr >= close.tail(126).max() * 0.98: action = "🚀 动量爆发"
+        elif is_vcp and curr > ma50: action = "🌀 VCP紧缩"
+        elif curr > ma50 > ma200: action = "💎 核心趋势"
+        elif vol_r > 2.2 and curr > low.iloc[-1]: action = "⚔️ 极速反包"
 
         # 5. 期权/成交量异动识别
         options = "平稳"
-        if vol_r > 2.8: options = "🔥 机构扫货"
+        if vol_r > 3.0: options = "🔥 机构扫货"
         elif vol_r > 1.8: options = "👀 异动预警"
 
         return {
@@ -68,7 +63,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出 (V10.3)
+# 3. 终极输出引擎 (视觉进化)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -76,16 +71,12 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 初始化格式
-        sh.format("A1:Q60", {
-            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10},
-            "horizontalAlignment": "CENTER"
-        })
+        # 初始化白底黑字
+        sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header = [
-            ["🏰 [V10.3 巅峰 - 完美审计版]", "", "Update(BJ):", bj_time],
+            ["🏰 [V10.3 巅峰 - 终极审计版]", "", "Update(BJ):", bj_time],
             ["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
             ["策略说明:", "🚀爆发 / 🌀VCP紧缩 / 💎核心 / ⚔️反包", "注:", "Resonance > 3 代表行业板块过热"]
         ]
@@ -113,7 +104,7 @@ def final_output(results, vix, breadth):
 
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # --- 视觉渲染 ---
+        # --- 样式渲染 ---
         # 1. 亮绿色表头
         sh.format("A5:Q5", {"backgroundColor": {"red": 0, "green": 1, "blue": 0}, "textFormat": {"bold": True}})
         
@@ -123,20 +114,16 @@ def final_output(results, vix, breadth):
             row_idx = i + 6
             action_text = data_rows[i+1][3]
             opt_text = data_rows[i+1][10]
-            
-            # 动量爆发 - 淡绿
             if "🚀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
-            # VCP紧缩 - 淡蓝
             elif "🌀" in action_text:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.95, "blue": 1}}})
-            # 机构扫货 - 红字
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.95, "blue": 1}}}) # 紧缩蓝
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
         
         if formats: sh.batch_format(formats)
         
-        # 3. 自动列宽 (Industry 列加宽，防止截断)
+        # 3. 自动列宽 (Industry 加宽)
         widths = [65, 170, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
         requests = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": requests})
@@ -158,7 +145,7 @@ def run_sentinel():
             tickers = CORE_LEADERS
         tickers = list(set(tickers + CORE_LEADERS))
         
-        # 抓取 2 年数据确保计算精准
+        # 抓取 2 年数据确保 RS 计算精准
         data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
@@ -170,7 +157,7 @@ def run_sentinel():
             df_t = data[t].dropna()
             if len(df_t) < 200: continue
             
-            # 计算市场宽度
+            # 市场宽度
             if df_t['Close'].iloc[-1] > df_t['Close'].rolling(50).mean().iloc[-1]: breadth_cnt += 1
             
             m = get_metrics(df_t, spy_df)
@@ -185,18 +172,18 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # 补充行业信息与共振 (Resonance)
+        # --- 核心：计算行业共振 (Resonance) ---
         final_list = []
-        industry_map = {}
+        industry_counts = {}
         
-        print("🏢 正在处理行业共振与市值数据...")
+        print("🏢 正在抓取行业共振数据...")
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
                 ind = inf.get('industry', 'N/A')
                 mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
-                industry_map[ind] = industry_map.get(ind, 0) + 1
+                industry_counts[ind] = industry_counts.get(ind, 0) + 1
             except:
                 ind, mkt = "N/A", "0"
             
@@ -204,9 +191,9 @@ def run_sentinel():
             d.update({"Industry": ind, "MktCap": mkt})
             final_list.append(d)
         
-        # 注入最终共振数
+        # 映射共振数
         for item in final_list:
-            item['Resonance'] = industry_map.get(item['Industry'], 1)
+            item['Resonance'] = industry_counts.get(item['Industry'], 1)
         
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
