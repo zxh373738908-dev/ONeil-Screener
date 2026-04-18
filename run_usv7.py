@@ -8,10 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 配置中心 - 已填入你提供的新 URL
+# 1. 配置中心 - 使用你提供的最新 URL
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzLtA3bCfW5xdmgc2u5rOPQ0mvNMmpKYmBGJQDYpz3SHD1_bjoHwo5SloeUVaKnB9HD/exec"
-
+https://script.google.com/macros/s/AKfycbxAAywpR1GeF6kpa0NAG9sGKiT_2tX6v26S9T7HDcAwo8YvF45sNmv9piPYoyJaiD3Q/exec# 现代美股核心池 (剔除 SNDK 等退市股)
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
     "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
@@ -42,7 +42,7 @@ def process_ticker(symbol, spy_data):
         r20 = p20d - get_perf(spy_data, 20)
         r60 = get_perf(close, 60) - get_perf(spy_data, 60)
 
-        # 评分
+        # 评分系统
         score = 0
         if curr_price > ema10 > ma20 > ma50: score += 3
         if r20 > 0: score += 1
@@ -63,22 +63,26 @@ def process_ticker(symbol, spy_data):
     except: return None
 
 def run_v20_engine():
-    print("📡 开启全美股扫描 (V20.0)...")
+    print(f"📡 开启 V20.0 扫描 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    
     spy = yf.download("SPY", period="1y", progress=False)['Close']
-    vix = yf.download("^VIX", period="1d", progress=False)['Close'].iloc[-1]
+    vix_df = yf.download("^VIX", period="1d", progress=False)
+    vix = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 0.0
     
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(process_ticker, t, spy) for t in CORE_TICKERS]
         for f in futures:
             res = f.result()
-            if res: results.append(res)
+            if res:
+                print(f"✅ {res[0]} 处理完成")
+                results.append(res)
 
     results.sort(key=lambda x: (x[2], x[15]), reverse=True)
     
-    # 构造 V20 仪表盘数据
+    # 构造 17 列 V20 仪表盘
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    row1 = ["🏰 [V20.0 终极共振对齐版]", "", "", "", "更新时间:", now, "", "", "", "", "", "", "", "", "", "", ""]
+    row1 = ["🏰 [V20.0 终极共振对齐版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", ""]
     row2 = ["市场天气:", "☀️", "", "", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", "", "", ""]
     row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色", "", "", "", "", "", "", "", "", "", "", ""]
     row4 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
