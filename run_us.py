@@ -56,7 +56,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V15.1 极致排版版)
+# 3. 终极视觉输出引擎 (V15.2 极致排版版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -69,7 +69,7 @@ def final_output(results, vix, breadth):
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         
         # 巧妙利用空格和空列("")避开狭窄的 C 列，防止文字遮挡
-        header =[["🏰[V15.1 完美排版版]", "", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "", "大盘宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "", "共振说明:", "≥3 红色主线 / =2 紫色萌芽"]
+        header =[["🏰[V15.2 最终排版确认版]", "", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "", "大盘宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "", "共振说明:", "≥3 红色主线 / =2 紫色萌芽"]
         ]
         sh.update(values=header, range_name="A1")
         
@@ -133,7 +133,7 @@ def final_output(results, vix, breadth):
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V15.1 刷新成功！排版遮挡问题已完美修复。")
+        print(f"✅ V15.2 最终排版版刷新成功！")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -141,7 +141,7 @@ def final_output(results, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全域扫描 (V15.1)...")
+    print("📡 开启全域扫描 (V15.2)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
