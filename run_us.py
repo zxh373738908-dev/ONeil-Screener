@@ -56,7 +56,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V17.0 强制显示版)
+# 3. 终极视觉输出引擎 (V18.0 极致排版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -64,19 +64,20 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 强制格式全清
+        # 强制格式初始化
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         
-        # V17.0 版本号绝对要变！
+        # V18.0 这里的文字间距经过精确计算，绝不会再遮挡
         header =[
-            ["🏰 [V17.0 强制更新完全体]", "", "", "更新时间(BJ):", bj_time],
-            ["当前天气:", "☀️" if vix < 20 else "☁️", "", "全美宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
-            ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "", "共振说明:", "≥3 红色主线 / =2 紫色萌芽"]
+            ["🏰 [V18.0 完结对齐版]", "", "", "更新时间(BJ):", bj_time],
+            ["当前天气:", "☀️" if vix < 20 else "☁️", "", "大盘宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
+            ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心", "", "共振说明:", "≥3 红字 / =2 紫字"]
         ]
         sh.update(values=header, range_name="A1")
         
+        # 精细化表头对齐
         sh.format("A1:A3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
         sh.format("D1:D3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
 
@@ -103,7 +104,7 @@ def final_output(results, vix, breadth):
 
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # 亮绿色表头背景
+        # 亮绿色表头
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
         formats =[]
@@ -114,19 +115,16 @@ def final_output(results, vix, breadth):
             try: res_val = int(data_rows[i+1][4])
             except: res_val = 1
             
-            # Action 涂色
             if "🚀" in action_text:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92}}})
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}})
             
-            # 期权高亮
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif "👀" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.9, "green": 0.4, "blue": 0}}}})
                 
-            # 共振高亮
             if res_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif res_val == 2:
@@ -134,20 +132,19 @@ def final_output(results, vix, breadth):
         
         if formats: sh.batch_format(formats)
         
-        # 强制调整宽度
         widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 110, 85, 65, 65, 65, 65, 65]
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V17.0 刷新成功！")
+        print(f"✅ V18.0 最终版已提交！")
     except Exception as e:
-        print(f"❌ 报错: {e}")
+        print(f"❌ 错误: {e}")
 
 # ==========================================
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启扫描 (V17.0)...")
+    print("📡 开启扫描 (V18.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -198,11 +195,14 @@ def run_sentinel():
         inds =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         for item in final_list:
             item['Resonance'] = inds.count(item['Industry']) if item['Industry'] != "N/A" else 1
+            # 控制台打印验证
+            print(f"{item['Ticker']} | {item['Industry']} | Res: {item['Resonance']}")
                 
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
-        print(f"🚨 崩溃: {e}"); traceback.print_exc()
+        print(f"🚨 崩溃: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     run_sentinel()
