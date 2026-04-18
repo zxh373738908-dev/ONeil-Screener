@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# 使用你提供的最新 URL
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbylfB-EPV6a2tpHnZOmzJ1Z69ZUBruSO1u0rYsjsxaL5BSfJ_2nQv5EtDdACAgGdoOI/exec"
+# ⚠️ 记得替换为你新部署的 URL!
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwmJBwnJ0t80CchiZYUG4hhA8LU_DDmay7Cgb0NG02Ox9rfMi2WsMkiAyxPWQ49ji0x/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
@@ -41,7 +41,7 @@ def process_ticker(symbol, spy_data):
         r20 = p20d - get_perf(spy_data, 20)
         r60 = get_perf(close, 60) - get_perf(spy_data, 60)
 
-        # ====== 满血版评分逻辑 ======
+        # 评分系统 (满分6分)
         score = 0
         is_s2 = (curr_price > ema10 > ma20 > ma50)
         above_ma50 = curr_price > ma50
@@ -53,16 +53,14 @@ def process_ticker(symbol, spy_data):
         if r60 > 0: score += 1
         if vol_ratio > 1.1: score += 1
         
-        # 动作建议
         action = "🚀 STRONG BUY" if score >= 5 else ("⚖️ HOLD/ADD" if score >= 3 else "WAIT")
         if curr_price < ma20: action = "⚠️ REDUCE"
         
-        # 共振逻辑优化：只要是 S2主升浪 + 放量(>1.15) + 跑赢大盘，就算共振
         resonance = "🔥TRIPLE" if (is_s2 and vol_ratio >= 1.15 and r20 > 0) else "No"
 
         data_row = [
             symbol, tk.info.get('industry', 'N/A'), score, action, resonance,
-            f"{adr:.2f}%", round(vol_ratio, 2), f"{bias:.2f}%", # 直接在Python端锁定 %
+            f"{adr:.2f}%", round(vol_ratio, 2), f"{bias:.2f}%",
             f"{tk.info.get('marketCap', 0)/1e9:.1f}B", round(score*16.6, 1),
             "Yes" if tk.info.get('optionsExpirationDates') else "No",
             round(curr_price, 2), f"{get_perf(close, 5):.2f}%", f"{p20d:.2f}%", 
@@ -72,7 +70,7 @@ def process_ticker(symbol, spy_data):
     except: return None
 
 def run_v20_engine():
-    print(f"🚀 [V20.1 精确版] 引擎启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    print(f"🚀 [V20.2 机构研报版] 启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
     
     spy = yf.download("SPY", period="1y", progress=False)['Close']
     vix_df = yf.download("^VIX", period="1d", progress=False)
@@ -103,7 +101,7 @@ def run_v20_engine():
 
     try:
         resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=30)
-        print(f"✨ 云端同步完成 | 核心多头: {breadth:.1f}% | 反馈: {resp.text}")
+        print(f"✨ 云端同步完成 | 反馈: {resp.text}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
