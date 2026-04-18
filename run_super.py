@@ -129,14 +129,24 @@ def run_super_growth_funnel():
 
     print(f"✅ 技術與 VCP 過濾剩餘 {len(valid_technical_pool)} 隻，開始並行獲取基本面...")
     
-    def fetch_info(t):
-        try: return t, yf.Ticker(t).info
-        except: return t, {}
-        
-    infos = {}
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        for t, info in executor.map(fetch_info, valid_technical_pool.keys()):
-            infos[t] = info
+    import time
+import random
+
+def fetch_info(t):
+    retry_count = 3
+    for i in range(retry_count):
+        try:
+            # 增加一個微小的隨機延遲，避開 Yahoo 的頻率檢測
+            time.sleep(random.uniform(0.1, 0.5)) 
+            ticker = yf.Ticker(t)
+            info = ticker.info
+            if info and 'totalRevenue' in info:
+                return t, info
+        except Exception as e:
+            if i == retry_count - 1:
+                return t, {}
+            time.sleep(1) # 報錯後等 1 秒再試
+    return t, {}    
 
     fundamental_candidates =[]
     for t, info in infos.items():
