@@ -7,6 +7,7 @@ import datetime
 import warnings
 import traceback
 import time
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -16,6 +17,14 @@ warnings.filterwarnings('ignore')
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
+
+# 解决 yfinance 在 GitHub Actions 上的缓存锁定问题
+try:
+    if os.path.exists('~/.cache/py-yfinance'):
+        import shutil
+        shutil.rmtree('~/.cache/py-yfinance')
+except:
+    pass
 
 # ==========================================
 # 🛡️ 核心 V750 巅峰引擎
@@ -56,7 +65,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V18.0 极致排版)
+# 3. 终极视觉输出引擎 (V19.0 强力排版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -64,20 +73,21 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 强制格式初始化
+        # 强制格式清零
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
+        # 获取当前时间（北京时间）
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         
-        # V18.0 这里的文字间距经过精确计算，绝不会再遮挡
+        # 写入表头状态
         header =[
-            ["🏰 [V18.0 完结对齐版]", "", "", "更新时间(BJ):", bj_time],
-            ["当前天气:", "☀️" if vix < 20 else "☁️", "", "大盘宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
+            ["🏰 [V19.0 最终修复 - 强制同步版]", "", "", "更新时间(BJ):", bj_time],
+            ["市场天气:", "☀️" if vix < 20 else "☁️", "", "全美宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
             ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心", "", "共振说明:", "≥3 红字 / =2 紫字"]
         ]
         sh.update(values=header, range_name="A1")
         
-        # 精细化表头对齐
+        # 美化顶部
         sh.format("A1:A3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
         sh.format("D1:D3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
 
@@ -102,9 +112,10 @@ def final_output(results, vix, breadth):
                     r.append(str(val))
             data_rows.append(r)
 
+        # 写入数据
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # 亮绿色表头
+        # 设置数据表格式
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
         formats =[]
@@ -116,7 +127,7 @@ def final_output(results, vix, breadth):
             except: res_val = 1
             
             if "🚀" in action_text:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}})
             
@@ -132,19 +143,21 @@ def final_output(results, vix, breadth):
         
         if formats: sh.batch_format(formats)
         
+        # 自动调整列宽
         widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 110, 85, 65, 65, 65, 65, 65]
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V18.0 最终版已提交！")
+        print(f"✅ V19.0 强力同步版刷新成功！")
     except Exception as e:
-        print(f"❌ 错误: {e}")
+        print(f"❌ 运行报错: {e}")
+        traceback.print_exc()
 
 # ==========================================
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启扫描 (V18.0)...")
+    print("📡 开启扫描 (V19.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -153,7 +166,10 @@ def run_sentinel():
             tickers = CORE_LEADERS
             
         tickers = list(set(tickers + CORE_LEADERS))
-        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
+        
+        # 禁用 yfinance 缓存
+        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False, proxy=None)
+        
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
@@ -170,7 +186,9 @@ def run_sentinel():
                 m['Ticker'] = t
                 candidates.append(m)
         
-        if not candidates: return
+        if not candidates:
+            print("没有符合筛选条件的股票。")
+            return
 
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
@@ -194,9 +212,10 @@ def run_sentinel():
         # 统计共振
         inds =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         for item in final_list:
-            item['Resonance'] = inds.count(item['Industry']) if item['Industry'] != "N/A" else 1
-            # 控制台打印验证
-            print(f"{item['Ticker']} | {item['Industry']} | Res: {item['Resonance']}")
+            current_industry = item['Industry']
+            item['Resonance'] = inds.count(current_industry) if current_industry != "N/A" else 1
+            # 终端打印验证，确保您能看到真实数据
+            print(f"Ticker: {item['Ticker']} | Industry: {item['Industry']} | Res: {item['Resonance']}")
                 
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
