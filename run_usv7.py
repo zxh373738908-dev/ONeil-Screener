@@ -8,10 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 配置中心 - 使用你提供的最新 URL
+# 1. 核心配置 (已填入你最新的 URL)
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzLtA3bCfW5xdmgc2u5rOPQ0mvNMmpKYmBGJQDYpz3SHD1_bjoHwo5SloeUVaKnB9HD/exec"
-https://script.google.com/macros/s/AKfycbxAAywpR1GeF6kpa0NAG9sGKiT_2tX6v26S9T7HDcAwo8YvF45sNmv9piPYoyJaiD3Q/exec# 现代美股核心池 (剔除 SNDK 等退市股)
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbytbf0t8IJFowrH7_PL0X3TEGwJUvdhHkMF7fXhiWBXquI1wBOi7MgAAzVmUhRY_56H/exec"
+
+# 现代核心股票池 (绝对没有 SNDK 等退市股)
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
     "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
@@ -44,54 +45,63 @@ def process_ticker(symbol, spy_data):
 
         # 评分系统
         score = 0
+        above_ma50 = curr_price > ma50
         if curr_price > ema10 > ma20 > ma50: score += 3
         if r20 > 0: score += 1
         if vol_ratio > 1.1: score += 1
         
         action = "🚀 STRONG BUY" if score >= 5 else ("⚖️ HOLD/ADD" if score >= 3 else "WAIT")
         if curr_price < ma20: action = "⚠️ REDUCE"
+        
+        resonance = "🔥TRIPLE" if (score >= 5 and vol_ratio > 1.2) else "No"
 
-        return [
-            symbol, tk.info.get('industry', 'N/A'), score, action, 
-            "🔥TRIPLE" if (score >= 5 and vol_ratio > 1.2) else "No",
+        data_row = [
+            symbol, tk.info.get('industry', 'N/A'), score, action, resonance,
             round(adr, 2), round(vol_ratio, 2), round(((curr_price-ma20)/ma20)*100, 2),
             f"{tk.info.get('marketCap', 0)/1e9:.1f}B", round(score*16.6, 1),
             "Yes" if tk.info.get('optionsExpirationDates') else "No",
             round(curr_price, 2), f"{get_perf(close, 5):.2f}%", f"{p20d:.2f}%", 
             f"{get_perf(close, 60):.2f}%", round(r20, 2), round(r60, 2)
         ]
+        return {"data": data_row, "above_ma50": above_ma50}
     except: return None
 
 def run_v20_engine():
-    print(f"📡 开启 V20.0 扫描 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    # 注意看这一行！如果你运行后看不到这句话，说明你没保存文件！
+    print(f"🚀 [V20.0 Dashboard] 引擎正式启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
     
     spy = yf.download("SPY", period="1y", progress=False)['Close']
     vix_df = yf.download("^VIX", period="1d", progress=False)
     vix = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 0.0
     
     results = []
+    above_50_count = 0
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(process_ticker, t, spy) for t in CORE_TICKERS]
         for f in futures:
             res = f.result()
             if res:
-                print(f"✅ {res[0]} 处理完成")
-                results.append(res)
+                results.append(res["data"])
+                if res["above_ma50"]: above_50_count += 1
 
     results.sort(key=lambda x: (x[2], x[15]), reverse=True)
     
-    # 构造 17 列 V20 仪表盘
+    # 动态计算全美宽度
+    breadth = (above_50_count / len(CORE_TICKERS)) * 100
+    weather = "☀️" if breadth > 60 else ("☁️" if breadth > 40 else "🌧️")
+    
+    # 构造 V20 仪表盘 (前4行)
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     row1 = ["🏰 [V20.0 终极共振对齐版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", ""]
-    row2 = ["市场天气:", "☀️", "", "", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", "", "", ""]
-    row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色", "", "", "", "", "", "", "", "", "", "", ""]
+    row2 = ["市场天气:", weather, "", "", "全美宽度:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", ""]
+    row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色 / =2 紫色", "", "", "", "", "", "", "", "", "", "", ""]
     row4 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
 
     final_matrix = [row1, row2, row3, row4] + results
 
     try:
         resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=30)
-        print(f"✨ 云端反馈: {resp.text}")
+        print(f"✨ 云端同步完成 | 宽度: {breadth:.1f}% | 反馈: {resp.text}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
