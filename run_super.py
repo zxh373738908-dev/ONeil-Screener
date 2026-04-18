@@ -31,12 +31,12 @@ def get_universe():
 EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'REIT', 'Utilities', 'Oil & Gas']
 
 # ==========================================
-# 2. 核心數據獲取 (解決 401 報錯)
+# 2. 核心數據處理函數
 # ==========================================
 def fetch_info_v13(t):
     for i in range(3):
         try:
-            time.sleep(random.uniform(0.6, 1.2)) # 慢速抓取
+            time.sleep(random.uniform(0.6, 1.2)) 
             ticker = yf.Ticker(t)
             info = ticker.info
             if info and 'industry' in info:
@@ -58,14 +58,14 @@ def get_return(series, days):
     return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
 
 # ==========================================
-# 3. 核心量化模型 V13
+# 3. 核心量化模型 V13 (寬度與排序優化版)
 # ==========================================
 def run_super_growth_v13():
     update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     universe_tickers = get_universe()
     
     print("\n" + "="*50)
-    print(f"🚀 [超級成長股 V13] 正在執行全美寬度(50MA)計算...")
+    print(f"🚀 [超級成長股 V13] 啟動 | 正在執行標準全美寬度(50MA)計算...")
     
     # 1. 大盤指標
     try:
@@ -92,12 +92,13 @@ def run_super_growth_v13():
             p = float(c.iloc[-1])
             m20, m50, m200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            # --- 寬度算法修正 ---
-            if p > m50: above_50ma_count += 1 # 這是你要求的全美寬度定義
+            # --- 修正寬度定義：站上 50MA 的比例 ---
+            if p > m50: above_50ma_count += 1
             
             is_perfect = p > m20 > m50 > m200
             if is_perfect: perfect_tickers.append(t)
             
+            # 入選過濾
             if not (p > m50 and m50 > m200): continue
             if v.tail(40).mean() * p < 20_000_000: continue
             
@@ -112,9 +113,10 @@ def run_super_growth_v13():
             }
         except: continue
 
+    # 計算全美寬度
     us_breadth = (above_50ma_count / len(universe_tickers) * 100)
 
-    # 3. 基本面
+    # 3. 獲取基本面 (限制併發)
     print(f"✅ 全美寬度(50MA): {us_breadth:.1f}% | 完美共振股: {len(perfect_tickers)} 隻")
     infos = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -150,11 +152,11 @@ def run_super_growth_v13():
             "R20": f"{round(data['R20']*100, 2)}%", "R60": f"{round(data['R60']*100, 2)}%"
         })
 
-    # --- 關鍵修正：優先選擇 Score (動能與基本面) 最強的前 10 隻 ---
+    # --- 排序邏輯：優先選擇評分最高的前 10 隻 ---
     top_10 = sorted(final_pool, key=lambda x: x['Score'], reverse=True)[:10]
 
     # ==========================================
-    # 4. 17列矩陣精確同步
+    # 4. 輸出至 Google Sheets
     # ==========================================
     h_text = f"天气:{weather_icon} | 全美宽度(50MA):{us_breadth:.1f}% | 行业共振:{len(perfect_tickers)}隻 | VIX:{vix_val:.1f}"
     row1 = [f"SuperGrowth Portfolio V13", f"更新: {update_time}", h_text, ""] + [""] * 13
@@ -165,7 +167,7 @@ def run_super_growth_v13():
         matrix.append([
             r['Ticker'], r['Industry'], round(r['Score'], 1), r['Action'], r['Resonance'],
             r['ADR'], r['Vol'], r['Bias'], r['MCap'], r['RS'], r['Opt'],
-            float(r['Price']), # L列格式請在Sheets手動設為「數值」
+            float(r['Price']), # L列格式請手動設為「數值」
             r['5D'], r['20D'], r['60D'], r['R20'], r['R60']
         ])
 
