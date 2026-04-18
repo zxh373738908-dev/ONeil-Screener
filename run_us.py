@@ -16,10 +16,10 @@ warnings.filterwarnings('ignore')
 # ==========================================
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
-CORE_LEADERS = ["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
+CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
 # ==========================================
-# 🛡️ 核心 V750 巅峰引擎 (V10.4)
+# 🛡️ 核心 V750 巅峰引擎 (V10.5)
 # ==========================================
 def get_metrics(df, spy_df):
     try:
@@ -59,7 +59,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出 (V10.4 稳定版)
+# 3. 终极视觉输出 (V10.5 阶梯预警版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -71,22 +71,20 @@ def final_output(results, vix, breadth):
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header = [
-            ["🏰 [V10.4 巅峰 - 修复共振版]", "", "Update(BJ):", bj_time],
-            ["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
-            ["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "注:", "Resonance >= 3 为高价值行业集群"]
+            ["🏰[V10.5 巅峰 - 完美共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 为主线热点 (红色)"]
         ]
         sh.update(values=header, range_name="A1")
 
         if not results: return
         df = pd.DataFrame(results)
-        cols_order = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+        cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
         data_rows = [cols_order]
         for _, row in df.iterrows():
-            r = []
+            r =[]
             for c in cols_order:
                 val = row.get(c, "")
-                if c in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
+                if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in ["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
                 else: r.append(str(val))
@@ -95,29 +93,42 @@ def final_output(results, vix, breadth):
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
         # 视觉美化
-        sh.format("A5:Q5", {"backgroundColor": {"red": 0.3, "green": 0.9, "blue": 0.3}, "textFormat": {"bold": True}})
+        sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
-        formats = []
+        formats =[]
         for i in range(len(data_rows)-1):
             row_idx = i + 6
             action_text = data_rows[i+1][3]
-            res_val = int(data_rows[i+1][4]) if str(data_rows[i+1][4]).isdigit() else 1
+            opt_text = data_rows[i+1][10]
+            # 安全提取 Resonance 数值
+            try: res_val = int(data_rows[i+1][4])
+            except: res_val = 1
             
+            # Action 涂色
             if "🚀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1}}})
-            # 共振数大于等于3，单独加粗突出
+            
+            # 期权高亮
+            if "🔥" in opt_text:
+                formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
+                
+            # --- 阶梯式共振 (Resonance) 高亮 ---
             if res_val >= 3:
-                formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.6, "green": 0, "blue": 0}}}})
+                # ≥3 深红色加粗
+                formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
+            elif res_val == 2:
+                # =2 紫色加粗
+                formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.5, "green": 0, "blue": 0.5}}}})
         
         if formats: sh.batch_format(formats)
         
-        widths = [65, 170, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
-        reqs = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
+        widths =[65, 170, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
+        reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ 看板 10.4 刷新成功！")
+        print(f"✅ 看板 10.5 刷新成功！共振识别已深度激活。")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -125,7 +136,7 @@ def final_output(results, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全量扫描 (V10.4)...")
+    print("📡 开启全量扫描 (V10.5)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
@@ -135,7 +146,7 @@ def run_sentinel():
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
-        candidates = []
+        candidates =[]
         breadth_cnt = 0
         for t in tickers:
             if t not in data.columns.levels[0]: continue
@@ -154,17 +165,19 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # --- 重点修复：行业共振识别逻辑 ---
-        temp_list = []
+        # --- V10.5: 绝对严谨的行业标准化与统计 ---
+        temp_list =[]
+        print("🏢 正在抓取并清洗行业数据...")
+        
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
-                tick_obj = yf.Ticker(t)
-                # 尝试获取行业，增加重试
-                inf = tick_obj.info
-                ind = inf.get('industry', 'N/A').strip()
+                inf = yf.Ticker(t).info
+                # 强制去除两端空格，并转为首字母大写的标准格式
+                raw_ind = str(inf.get('industry', 'N/A'))
+                ind = raw_ind.strip().title()
                 mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
-                time.sleep(0.1) # 避开 API 限制
+                time.sleep(0.05) # 防被墙
             except:
                 ind, mkt = "N/A", "0"
             
@@ -172,15 +185,19 @@ def run_sentinel():
             d.update({"Industry": ind, "MktCap": mkt})
             temp_list.append(d)
         
-        # 统一统计 Resonance
-        # 排除 N/A 的干扰
-        ind_series = pd.Series([x['Industry'] for x in temp_list if x['Industry'] != 'N/A'])
-        ind_counts = ind_series.value_counts().to_dict()
-        
-        print(f"📊 行业分布探测: {ind_counts}") # 控制台打印调试
-        
+        # 原生 Python 字典统计，绝不漏判
+        ind_counts = {}
         for item in temp_list:
-            item['Resonance'] = ind_counts.get(item['Industry'], 1)
+            clean_ind = item['Industry']
+            if clean_ind != "N/A" and clean_ind != "N/a":
+                ind_counts[clean_ind] = ind_counts.get(clean_ind, 0) + 1
+        
+        print(f"📊 当前热点板块分布: {ind_counts}")
+        
+        # 写入 Resonance
+        for item in temp_list:
+            clean_ind = item['Industry']
+            item['Resonance'] = ind_counts.get(clean_ind, 1)
         
         final_output(temp_list, vix, (breadth_cnt/len(tickers)*100))
         
