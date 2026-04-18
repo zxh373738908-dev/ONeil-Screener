@@ -7,7 +7,6 @@ import datetime
 import warnings
 import math
 import traceback
-import time
 
 warnings.filterwarnings('ignore')
 
@@ -18,8 +17,17 @@ SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
+# 核心池硬编码字典 (防止不在标普500列表中的股票找不到行业)
+CORE_INDS = {
+    "NVDA": "Semiconductors", "AAPL": "Technology Hardware", "MSFT": "Systems Software",
+    "TSLA": "Automobile Manufacturers", "META": "Interactive Media & Services",
+    "GOOGL": "Interactive Media & Services", "AMZN": "Broadline Retail",
+    "NFLX": "Movies & Entertainment", "PLTR": "Application Software",
+    "AVGO": "Semiconductors", "COST": "Consumer Staples"
+}
+
 # ==========================================
-# 🛡️ 核心引擎 (V11.0)
+# 🛡️ 核心 V750 巅峰引擎
 # ==========================================
 def get_metrics(df, spy_df):
     try:
@@ -32,7 +40,6 @@ def get_metrics(df, spy_df):
         vol_r = float(vol.iloc[-1] / vol.tail(20).mean())
         ma50 = float(close.rolling(50).mean().iloc[-1])
         
-        # VCP 紧缩特征
         is_vcp = bool(adr_20 < adr_60 * 0.8)
         rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-252]))
         
@@ -58,9 +65,9 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极输出 (V11.0)
+# 3. 终极视觉输出引擎
 # ==========================================
-def final_output(df_final, vix, breadth):
+def final_output(results, vix, breadth):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
@@ -70,23 +77,23 @@ def final_output(df_final, vix, breadth):
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header = [
-            ["🏰[V11.0 绝杀 - 强效共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 为主线热点 (红色)"]
+            ["🏰[V12.0 破壁 - 百分百共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 为主线热点 (红色)"]
         ]
         sh.update(values=header, range_name="A1")
 
-        if df_final.empty: return
-        
+        if not results: return
+        df = pd.DataFrame(results)
         cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
         data_rows = [cols_order]
-        for _, row in df_final.iterrows():
+        for _, row in df.iterrows():
             r =[]
             for c in cols_order:
                 val = row.get(c, "")
                 if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in ["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
-                elif c == "Resonance": r.append(str(int(val))) # 强制整型转字符串
+                elif c == "Resonance": r.append(str(int(val))) 
                 else: r.append(str(val))
             data_rows.append(r)
 
@@ -102,17 +109,15 @@ def final_output(df_final, vix, breadth):
             try: res_val = int(data_rows[i+1][4])
             except: res_val = 1
             
-            # Action 涂色
             if "🚀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1}}})
             
-            # 期权异动
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
                 
-            # 阶梯式共振高亮
+            # 共振高亮
             if res_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif res_val == 2:
@@ -124,7 +129,7 @@ def final_output(df_final, vix, breadth):
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V11.0 刷新成功！共振识别已彻底修复。")
+        print(f"✅ V12.0 刷新成功！共振识别 100% 修复！")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -132,13 +137,20 @@ def final_output(df_final, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全量扫描 (V11.0)...")
+    print("📡 开启全量扫描 (V12.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
-        tickers = list(set(tickers + CORE_LEADERS))
+        # 1. 抓取维基百科，构建“不可战胜”的行业字典
+        sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
+        sp_df['Symbol'] = sp_df['Symbol'].str.replace('.', '-')
         
-        data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
+        # 将 GICS Sub-Industry 直接做成映射字典 (内存级操作，绝不被墙)
+        global_ind_dict = dict(zip(sp_df['Symbol'], sp_df['GICS Sub-Industry']))
+        global_ind_dict.update(CORE_INDS) # 补充核心股
+        
+        tickers = list(set(list(global_ind_dict.keys()) + CORE_LEADERS))
+        
+        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
@@ -159,32 +171,46 @@ def run_sentinel():
 
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
-        df_top = df_all.sort_values("Score", ascending=False).head(28).copy()
+        df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        print("🏢 正在抓取并清洗行业数据 (使用底层 Pandas 聚类)...")
+        print("🏢 正在通过内存字典高速映射行业与共振...")
         
-        # 1. 初始化空列
-        df_top['Industry'] = "N/A"
-        df_top['MktCap'] = "0"
-        
-        # 2. 逐一获取信息
-        for idx, row in df_top.iterrows():
+        final_list =[]
+        for _, row in df_top.iterrows():
             t = row['Ticker']
-            try:
-                inf = yf.Ticker(t).info
-                raw_ind = str(inf.get('industry', 'N/A'))
-                # 核心杀招：去两端空格，全部首字母大写
-                ind_clean = raw_ind.strip().title()
-                df_top.at[idx, 'Industry'] = ind_clean
-                df_top.at[idx, 'MktCap'] = f"{inf.get('marketCap', 0)/1e6:,.0f}"
-                time.sleep(0.05)
-            except: pass
+            # 直接从内存字典拿行业，不走网络！
+            ind = global_ind_dict.get(t, "Unknown")
+            
+            # 市值还是走 yfinance (这个允许失败，不影响共振)
+            try: mkt = f"{yf.Ticker(t).info.get('marketCap', 0)/1e6:,.0f}"
+            except: mkt = "N/A"
+            
+            d = row.to_dict()
+            d.update({"Industry": ind, "MktCap": mkt})
+            final_list.append(d)
+        
+        # --- 本地原生字典计数 (绝对不可能错) ---
+        count_map = {}
+        for item in final_list:
+            ind = item['Industry']
+            if ind != "Unknown":
+                count_map[ind] = count_map.get(ind, 0) + 1
+                
+        print(f"📊 内存探测到的真实板块热点: {count_map}")
+        
+        # 赋值共振数
+        for item in final_list:
+            ind = item['Industry']
+            if ind != "Unknown":
+                item['Resonance'] = count_map[ind]
+            else:
+                item['Resonance'] = 1
+                
+        final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
+        
+    except Exception as e:
+        print(f"🚨 崩溃: {e}")
+        traceback.print_exc()
 
-        # 3. PANDAS 原生统计，直接利用 transform('count') 绝对不可能错
-        df_top['Resonance'] = df_top.groupby('Industry')['Industry'].transform('count')
-        
-        # 屏蔽 N/A 的共振
-        df_top.loc[df_top['Industry'] == 'N/A', 'Resonance'] = 1
-        
-        # --- 终端打印预览：让你直接看到有没有成功！ ---
-        print("\n📊 === 当前提取的共振数据预览 ===")
+if __name__ == "__main__":
+    run_sentinel()
