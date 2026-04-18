@@ -7,7 +7,6 @@ import datetime
 import warnings
 import traceback
 import time
-import os
 
 warnings.filterwarnings('ignore')
 
@@ -17,14 +16,6 @@ warnings.filterwarnings('ignore')
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
-
-# 解决 yfinance 在 GitHub Actions 上的缓存锁定问题
-try:
-    if os.path.exists('~/.cache/py-yfinance'):
-        import shutil
-        shutil.rmtree('~/.cache/py-yfinance')
-except:
-    pass
 
 # ==========================================
 # 🛡️ 核心 V750 巅峰引擎
@@ -65,115 +56,96 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V19.0 强力排版)
+# 3. 终极视觉输出引擎 (V20.0 强制刷新版)
 # ==========================================
-def final_output(results, vix, breadth):
+def final_output(final_results_list, vix, breadth):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 强制格式清零
+        # 1. 暴力初始化：清空一切内容和格式
+        sh.clear()
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
-        # 获取当前时间（北京时间）
+        # 2. 准备表头时间
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
-        
-        # 写入表头状态
         header =[
-            ["🏰 [V19.0 最终修复 - 强制同步版]", "", "", "更新时间(BJ):", bj_time],
+            ["🏰 [V20.0 终极共振对齐版]", "", "", "更新时间(BJ):", bj_time],
             ["市场天气:", "☀️" if vix < 20 else "☁️", "", "全美宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
-            ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心", "", "共振说明:", "≥3 红字 / =2 紫字"]
+            ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心", "", "共振说明:", "≥3 红色 / =2 紫色"]
         ]
         sh.update(values=header, range_name="A1")
-        
-        # 美化顶部
         sh.format("A1:A3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
-        sh.format("D1:D3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
 
-        if not results: return
-        df = pd.DataFrame(results)
+        if not final_results_list: return
+
+        # 3. 构造数据矩阵
         cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
-        
         data_rows = [cols_order]
-        for _, row in df.iterrows():
-            r =[]
-            for c in cols_order:
-                val = row.get(c, "")
-                if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]:
-                    r.append(f"{float(val)*100:.2f}%")
-                elif c == "Price":
-                    r.append(f"${float(val):.2f}")
-                elif c in["Score", "Vol_Ratio"]:
-                    r.append(str(round(float(val), 2)))
-                elif c == "Resonance":
-                    r.append(str(int(val)))
+        
+        for item in final_results_list:
+            row_data = []
+            for col in cols_order:
+                val = item.get(col, "")
+                # 针对不同列做强制格式化，确保 Resonance 是字符串数字
+                if col in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]:
+                    row_data.append(f"{float(val)*100:.2f}%")
+                elif col == "Price":
+                    row_data.append(f"${float(val):.2f}")
+                elif col in ["Score", "Vol_Ratio"]:
+                    row_data.append(str(round(float(val), 2)))
+                elif col == "Resonance":
+                    row_data.append(str(int(val))) # 关键：强制转为整数字符串
                 else:
-                    r.append(str(val))
-            data_rows.append(r)
+                    row_data.append(str(val))
+            data_rows.append(row_data)
 
-        # 写入数据
+        # 4. 一次性写入数据
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # 设置数据表格式
+        # 5. 渲染样式
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
-        formats =[]
+        formats = []
         for i in range(len(data_rows)-1):
             row_idx = i + 6
-            action_text = data_rows[i+1][3]
-            opt_text = data_rows[i+1][10]
-            try: res_val = int(data_rows[i+1][4])
-            except: res_val = 1
+            action_txt = data_rows[i+1][3]
+            opt_txt = data_rows[i+1][10]
+            try: r_val = int(data_rows[i+1][4])
+            except: r_val = 1
             
-            if "🚀" in action_text:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92}}})
-            elif "🌀" in action_text:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}})
+            if "🚀" in action_txt:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
+            elif "🌀" in action_txt:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.95, "blue": 1}}})
             
-            if "🔥" in opt_text:
-                formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
-            elif "👀" in opt_text:
-                formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.9, "green": 0.4, "blue": 0}}}})
-                
-            if res_val >= 3:
+            if r_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
-            elif res_val == 2:
+            elif r_val == 2:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.5, "green": 0, "blue": 0.5}}}})
         
         if formats: sh.batch_format(formats)
-        
-        # 自动调整列宽
-        widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 110, 85, 65, 65, 65, 65, 65]
-        reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
-        client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
-
-        print(f"✅ V19.0 强力同步版刷新成功！")
+        print(f"✨ 表格已成功更新至 V20.0，共振数已同步。")
     except Exception as e:
-        print(f"❌ 运行报错: {e}")
+        print(f"❌ 写入报错: {e}")
         traceback.print_exc()
 
 # ==========================================
-# 4. 执行流程
+# 4. 主执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启扫描 (V19.0)...")
+    print("📡 开启全美股扫描 (V20.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
-        except:
-            tickers = CORE_LEADERS
-            
+        tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
         tickers = list(set(tickers + CORE_LEADERS))
         
-        # 禁用 yfinance 缓存
-        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False, proxy=None)
-        
+        data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=False, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
-        candidates =[]
+        candidates = []
         breadth_cnt = 0
         for t in tickers:
             if t not in data.columns.levels[0]: continue
@@ -186,37 +158,34 @@ def run_sentinel():
                 m['Ticker'] = t
                 candidates.append(m)
         
-        if not candidates:
-            print("没有符合筛选条件的股票。")
-            return
-
+        # 计算 RS Rank
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        final_list =[]
+        # 抓取行业并计算共振
+        final_list = []
+        print("🏢 抓取行业信息并计算共振...")
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
                 ind = str(inf.get('industry', 'N/A')).strip()
                 mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
-            except:
-                ind, mkt = "N/A", "0"
+            except: ind, mkt = "N/A", "0"
             
             d = row.to_dict()
             d['Industry'] = ind
             d['MktCap'] = mkt
             final_list.append(d)
         
-        # 统计共振
-        inds =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
+        # 暴力计算共振
+        all_inds = [x['Industry'] for x in final_list if x['Industry'] != "N/A"]
         for item in final_list:
-            current_industry = item['Industry']
-            item['Resonance'] = inds.count(current_industry) if current_industry != "N/A" else 1
-            # 终端打印验证，确保您能看到真实数据
-            print(f"Ticker: {item['Ticker']} | Industry: {item['Industry']} | Res: {item['Resonance']}")
-                
+            item['Resonance'] = all_inds.count(item['Industry']) if item['Industry'] != "N/A" else 1
+            print(f"{item['Ticker']} | {item['Industry']} | Res: {item['Resonance']}")
+
+        # 最后的输出
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
