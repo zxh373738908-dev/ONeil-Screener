@@ -34,7 +34,8 @@ def get_metrics(df, spy_df):
         ma200 = float(close.rolling(200).mean().iloc[-1])
         
         # 2. VCP 紧缩形态判断 (波动率收缩)
-        is_vcp = bool(adr_20 < adr_60 * 0.78)
+        # 逻辑：短期波幅缩窄至长期的 80% 以下
+        is_vcp = bool(adr_20 < adr_60 * 0.8)
         
         # 3. RS Score (1年加权)
         rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-252]))
@@ -135,7 +136,7 @@ def final_output(results, vix, breadth):
         
         if formats: sh.batch_format(formats)
         
-        # 3. 自动列宽 (Industry 特别加宽)
+        # 3. 自动列宽 (Industry 列加宽，防止截断)
         widths = [65, 170, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
         requests = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": requests})
@@ -157,7 +158,7 @@ def run_sentinel():
             tickers = CORE_LEADERS
         tickers = list(set(tickers + CORE_LEADERS))
         
-        # 抓取 2 年数据确保 MA200 和 RS 计算精准
+        # 抓取 2 年数据确保计算精准
         data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
@@ -169,7 +170,7 @@ def run_sentinel():
             df_t = data[t].dropna()
             if len(df_t) < 200: continue
             
-            # 计算全美宽度
+            # 计算市场宽度
             if df_t['Close'].iloc[-1] > df_t['Close'].rolling(50).mean().iloc[-1]: breadth_cnt += 1
             
             m = get_metrics(df_t, spy_df)
@@ -184,11 +185,11 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # 补充行业信息并计算共振数 (Resonance)
-        processed_results = []
+        # 补充行业信息与共振 (Resonance)
+        final_list = []
         industry_map = {}
         
-        print("🏢 正在抓取行业共振数据...")
+        print("🏢 正在处理行业共振与市值数据...")
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
@@ -201,13 +202,13 @@ def run_sentinel():
             
             d = row.to_dict()
             d.update({"Industry": ind, "MktCap": mkt})
-            processed_results.append(d)
+            final_list.append(d)
         
-        # 注入 Resonance 数据
-        for item in processed_results:
+        # 注入最终共振数
+        for item in final_list:
             item['Resonance'] = industry_map.get(item['Industry'], 1)
         
-        final_output(processed_results, vix, (breadth_cnt/len(tickers)*100))
+        final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
         print(f"🚨 崩溃: {e}")
