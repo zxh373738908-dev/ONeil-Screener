@@ -18,50 +18,56 @@ creds_file = "credentials.json"
 CORE_LEADERS = ["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
 # ==========================================
-# 🛡️ 核心计算引擎 (加入 VCP 与 深度指标)
+# 🛡️ 核心 V750 巅峰引擎 (V10.3)
 # ==========================================
 def get_metrics(df, spy_df):
     try:
         close, high, low, vol = df['Close'], df['High'], df['Low'], df['Volume']
-        if len(close) < 150: return None
+        if len(close) < 200: return None
         curr = float(close.iloc[-1])
         
-        # 1. 基础指标
+        # 1. 核心技术指标
         adr_20 = float(((high - low) / low).tail(20).mean())
         adr_60 = float(((high - low) / low).tail(60).mean())
         vol_r = float(vol.iloc[-1] / vol.tail(20).mean())
         ma50 = float(close.rolling(50).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1])
         
-        # 2. VCP 紧缩逻辑：最近波幅小于前期波幅的 80%
-        is_vcp = bool(adr_20 < adr_60 * 0.8)
+        # 2. VCP 紧缩形态判断 (波动率收缩)
+        is_vcp = bool(adr_20 < adr_60 * 0.78)
         
-        # 3. 涨幅与相对强度
-        c5, c20, c60 = float(curr/close.iloc[-5]-1), float(curr/close.iloc[-20]-1), float(curr/close.iloc[-60]-1)
-        s20 = float(spy_df.iloc[-1]/spy_df.iloc[-20]-1)
-        s60 = float(spy_df.iloc[-1]/spy_df.iloc[-60]-1)
+        # 3. RS Score (1年加权)
+        rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-252]))
         
-        # 4. 状态判断
+        # 4. 趋势动作识别
         action = "观察"
-        if curr >= close.tail(126).max() * 0.98: action = "🚀 动量爆发"
-        elif is_vcp and curr > ma50: action = "🌀 VCP紧缩"
-        elif curr > ma50 > ma200: action = "💎 核心趋势"
-        elif vol_r > 2.2 and curr > low.iloc[-1]: action = "⚔️ 极速反包"
+        if curr >= close.tail(126).max() * 0.98 and vol_r > 1.2:
+            action = "🚀 动量爆发"
+        elif is_vcp and curr > ma50:
+            action = "🌀 VCP紧缩"
+        elif curr > ma50 > ma200:
+            action = "💎 核心趋势"
+        elif vol_r > 2.2 and curr > low.iloc[-1]:
+            action = "⚔️ 极速反包"
 
-        # 5. 期权/成交量异动
+        # 5. 期权/成交量异动识别
         options = "平稳"
-        if vol_r > 3.0: options = "🔥 机构扫货"
-        elif vol_r > 2.0: options = "👀 异动预警"
+        if vol_r > 2.8: options = "🔥 机构扫货"
+        elif vol_r > 1.8: options = "👀 异动预警"
 
         return {
-            "Price": curr, "Action": action, "Score": (curr/close.iloc[-63])*2 + (curr/close.iloc[-126]),
-            "ADR": adr_20, "Vol_Ratio": vol_r, "Bias": (curr-ma50)/ma50,
-            "Options": options, "5D": c5, "20D": c20, "60D": c60, "R20": c20-s20, "R60": c60-s60, "RS_Raw": (curr/close.iloc[-252])
+            "Price": curr, "Action": action, "Score": rs_raw, "ADR": adr_20,
+            "Vol_Ratio": vol_r, "Bias": (curr-ma50)/ma50, "Options": options,
+            "5D": float(curr/close.iloc[-5]-1), "20D": float(curr/close.iloc[-20]-1),
+            "60D": float(curr/close.iloc[-60]-1),
+            "R20": float(curr/close.iloc[-20]-1) - float(spy_df.iloc[-1]/spy_df.iloc[-20]-1),
+            "R60": float(curr/close.iloc[-60]-1) - float(spy_df.iloc[-1]/spy_df.iloc[-60]-1),
+            "RS_Raw": rs_raw
         }
     except: return None
 
 # ==========================================
-# 3. 终极输出引擎 (V10.2)
+# 3. 终极视觉输出 (V10.3)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -69,69 +75,80 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 格式初始化
-        sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
+        # 初始化格式
+        sh.format("A1:Q60", {
+            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10},
+            "horizontalAlignment": "CENTER"
+        })
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         header = [
-            ["🏰 [V10.2 巅峰 - 终极看板版]", "", "Update(BJ):", bj_time],
+            ["🏰 [V10.3 巅峰 - 完美审计版]", "", "Update(BJ):", bj_time],
             ["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
-            ["策略说明:", "🚀爆发 / 💎核心 / 🌀VCP紧缩 / ⚔️反包", "注:", "Score越高强度越大"]
+            ["策略说明:", "🚀爆发 / 🌀VCP紧缩 / 💎核心 / ⚔️反包", "注:", "Resonance > 3 代表行业板块过热"]
         ]
         sh.update(values=header, range_name="A1")
 
         if not results: return
-
         df = pd.DataFrame(results)
         cols_order = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
-        # 数据转字符串并格式化
-        output_data = [cols_order]
+        # 强制格式转换
+        data_rows = [cols_order]
         for _, row in df.iterrows():
             r = []
             for c in cols_order:
                 val = row.get(c, "")
-                if c in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.1f}%")
-                elif c == "Price": r.append(f"${float(val):.2f}")
-                elif c in ["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
-                else: r.append(str(val))
-            output_data.append(r)
+                if c in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]:
+                    r.append(f"{float(val)*100:.2f}%")
+                elif c == "Price":
+                    r.append(f"${float(val):.2f}")
+                elif c in ["Score", "Vol_Ratio"]:
+                    r.append(str(round(float(val), 2)))
+                else:
+                    r.append(str(val))
+            data_rows.append(r)
 
-        sh.update(values=output_data, range_name="A5", value_input_option='USER_ENTERED')
+        sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # --- 样式渲染 ---
+        # --- 视觉渲染 ---
         # 1. 亮绿色表头
         sh.format("A5:Q5", {"backgroundColor": {"red": 0, "green": 1, "blue": 0}, "textFormat": {"bold": True}})
         
-        # 2. 条件涂色 (Action 与 Options)
+        # 2. 批量涂色
         formats = []
-        for i in range(len(output_data)-1):
+        for i in range(len(data_rows)-1):
             row_idx = i + 6
-            action_val = output_data[i+1][3]
-            opt_val = output_data[i+1][10]
-            if "🚀" in action_val:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 1, "blue": 0.9}}})
-            elif "🌀" in action_val:
-                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}}) # 紧缩蓝色
-            if "🔥" in opt_val:
+            action_text = data_rows[i+1][3]
+            opt_text = data_rows[i+1][10]
+            
+            # 动量爆发 - 淡绿
+            if "🚀" in action_text:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
+            # VCP紧缩 - 淡蓝
+            elif "🌀" in action_text:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.95, "blue": 1}}})
+            # 机构扫货 - 红字
+            if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
         
         if formats: sh.batch_format(formats)
         
-        # 3. 自动调整列宽
-        widths = [65, 150, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
-        reqs = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
-        client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
+        # 3. 自动列宽 (Industry 特别加宽)
+        widths = [65, 170, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
+        requests = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
+        client.open_by_key(SHEET_ID).batch_update({"requests": requests})
 
-        print(f"✅ 看板 10.2 刷新成功！")
+        print(f"✅ V10.3 刷新成功！共审计 {len(data_rows)-1} 只强劲标的。")
     except Exception as e:
-        print(f"❌ 报错: {e}")
+        print(f"❌ 输出报错: {e}")
 
 # ==========================================
-# 4. 执行逻辑
+# 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全美股审计 (V10.2)...")
+    print("📡 正在全域扫描美股市场 (V10.3)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -140,50 +157,57 @@ def run_sentinel():
             tickers = CORE_LEADERS
         tickers = list(set(tickers + CORE_LEADERS))
         
-        data = yf.download(tickers + ["SPY", "^VIX"], period="1y", group_by='ticker', threads=True, progress=False)
+        # 抓取 2 年数据确保 MA200 和 RS 计算精准
+        data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
-        candidates = []
+        all_metrics = []
         breadth_cnt = 0
         for t in tickers:
             if t not in data.columns.levels[0]: continue
             df_t = data[t].dropna()
-            if len(df_t) < 150: continue
+            if len(df_t) < 200: continue
+            
+            # 计算全美宽度
             if df_t['Close'].iloc[-1] > df_t['Close'].rolling(50).mean().iloc[-1]: breadth_cnt += 1
             
             m = get_metrics(df_t, spy_df)
             if m:
                 m['Ticker'] = t
-                candidates.append(m)
+                all_metrics.append(m)
         
-        if not candidates: return
+        if not all_metrics: return
 
         # 计算 RS Rank
-        df_all = pd.DataFrame(candidates)
+        df_all = pd.DataFrame(all_metrics)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # 补充行业信息与共振
-        final_list = []
-        industry_counter = {}
+        # 补充行业信息并计算共振数 (Resonance)
+        processed_results = []
+        industry_map = {}
+        
+        print("🏢 正在抓取行业共振数据...")
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
-                ind, mkt = inf.get('industry', 'N/A'), f"{inf.get('marketCap', 0)/1e6:,.0f}"
-                industry_counter[ind] = industry_counter.get(ind, 0) + 1
-            except: ind, mkt = "N/A", "0"
+                ind = inf.get('industry', 'N/A')
+                mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
+                industry_map[ind] = industry_map.get(ind, 0) + 1
+            except:
+                ind, mkt = "N/A", "0"
             
             d = row.to_dict()
             d.update({"Industry": ind, "MktCap": mkt})
-            final_list.append(d)
+            processed_results.append(d)
         
-        # 填入行业共振数
-        for item in final_list:
-            item['Resonance'] = industry_counter.get(item['Industry'], 1)
+        # 注入 Resonance 数据
+        for item in processed_results:
+            item['Resonance'] = industry_map.get(item['Industry'], 1)
         
-        final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
+        final_output(processed_results, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
         print(f"🚨 崩溃: {e}")
