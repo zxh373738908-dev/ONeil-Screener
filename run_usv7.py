@@ -8,11 +8,12 @@ from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心配置 (已更新为你最新的 URL)
+# 1. 核心配置
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbytbf0t8IJFowrH7_PL0X3TEGwJUvdhHkMF7fXhiWBXquI1wBOi7MgAAzVmUhRY_56H/exec"
+# 使用你最新成功连通的 URL
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxuaL03C8-Ytsq4t-MADUA20wyjjyUKDpRK3nmxfiasFly8fl-lOnlpJ5xgZ7wYdas/exec"
 
-# 核心股票池
+# 现代核心资产池
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
     "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
@@ -67,7 +68,6 @@ def process_ticker(symbol, spy_data):
     except: return None
 
 def run_v20_engine():
-    # 只要你保存了文件，运行后第一句话绝对是这句！
     print(f"🚀 [V20.0 Dashboard] 引擎正式启动 | 时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
     
     spy = yf.download("SPY", period="1y", progress=False)['Close']
@@ -84,16 +84,18 @@ def run_v20_engine():
                 results.append(res["data"])
                 if res["above_ma50"]: above_50_count += 1
 
+    # 排序：Score 分数优先，然后是 R20 相对强度
     results.sort(key=lambda x: (x[2], x[15]), reverse=True)
     
-    # 动态计算全美宽度
+    # 动态计算核心池多头比例 (代替之前的"全美宽度")
     breadth = (above_50_count / len(CORE_TICKERS)) * 100
     weather = "☀️" if breadth > 60 else ("☁️" if breadth > 40 else "🌧️")
     
     # 构造 V20 仪表盘 (前4行)
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     row1 = ["🏰 [V20.0 终极共振对齐版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", ""]
-    row2 = ["市场天气:", weather, "", "", "全美宽度:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", ""]
+    # 👇 这里已经修改为 "核心池多头:"
+    row2 = ["市场天气:", weather, "", "", "核心池多头:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", ""]
     row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色 / =2 紫色", "", "", "", "", "", "", "", "", "", "", ""]
     row4 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
 
@@ -101,7 +103,7 @@ def run_v20_engine():
 
     try:
         resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=30)
-        print(f"✨ 云端同步完成 | 宽度: {breadth:.1f}% | 反馈: {resp.text}")
+        print(f"✨ 云端同步完成 | 核心池多头: {breadth:.1f}% | 反馈: {resp.text}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
