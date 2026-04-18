@@ -33,23 +33,21 @@ EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'REIT', 'Utilities', '
 # ==========================================
 # 2. 核心數據處理函數
 # ==========================================
-def fetch_info_v13(t):
+def fetch_info_v14(t):
     for i in range(3):
         try:
-            time.sleep(random.uniform(0.6, 1.2)) 
+            time.sleep(random.uniform(0.5, 1.0)) 
             ticker = yf.Ticker(t)
             info = ticker.info
-            if info and 'industry' in info:
-                return t, info
-        except:
-            time.sleep(2)
+            if info and ('industry' in info): return t, info
+        except: time.sleep(1.5)
     return t, {}
 
 def sync_to_google_sheet(sheet_name, matrix):
     try:
         payload = {"sheet_name": sheet_name, "data": json.loads(json.dumps(matrix, default=str))}
         requests.post(WEBAPP_URL, json=payload, timeout=35)
-        print(f"🎉 同步成功至分頁: [{sheet_name}]")
+        print(f"🎉 V14 同步成功！")
     except Exception as e: print(f"❌ 同步失敗: {e}")
 
 def get_return(series, days):
@@ -58,26 +56,25 @@ def get_return(series, days):
     return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
 
 # ==========================================
-# 3. 核心量化模型 V13 (寬度與排序優化版)
+# 3. 核心量化模型 V14
 # ==========================================
-def run_super_growth_v13():
+def run_super_growth_v14():
     update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     universe_tickers = get_universe()
     
     print("\n" + "="*50)
-    print(f"🚀 [超級成長股 V13] 啟動 | 正在執行標準全美寬度(50MA)計算...")
+    print(f"🚀 [超級成長股 V14] 啟動 | 精確 17 列格式校對...")
     
-    # 1. 大盤指標
+    # 1. 指標獲取
     try:
         spy_hist = yf.download("SPY", period="1y", interval="1d", progress=False)['Close'].dropna()
         vix_val = float(yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1])
         curr_spy, ma50_spy = float(spy_hist.iloc[-1]), float(spy_hist.tail(50).mean())
         spy_ret = {20: get_return(spy_hist, 20), 60: get_return(spy_hist, 60)}
         weather_icon = "☀️" if curr_spy > ma50_spy and vix_val < 20 else ("☁️" if curr_spy > ma50_spy or vix_val < 25 else "⛈️")
-    except:
-        weather_icon, vix_val, spy_ret = "❓", 0, {20:0, 60:0}
+    except: weather_icon, vix_val, spy_ret = "❓", 0, {20:0, 60:0}
 
-    # 2. 批量技術掃描
+    # 2. 技術面
     hist = yf.download(universe_tickers, period="1y", interval="1d", progress=False, threads=True)
     close_df, vol_df, high_df, low_df = hist['Close'], hist['Volume'], hist['High'], hist['Low']
 
@@ -88,39 +85,31 @@ def run_super_growth_v13():
             if t not in close_df.columns: continue
             c, v, h, l_ = close_df[t].dropna(), vol_df[t].dropna(), high_df[t].dropna(), low_df[t].dropna()
             if len(c) < 150: continue
-            
             p = float(c.iloc[-1])
             m20, m50, m200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            # --- 修正寬度定義：站上 50MA 的比例 ---
             if p > m50: above_50ma_count += 1
+            if p > m20 > m50 > m200: perfect_tickers.append(t)
             
-            is_perfect = p > m20 > m50 > m200
-            if is_perfect: perfect_tickers.append(t)
-            
-            # 入選過濾
             if not (p > m50 and m50 > m200): continue
             if v.tail(40).mean() * p < 20_000_000: continue
             
             rs_raw = (get_return(c, 20) * 0.4) + (get_return(c, 60) * 0.3) + (get_return(c, 120) * 0.3)
             tech_results[t] = {
                 "Price": p, "ADR": ((h - l_) / l_).tail(20).mean() * 100,
-                "VolRatio": v.iloc[-1] / v.tail(20).mean() if v.tail(20).mean() > 0 else 1,
+                "Vol": v.iloc[-1] / v.tail(20).mean() if v.tail(20).mean() > 0 else 1,
                 "Bias": ((p - m20) / m20) * 100, "RS_Raw": rs_raw,
                 "5D": get_return(c, 5), "20D": get_return(c, 20), "60D": get_return(c, 60),
-                "R20": get_return(c, 20) - spy_ret[20], "R60": get_return(c, 60) - spy_ret[60],
-                "Trend": "完美多頭" if is_perfect else "上升通道"
+                "R20": get_return(c, 20) - spy_ret[20], "R60": get_return(c, 60) - spy_ret[60]
             }
         except: continue
 
-    # 計算全美寬度
     us_breadth = (above_50ma_count / len(universe_tickers) * 100)
 
-    # 3. 獲取基本面 (限制併發)
-    print(f"✅ 全美寬度(50MA): {us_breadth:.1f}% | 完美共振股: {len(perfect_tickers)} 隻")
+    # 3. 基本面 (Fetch)
     infos = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
-        for t, info in executor.map(fetch_info_v13, list(tech_results.keys())):
+        for t, info in executor.map(fetch_info_v14, list(tech_results.keys()) + perfect_tickers):
             if info: infos[t] = info
 
     res_map = {}
@@ -139,39 +128,29 @@ def run_super_growth_v13():
         rs = rs_ranks.get(t, 0)
         score = (rs * 0.7) + ((info.get('revenueGrowth', 0) or 0) * 100 * 0.3)
         
-        action = "🎯 買點區" if data['Bias'] < 4 and rs > 90 else ("⌛ 等待回踩" if data['Bias'] > 12 else "👀 觀察")
-        opt = "🔥 Call" if data['ADR'] > 3.5 and rs > 90 else "N/A"
-
-        final_pool.append({
-            "Ticker": t, "Industry": industry[:18], "Score": score, "Action": action,
-            "Resonance": f"{res_map.get(industry, 0)} 隻", "ADR": f"{round(data['ADR'], 2)}%",
-            "Vol": f"{round(data['VolRatio'], 2)}x", "Bias": f"{round(data['Bias'], 2)}%",
-            "MCap": round(info.get('marketCap', 0) / 1000000, 1), "RS": round(rs, 1),
-            "Opt": opt, "Price": data['Price'], "5D": f"{round(data['5D']*100, 2)}%",
-            "20D": f"{round(data['20D']*100, 2)}%", "60D": f"{round(data['60D']*100, 2)}%",
-            "R20": f"{round(data['R20']*100, 2)}%", "R60": f"{round(data['R60']*100, 2)}%"
-        })
-
-    # --- 排序邏輯：優先選擇評分最高的前 10 隻 ---
-    top_10 = sorted(final_pool, key=lambda x: x['Score'], reverse=True)[:10]
-
-    # ==========================================
-    # 4. 輸出至 Google Sheets
-    # ==========================================
-    h_text = f"天气:{weather_icon} | 全美宽度(50MA):{us_breadth:.1f}% | 行业共振:{len(perfect_tickers)}隻 | VIX:{vix_val:.1f}"
-    row1 = [f"SuperGrowth Portfolio V13", f"更新: {update_time}", h_text, ""] + [""] * 13
-    row2 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap(M)", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
-    
-    matrix = [row1, row2]
-    for r in top_10:
-        matrix.append([
-            r['Ticker'], r['Industry'], round(r['Score'], 1), r['Action'], r['Resonance'],
-            r['ADR'], r['Vol'], r['Bias'], r['MCap'], r['RS'], r['Opt'],
-            float(r['Price']), # L列格式請手動設為「數值」
-            r['5D'], r['20D'], r['60D'], r['R20'], r['R60']
+        # 精確 Action 文字 (不包含共振數)
+        if data['Bias'] < 5 and rs > 92: action = "🎯 買點"
+        elif data['Bias'] > 12: action = "⌛ 等待"
+        else: action = "👀 觀察"
+        
+        final_pool.append([
+            t, industry[:18], round(score, 1), action, f"{res_map.get(industry, 0)} 隻",
+            f"{round(data['ADR'], 2)}%", f"{round(data['Vol'], 2)}x", f"{round(data['Bias'], 2)}%",
+            round(info.get('marketCap', 0)/1000000, 1), round(rs, 1),
+            "🔥 Call" if data['ADR'] > 3.5 and rs > 90 else "N/A",
+            round(data['Price'], 2), # Price 以 float 傳入
+            f"{round(data['5D']*100, 2)}%", f"{round(data['20D']*100, 2)}%", f"{round(data['60D']*100, 2)}%",
+            f"{round(data['R20']*100, 2)}%", f"{round(data['R60']*100, 2)}%"
         ])
 
-    sync_to_google_sheet(TARGET_SHEET, matrix)
+    # 4. 排序並輸出
+    top_10 = sorted(final_pool, key=lambda x: x[2], reverse=True)[:10]
+
+    h_text = f"天气:{weather_icon} | 全美宽度(50MA):{us_breadth:.1f}% | 行业共振:{len(perfect_tickers)}隻 | VIX:{vix_val:.1f}"
+    row1 = [f"SuperGrowth Portfolio V14", f"更新: {update_time}", h_text, ""] + [""] * 13
+    row2 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap(M)", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+    
+    sync_to_google_sheet(TARGET_SHEET, [row1, row2] + top_10)
 
 if __name__ == "__main__":
-    run_super_growth_v13()
+    run_super_growth_v14()
