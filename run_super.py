@@ -30,12 +30,13 @@ try:
     print(f"✅ 成功獲取 {len(UNIVERSE)} 隻候選股！")
 except Exception as e:
     print(f"⚠️ 獲取名單失敗，使用備用大型股池... ({e})")
-    UNIVERSE =["AAPL", "MSFT", "GOOGL", "AVGO", "CAVA", "FIVE", "MCK", "PWR", "VRT", "HWM", "NVDA", "META", "TSLA", "AMD"]
+    UNIVERSE =["AAPL", "MSFT", "GOOGL", "AVGO", "CAVA", "FIVE", "MCK", "PWR", "VRT", "HWM", "NVDA", "META", "TSLA", "AMD", "LITE", "CIEN", "TER"]
 
-# 🛑 核心優化 1：擴大封殺範圍，徹底排除收息股、週期股、金融股
+# 徹底排除收息股、週期股、金融股
 EXCLUDED_INDUSTRIES =[
     'Banks', 'Insurance', 'Financial', 'Credit', 
-    'Real Estate', 'REIT', 'Utilities', 'Energy', 'Oil & Gas'
+    'Real Estate', 'REIT', 'Utilities', 'Energy', 'Oil & Gas',
+    'Metals', 'Mining', 'Chemicals'
 ]
 
 def sync_to_google_sheet(sheet_name, matrix):
@@ -45,7 +46,7 @@ def sync_to_google_sheet(sheet_name, matrix):
             return str(val) if not isinstance(val, (int, float)) else val
         payload = {"sheet_name": sheet_name, "data": json.loads(json.dumps(matrix, default=safe_json_val))}
         response = requests.post(WEBAPP_URL, json=payload, timeout=20)
-        print(f"🎉 成功同步 {len(matrix)-2} 隻股票至 Google Sheets -> 分頁: [{sheet_name}]")
+        print(f"🎉 成功同步數據至 Google Sheets -> 分頁: [{sheet_name}]")
     except Exception as e: 
         print(f"❌ 同步失敗: {e}")
 
@@ -55,18 +56,31 @@ def get_return(series, days):
     return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
 
 # ==========================================
-# 2. 核心量化模型 (強勢動量漏斗版)
+# 2. 核心量化模型 (高勝率 + 終極防禦版)
 # ==========================================
 def run_super_growth_funnel():
     print("\n" + "="*50)
-    print("🚀 [超級成長股 - 強勢動量糾偏版] 啟動掃描...")
+    print("🚀[超級成長股 - 高勝率防禦版] 啟動掃描...")
     
+    # 🛡️ 防禦裝甲 1：大盤環境探測 (Market Regime)
     try:
         spy_close = yf.download("SPY", period="1y", interval="1d", progress=False)['Close']
         if isinstance(spy_close, pd.DataFrame): spy_close = spy_close['SPY']
+        
+        curr_spy = float(spy_close.iloc[-1])
+        ma50_spy = float(spy_close.tail(50).mean())
+        
+        # 判斷牛熊：SPY 是否在 50MA 之上
+        is_bull_market = curr_spy > ma50_spy
         spy_ret = {5: get_return(spy_close, 5), 20: get_return(spy_close, 20), 60: get_return(spy_close, 60)}
     except:
+        is_bull_market = True
         spy_ret = {5: 0, 20: 0, 60: 0} 
+        
+    # 決定選股數量：多頭選 10 隻，弱勢大盤嚴格控制風險只選 3 隻
+    MAX_STOCKS = 10 if is_bull_market else 3
+    market_status_str = f"🟢多頭(滿倉10隻)" if is_bull_market else f"🔴弱勢(限縮3隻)"
+    print(f"📈 大盤狀態: {market_status_str}")
 
     print(f"📡 批量下載股票技術特徵...")
     hist_data = yf.download(UNIVERSE, period="1y", interval="1d", progress=False, threads=True)
@@ -87,9 +101,15 @@ def run_super_growth_funnel():
             price = float(c.iloc[-1])
             ma20, ma50, ma200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            # 🛑 核心優化 2：增加 price > ma50，防止抓到剛暴跌但均線還沒死叉的假多頭
+            # 均線多頭過濾
             if not (price > ma50 and ma20 > ma50 and ma50 > ma200): continue
             if v.tail(40).mean() * price < 20_000_000: continue
+            
+            # 🛡️ 防禦裝甲 2：VCP 波動收斂過濾 (Tightness)
+            # 計算近 15 天波動率 (標準差 / 均值)。如果大於 0.15 (15%)，代表籌碼混亂、追高風險極大，直接淘汰
+            vcp_tightness = float(c.tail(15).std() / c.tail(15).mean())
+            if vcp_tightness > 0.15: 
+                continue
             
             ret_5, ret_20, ret_60, ret_120 = get_return(c, 5), get_return(c, 20), get_return(c, 60), get_return(c, 120)
             rs_scores[t] = (ret_20 * 0.4) + (ret_60 * 0.3) + (ret_120 * 0.3)
@@ -107,7 +127,7 @@ def run_super_growth_funnel():
     rs_series = pd.Series(rs_scores)
     rs_ranks = (rs_series.rank(pct=True) * 100).to_dict()
 
-    print(f"✅ 技術過濾剩餘 {len(valid_technical_pool)} 隻，開始並行獲取基本面...")
+    print(f"✅ 技術與 VCP 過濾剩餘 {len(valid_technical_pool)} 隻，開始並行獲取基本面...")
     
     def fetch_info(t):
         try: return t, yf.Ticker(t).info
@@ -131,52 +151,62 @@ def run_super_growth_funnel():
             continue
         if info.get('marketCap', 0) == 0: continue
         
-        # 🛑 核心優化 3：硬性要求營收必須正向增長 (真正的成長股)
+        # 硬性要求營收必須正向增長
         rev_growth = info.get('revenueGrowth', 0) or 0
         if rev_growth <= 0: continue
         
         op_margin = info.get('operatingMargins', 0) or 0
-        fcf = info.get('freeCashflow', 0) or 0
-        rev = info.get('totalRevenue', 1)
-        fcf_margin = fcf / rev if rev > 0 else 0
-        
         if op_margin <= -0.1: continue 
             
-        fg_score = (rev_growth * 100) + (op_margin * 100) + (fcf_margin * 100)
-        
         data = valid_technical_pool[t]
         data.update({
             "Ticker": t, "Industry": industry_str[:15], 
             "Market Cap": info.get('marketCap') / 1_000_000,
-            "RS Rank": rs_ranks[t], "FG Score": fg_score
+            "RS Rank": rs_ranks[t]
         })
         fundamental_candidates.append(data)
 
-    # 🛑 核心優化 4：先保證動量強勢 (RS Rank > 75)，再挑市值最小的！
-    # 這樣選出來的才是「活潑且強勢」的超級成長股，而不是跌在地板上的冷門小盤股
-    strong_momentum_pool = [x for x in fundamental_candidates if x['RS Rank'] >= 75]
-    
-    # 防禦機制：如果大盤極度糟糕，滿足 RS > 75 的不到 10 隻，則降級選取排名前 15 隻強勢股
-    if len(strong_momentum_pool) < 10:
+    # 確保動量強勢 (RS Rank > 75)
+    strong_momentum_pool =[x for x in fundamental_candidates if x['RS Rank'] >= 75]
+    if len(strong_momentum_pool) < MAX_STOCKS:
         strong_momentum_pool = sorted(fundamental_candidates, key=lambda x: x['RS Rank'], reverse=True)[:15]
 
-    # 在「確認是強勢股」的池子裡，挑選市值最小的 10 隻
-    top_10 = sorted(strong_momentum_pool, key=lambda x: x['Market Cap'])[:10]
+    # 按市值從小到大排序，準備進行行業分散挑選
+    sorted_by_cap = sorted(strong_momentum_pool, key=lambda x: x['Market Cap'])
     
-    # 最終輸出時按 RS Rank 降序，方便一眼看出誰最強
-    top_10.sort(key=lambda x: x['RS Rank'], reverse=True)
+    top_final =[]
+    industry_counts = {}
+
+    # 🛡️ 防禦裝甲 3：強制行業分散 (同一個行業最多 2 隻)
+    for stock in sorted_by_cap:
+        ind = stock['Industry']
+        
+        # 如果該行業已經選了 2 隻，就強制跳過，尋找下一隻
+        if industry_counts.get(ind, 0) >= 2:
+            continue
+            
+        top_final.append(stock)
+        industry_counts[ind] = industry_counts.get(ind, 0) + 1
+        
+        # 達到大盤允許的最大檔數就停止
+        if len(top_final) >= MAX_STOCKS:
+            break
+    
+    # 最終輸出時按 RS Rank 降序
+    top_final.sort(key=lambda x: x['RS Rank'], reverse=True)
 
     # ==========================================
     # 3. 輸出至 Google Sheets
     # ==========================================
     col_len = 11
-    row1 =["SuperGrowth Portfolio", f"更新: {datetime.datetime.now().strftime('%Y-%m-%d')}", "REL=相對SPY報酬"] + [""] * (col_len - 3)
+    # 將大盤狀態寫入表頭的第一行，方便你每天打開表格時一眼看到警示
+    row1 =["SuperGrowth Portfolio", f"更新: {datetime.datetime.now().strftime('%Y-%m-%d')}", f"大盤: {market_status_str}", "REL=相對SPY報酬"] + [""] * (col_len - 4)
     row2 =["Ticker", "Industry", "Price", "Market Cap(M)", "RS Rank", "5D%", "20D%", "60D%", "REL 5", "REL 20", "REL 60"]
     
     header =[row1, row2]
     
     final_list =[]
-    for r in top_10:
+    for r in top_final:
         rs_str = f"⭐ {round(r['RS Rank'], 1)}" if r['RS Rank'] >= 90 else (f"⚠️ {round(r['RS Rank'], 1)}" if r['RS Rank'] < 80 else round(r['RS Rank'], 1))
         
         final_list.append([
@@ -189,7 +219,7 @@ def run_super_growth_funnel():
     matrix_to_upload = header + final_list
     sync_to_google_sheet(TARGET_SHEET, matrix_to_upload)
     
-    print("\n📊 入選 10 隻超級成長股預覽:")
+    print("\n📊 入選超級成長股預覽:")
     df_show = pd.DataFrame(final_list, columns=row2)
     print(df_show.to_string(index=False))
 
