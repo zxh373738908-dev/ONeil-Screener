@@ -6,6 +6,7 @@ from google.oauth2.service_account import Credentials
 import datetime
 import warnings
 import traceback
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -15,16 +16,6 @@ warnings.filterwarnings('ignore')
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
 CORE_LEADERS =["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
-
-# 核心池强制大板块映射
-CORE_SECTORS = {
-    "NVDA": "Information Technology", "AAPL": "Information Technology",
-    "MSFT": "Information Technology", "TSLA": "Consumer Discretionary",
-    "META": "Communication Services", "GOOGL": "Communication Services",
-    "AMZN": "Consumer Discretionary", "NFLX": "Communication Services",
-    "PLTR": "Information Technology", "AVGO": "Information Technology",
-    "COST": "Consumer Staples"
-}
 
 # ==========================================
 # 🛡️ 核心 V750 巅峰引擎
@@ -65,9 +56,9 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎
+# 3. 终极视觉输出引擎 (V14.0)
 # ==========================================
-def final_output(df_final, vix, breadth):
+def final_output(results, vix, breadth):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
@@ -76,27 +67,30 @@ def final_output(df_final, vix, breadth):
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
-        header = [["🏰[V13.0 宏观主线 - 强效共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance 按大板块统计 (≥4爆红)"]
+        header =[
+            ["🏰[V14.0 绝杀 - 暴力共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 触发绝对红突"]
         ]
         sh.update(values=header, range_name="A1")
 
-        if df_final.empty: return
-        
+        if not results: return
+        df = pd.DataFrame(results)
         cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
         data_rows = [cols_order]
-        for _, row in df_final.iterrows():
+        for _, row in df.iterrows():
             r =[]
             for c in cols_order:
                 val = row.get(c, "")
                 if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
-                elif c == "Resonance": r.append(str(int(val))) 
+                elif c == "Resonance": r.append(str(int(val))) # 绝对保证写进去的是整数的字符串
                 else: r.append(str(val))
             data_rows.append(r)
 
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
+        
+        # 表头涂色
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
         formats =[]
@@ -107,27 +101,29 @@ def final_output(df_final, vix, breadth):
             try: res_val = int(data_rows[i+1][4])
             except: res_val = 1
             
+            # Action 背景涂色
             if "🚀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1}}})
             
+            # 期权涂色
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
                 
-            # 大板块共振阈值提高，因为基数变大了
-            if res_val >= 4:
+            # 共振阶梯涂色 (暴力高亮)
+            if res_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
-            elif res_val >= 2:
+            elif res_val == 2:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.5, "green": 0, "blue": 0.5}}}})
         
         if formats: sh.batch_format(formats)
         
-        widths =[65, 210, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
+        widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V13.0 刷新成功！大板块共振系统已启动。")
+        print(f"✅ V14.0 刷新成功！请到 Google Sheets 查看。")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -135,21 +131,13 @@ def final_output(df_final, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全量扫描 (V13.0)...")
+    print("📡 开启全域扫描 (V14.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        sp_df = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]
-        sp_df['Symbol'] = sp_df['Symbol'].str.replace('.', '-')
+        tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
+        tickers = list(set(tickers + CORE_LEADERS))
         
-        # 提取 宏观板块(Sector) 和 细分行业(Sub-Industry)
-        sector_dict = dict(zip(sp_df['Symbol'], sp_df['GICS Sector']))
-        sub_dict = dict(zip(sp_df['Symbol'], sp_df['GICS Sub-Industry']))
-        
-        sector_dict.update(CORE_SECTORS)
-        
-        tickers = list(set(list(sector_dict.keys()) + CORE_LEADERS))
-        
-        data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
+        data = yf.download(tickers + ["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
@@ -170,39 +158,47 @@ def run_sentinel():
 
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
-        df_top = df_all.sort_values("Score", ascending=False).head(28).copy()
+        df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        print("🏢 正在使用底层 Pandas 进行大板块聚类计算...")
-        
-        # 1. 映射 Sector 和 Sub-Industry
-        df_top['Sector'] = df_top['Ticker'].map(sector_dict).fillna("Unknown")
-        df_top['SubIndustry'] = df_top['Ticker'].map(sub_dict).fillna("")
-        
-        # 2. Industry 显示列：格式为 "Information Technology - Semiconductors"
-        df_top['Industry'] = df_top.apply(lambda x: f"{x['Sector']} - {x['SubIndustry']}" if x['SubIndustry'] else x['Sector'], axis=1)
-        df_top['Industry'] = df_top['Industry'].str.replace("Unknown - ", "Unknown")
-        
-        # 3. 核心大招：按照宏观 Sector 计算共振！！！
-        df_top['Resonance'] = df_top.groupby('Sector')['Sector'].transform('count')
-        df_top.loc[df_top['Sector'] == 'Unknown', 'Resonance'] = 1
-        
-        # 终端实时预览
-        print("\n📊 === 当前大板块热点扫描结果 ===")
-        print(df_top[['Ticker', 'Sector', 'Resonance']].head(15))
-        print("================================\n")
-        
-        # 4. 补充市值 (这里如果断网不影响核心逻辑)
+        # 1. 第一轮循环：只抓取基础数据
+        print("🏢 正在抓取公司行业基础数据...")
         final_list =[]
-        for idx, row in df_top.iterrows():
+        for _, row in df_top.iterrows():
             t = row['Ticker']
-            try: mkt = f"{yf.Ticker(t).info.get('marketCap', 0)/1e6:,.0f}"
-            except: mkt = "N/A"
+            try:
+                inf = yf.Ticker(t).info
+                # 强制清除两边空格
+                ind = str(inf.get('industry', 'N/A')).strip()
+                mkt = f"{inf.get('marketCap', 0)/1e6:,.0f}"
+            except:
+                ind, mkt = "N/A", "0"
             
             d = row.to_dict()
+            d['Industry'] = ind
             d['MktCap'] = mkt
             final_list.append(d)
-
-        final_output(pd.DataFrame(final_list), vix, (breadth_cnt/len(tickers)*100))
+        
+        # 2. 核心大绝招：提取所有行业，用原生 Python List 暴力计算出现次数
+        all_industries = [item['Industry'] for item in final_list if item['Industry'] != "N/A"]
+        
+        print("\n📊 === 终端数据验证 (如果这里是 4，表格里就一定是 4) ===")
+        
+        # 3. 第二轮循环：把计算出的共振数原封不动塞进字典
+        for item in final_list:
+            current_industry = item['Industry']
+            if current_industry == "N/A":
+                item['Resonance'] = 1
+            else:
+                # 暴力硬数：这个名字在刚才抓到的列表里出现了几次？
+                actual_count = all_industries.count(current_industry)
+                item['Resonance'] = actual_count
+                
+            print(f"{item['Ticker']:<5} | {item['Industry']:<30} | Resonance: {item['Resonance']}")
+            
+        print("========================================================\n")
+        
+        # 4. 把含有正确 Resonance 的 final_list 传给输出函数
+        final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
         print(f"🚨 崩溃: {e}")
