@@ -83,7 +83,7 @@ def final_output(results, vix, breadth):
         df = pd.DataFrame(results)
         cols_order =["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
-        data_rows = [cols_order]
+        data_rows =[cols_order]
         for _, row in df.iterrows():
             r =[]
             for c in cols_order:
@@ -190,7 +190,7 @@ def run_sentinel():
             d['MktCap'] = mkt
             final_list.append(d)
         
-        all_industries = [item['Industry'] for item in final_list if item['Industry'] != "N/A"]
+        all_industries =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         
         for item in final_list:
             current_industry = item['Industry']
