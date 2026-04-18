@@ -15,47 +15,53 @@ warnings.filterwarnings('ignore')
 # ==========================================
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
-# 核心池 (确保永远有数据显示，防止变白)
 CORE_LEADERS = ["NVDA", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN", "NFLX", "PLTR", "AVGO", "COST"]
 
 # ==========================================
-# 🛡️ 核心计算引擎
+# 🛡️ 核心计算引擎 (加入 VCP 与 深度指标)
 # ==========================================
 def get_metrics(df, spy_df):
     try:
-        close = df['Close']
+        close, high, low, vol = df['Close'], df['High'], df['Low'], df['Volume']
         if len(close) < 150: return None
         curr = float(close.iloc[-1])
         
-        # 基础计算 (ADR, 量比, 乖离)
-        adr = float(((df['High'] - df['Low']) / df['Low']).tail(20).mean())
-        vol_r = float(df['Volume'].iloc[-1] / df['Volume'].tail(20).mean())
+        # 1. 基础指标
+        adr_20 = float(((high - low) / low).tail(20).mean())
+        adr_60 = float(((high - low) / low).tail(60).mean())
+        vol_r = float(vol.iloc[-1] / vol.tail(20).mean())
         ma50 = float(close.rolling(50).mean().iloc[-1])
+        ma200 = float(close.rolling(200).mean().iloc[-1])
         
-        # 涨幅计算
-        c5 = float(curr/close.iloc[-5]-1) if len(close)>5 else 0
-        c20 = float(curr/close.iloc[-20]-1) if len(close)>20 else 0
-        c60 = float(curr/close.iloc[-60]-1) if len(close)>60 else 0
+        # 2. VCP 紧缩逻辑：最近波幅小于前期波幅的 80%
+        is_vcp = bool(adr_20 < adr_60 * 0.8)
         
-        # 相对大盘强度 (REL)
+        # 3. 涨幅与相对强度
+        c5, c20, c60 = float(curr/close.iloc[-5]-1), float(curr/close.iloc[-20]-1), float(curr/close.iloc[-60]-1)
         s20 = float(spy_df.iloc[-1]/spy_df.iloc[-20]-1)
         s60 = float(spy_df.iloc[-1]/spy_df.iloc[-60]-1)
         
-        # RS Score
-        rs_s = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]))
-        
-        action = "💎 核心趋势" if curr > ma50 else "观察"
-        if curr >= close.tail(60).max() * 0.99: action = "🚀 动量爆发"
-        
+        # 4. 状态判断
+        action = "观察"
+        if curr >= close.tail(126).max() * 0.98: action = "🚀 动量爆发"
+        elif is_vcp and curr > ma50: action = "🌀 VCP紧缩"
+        elif curr > ma50 > ma200: action = "💎 核心趋势"
+        elif vol_r > 2.2 and curr > low.iloc[-1]: action = "⚔️ 极速反包"
+
+        # 5. 期权/成交量异动
+        options = "平稳"
+        if vol_r > 3.0: options = "🔥 机构扫货"
+        elif vol_r > 2.0: options = "👀 异动预警"
+
         return {
-            "Price": curr, "Action": action, "Score": rs_s, "ADR": adr,
-            "Vol_Ratio": vol_r, "Bias": float((curr-ma50)/ma50),
-            "5D": c5, "20D": c20, "60D": c60, "R20": c20-s20, "R60": c60-s60, "RS_Raw": rs_s
+            "Price": curr, "Action": action, "Score": (curr/close.iloc[-63])*2 + (curr/close.iloc[-126]),
+            "ADR": adr_20, "Vol_Ratio": vol_r, "Bias": (curr-ma50)/ma50,
+            "Options": options, "5D": c5, "20D": c20, "60D": c60, "R20": c20-s20, "R60": c60-s60, "RS_Raw": (curr/close.iloc[-252])
         }
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出 (解决数据不见的问题)
+# 3. 终极输出引擎 (V10.2)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -63,116 +69,121 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # --- 暴力格式初始化：防止文字隐身 ---
-        sh.format("A1:Q60", {
-            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
-            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10},
-            "horizontalAlignment": "CENTER"
-        })
+        # 格式初始化
+        sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
-        
         header = [
-            ["🏰 [V10.1 巅峰 - 修复运行版]", "", "Update(BJ):", bj_time],
-            ["市场天气:", "☀️" if vix < 20 else "☁️", "宽度:", f"{breadth:.1f}%", "VIX:", str(round(vix, 2))],
-            ["状态说明:", "🚀爆发 / 💎核心 / 🌀紧缩 / ⚔️反包", "注:", "若扫描无果则显示核心池数据"]
+            ["🏰 [V10.2 巅峰 - 终极看板版]", "", "Update(BJ):", bj_time],
+            ["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
+            ["策略说明:", "🚀爆发 / 💎核心 / 🌀VCP紧缩 / ⚔️反包", "注:", "Score越高强度越大"]
         ]
         sh.update(values=header, range_name="A1")
 
-        if not results:
-            sh.update(values=[["⚠️ 正在重新扫描，请刷新页面或等待..."]], range_name="A5")
-            return
+        if not results: return
 
         df = pd.DataFrame(results)
-        # 定义 17 列顺序
         cols_order = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
         
-        # --- 强制类型转换：所有数据转为纯字符串 ---
+        # 数据转字符串并格式化
         output_data = [cols_order]
         for _, row in df.iterrows():
             r = []
             for c in cols_order:
                 val = row.get(c, "")
-                if c in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]:
-                    r.append(f"{float(val)*100:.1f}%")
-                elif c == "Price":
-                    r.append(f"${float(val):.2f}")
-                elif c in ["Score", "Vol_Ratio"]:
-                    r.append(str(round(float(val), 2)))
-                else:
-                    r.append(str(val))
+                if c in ["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.1f}%")
+                elif c == "Price": r.append(f"${float(val):.2f}")
+                elif c in ["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
+                else: r.append(str(val))
             output_data.append(r)
 
-        # 写入数据
         sh.update(values=output_data, range_name="A5", value_input_option='USER_ENTERED')
         
-        # --- 样式：亮绿色表头 ---
-        sh.format("A5:Q5", {
-            "backgroundColor": {"red": 0, "green": 1, "blue": 0}, 
-            "textFormat": {"bold": True, "foregroundColor": {"red": 0, "green": 0, "blue": 0}}
-        })
+        # --- 样式渲染 ---
+        # 1. 亮绿色表头
+        sh.format("A5:Q5", {"backgroundColor": {"red": 0, "green": 1, "blue": 0}, "textFormat": {"bold": True}})
         
-        # 自动调整列宽
-        widths = [60, 130, 60, 100, 60, 70, 60, 60, 90, 60, 90, 80, 60, 60, 60, 60, 60]
+        # 2. 条件涂色 (Action 与 Options)
+        formats = []
+        for i in range(len(output_data)-1):
+            row_idx = i + 6
+            action_val = output_data[i+1][3]
+            opt_val = output_data[i+1][10]
+            if "🚀" in action_val:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 1, "blue": 0.9}}})
+            elif "🌀" in action_val:
+                formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}}) # 紧缩蓝色
+            if "🔥" in opt_val:
+                formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
+        
+        if formats: sh.batch_format(formats)
+        
+        # 3. 自动调整列宽
+        widths = [65, 150, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
         reqs = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ 看板刷新成功！共写入 {len(output_data)-1} 行。")
+        print(f"✅ 看板 10.2 刷新成功！")
     except Exception as e:
         print(f"❌ 报错: {e}")
-        traceback.print_exc()
 
 # ==========================================
-# 4. 主执行逻辑
+# 4. 执行逻辑
 # ==========================================
 def run_sentinel():
-    print("📡 开启全美股审计 (V10.1)...")
+    print("📡 开启全美股审计 (V10.2)...")
     try:
-        # 获取标的
+        headers = {'User-Agent': 'Mozilla/5.0'}
         try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
             tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
         except:
             tickers = CORE_LEADERS
-        
         tickers = list(set(tickers + CORE_LEADERS))
         
-        # 抓取行情
         data = yf.download(tickers + ["SPY", "^VIX"], period="1y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
         
         candidates = []
+        breadth_cnt = 0
         for t in tickers:
             if t not in data.columns.levels[0]: continue
-            metrics = get_metrics(data[t].dropna(), spy_df)
-            if metrics:
-                metrics['Ticker'] = t
-                candidates.append(metrics)
+            df_t = data[t].dropna()
+            if len(df_t) < 150: continue
+            if df_t['Close'].iloc[-1] > df_t['Close'].rolling(50).mean().iloc[-1]: breadth_cnt += 1
+            
+            m = get_metrics(df_t, spy_df)
+            if m:
+                m['Ticker'] = t
+                candidates.append(m)
         
-        if not candidates:
-            print("未找到符合形态的股票。")
-            final_output([], vix, 0); return
+        if not candidates: return
 
+        # 计算 RS Rank
         df_all = pd.DataFrame(candidates)
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
+        # 补充行业信息与共振
         final_list = []
-        # 补充行业信息 (批量模式)
+        industry_counter = {}
         for _, row in df_top.iterrows():
             t = row['Ticker']
             try:
                 inf = yf.Ticker(t).info
                 ind, mkt = inf.get('industry', 'N/A'), f"{inf.get('marketCap', 0)/1e6:,.0f}"
-            except:
-                ind, mkt = "N/A", "0"
+                industry_counter[ind] = industry_counter.get(ind, 0) + 1
+            except: ind, mkt = "N/A", "0"
             
             d = row.to_dict()
-            d.update({"Industry": ind, "MktCap": mkt, "Resonance": "1", "Options": "平稳"})
+            d.update({"Industry": ind, "MktCap": mkt})
             final_list.append(d)
         
-        final_output(final_list, vix, 60.0)
+        # 填入行业共振数
+        for item in final_list:
+            item['Resonance'] = industry_counter.get(item['Industry'], 1)
+        
+        final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
         print(f"🚨 崩溃: {e}")
