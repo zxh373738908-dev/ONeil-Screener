@@ -5,7 +5,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 import warnings
-import time
 import math
 import traceback
 
@@ -16,240 +15,143 @@ warnings.filterwarnings('ignore')
 # ==========================================
 SHEET_ID = "14v3_Rm60BsZtpyAY87urGsqPO00erUQT4lNZJjUDyK8"
 creds_file = "credentials.json"
-
 CORE_LEADERS = ["NVDA", "GOOGL", "CF", "PR", "TSLA", "PLTR", "META", "AVGO", "COST", "AAPL", "MSFT", "AMZN"]
 
 # ==========================================
-# 🛡️ 核心工具
+# 🛡️ 核心计算引擎
 # ==========================================
-def safe_div(n, d):
-    try:
-        n_f, d_f = float(n), float(d)
-        return n_f / d_f if d_f != 0 and math.isfinite(n_f) and math.isfinite(d_f) else 0.0
-    except: return 0.0
-
-# ==========================================
-# 2. V750 巅峰引擎 (增强版)
-# ==========================================
-def calculate_v750_apex_engine(df, spy_df):
+def calculate_metrics(df, spy_df):
     try:
         close = df['Close']
-        high = df['High']
-        low = df['Low']
-        vol = df['Volume']
+        if len(close) < 150: return None
+        curr = float(close.iloc[-1])
+        vol_ratio = float(df['Volume'].iloc[-1] / df['Volume'].tail(20).mean())
+        rs_raw = float((curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-189]))
         
-        if len(close) < 130: return None
-        curr = close.iloc[-1]
-        
-        # 1. 基础涨幅
-        chg_5d = (curr / close.iloc[-5] - 1)
-        chg_20d = (curr / close.iloc[-20] - 1)
-        chg_60d = (curr / close.iloc[-60] - 1)
-        
-        # 2. 相对强度 (REL)
-        spy_chg_20 = (spy_df.iloc[-1] / spy_df.iloc[-20] - 1)
-        spy_chg_60 = (spy_df.iloc[-1] / spy_df.iloc[-60] - 1)
-        rel_20 = chg_20d - spy_chg_20
-        rel_60 = chg_60d - spy_chg_60
-        
-        # 3. 技术指标
-        adr_20 = ((high - low) / low).tail(20).mean()
-        ma20 = close.rolling(20).mean().iloc[-1]
-        bias_20 = (curr - ma20) / ma20
-        avg_vol_20 = vol.tail(20).mean()
-        vol_ratio = vol.iloc[-1] / avg_vol_20 if avg_vol_20 > 0 else 0
-        
-        # 4. IBD RS Score 计算 (加权)
-        rs_raw = ( (curr/close.iloc[-63])*2 + (curr/close.iloc[-126]) + (curr/close.iloc[-189]) + (curr/close.iloc[-252]) )
-        
-        # 5. 趋势状态判断
-        ma50 = close.rolling(50).mean().iloc[-1]
-        ma200 = close.rolling(200).mean().iloc[-1]
-        ema10 = close.ewm(span=10, adjust=False).mean().iloc[-1]
-        
-        rs_line = (close / spy_df).ffill()
-        rs_nh = rs_line.iloc[-1] >= rs_line.tail(60).max()
-        
+        # 简单形态判断
         action = "观察"
-        if rs_nh and curr >= close.tail(126).max() * 0.98: 
-            action = "🚀 动量爆发"
-        elif curr > ma50 > ma200 and rs_nh: 
-            action = "💎 核心趋势"
-        elif curr > ema10 and low.iloc[-1] < ema10 and (curr - low.iloc[-1])/(high.iloc[-1]-low.iloc[-1]) > 0.5:
-            action = "⚔️ 极速反包"
-
-        # 6. 期权异动初步逻辑：成交量突发且处于关键状态
-        opt_status = "平稳"
-        if vol_ratio > 2.5: opt_status = "🔥 交易量激增"
-        elif vol_ratio > 1.8 and abs(chg_5d) > 0.05: opt_status = "👀 异动预警"
-
+        if curr >= close.tail(126).max() * 0.98: action = "🚀 动量爆发"
+        elif curr > close.rolling(50).mean().iloc[-1]: action = "💎 核心趋势"
+        
         return {
-            "Price": curr,
-            "Action": action,
-            "Score": rs_raw,
-            "ADR": adr_20,
-            "Vol_Ratio": vol_ratio,
-            "Bias": bias_20,
-            "Options": opt_status,
-            "Chg_5D": chg_5d,
-            "Chg_20D": chg_20d,
-            "Chg_60D": chg_60d,
-            "REL_20": rel_20,
-            "REL_60": rel_60,
-            "RS_Raw": rs_raw
+            "Price": curr, "Action": action, "Score": rs_raw, 
+            "Vol_Ratio": vol_ratio, "RS_Raw": rs_raw,
+            "Chg_5D": float(curr / close.iloc[-5] - 1),
+            "Chg_20D": float(curr / close.iloc[-20] - 1)
         }
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V8.9 - 修正色彩版)
+# 3. 强力输出引擎 (强制文字显示版)
 # ==========================================
 def final_output(results, vix, breadth, weather):
     try:
         creds = Credentials.from_service_account_file(creds_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
+        
+        # --- 步骤 1: 暴力重置所有格式 ---
         sh.clear()
-        
-        # 标题栏设置
-        bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
-        header = [
-            ["🏰 [V750 巅峰 8.9 - 视觉增强版]", "", "Update(BJ):", bj_time],
-            ["市场天气:", weather, "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", round(vix, 2)],
-            ["策略核心:", "趋势+强度+期权异动", "状态说明:", "🚀爆发 / 💎核心 / ⚔️反包 / 🟥高空"]
-        ]
-        sh.update(values=header, range_name="A1")
-        
-        if not results: return
-
-        df_final = pd.DataFrame(results)
-        
-        # 定义列顺序 (包含期权异动)
-        display_cols = [
-            "Ticker", "Industry", "Score", "Action", "Resonance", "ADR_20", 
-            "Vol_Ratio", "Bias_20", "MktCap(M)", "RS_Rank", "Options", "Price", 
-            "5D%", "20D%", "60D%", "REL_20", "REL_60"
-        ]
-        
-        df_show = df_final[display_cols].copy()
-        # 格式化
-        df_show["Score"] = df_show["Score"].apply(lambda x: round(x, 2))
-        df_show["ADR_20"] = df_show["ADR_20"].apply(lambda x: f"{x*100:.2f}%")
-        df_show["Vol_Ratio"] = df_show["Vol_Ratio"].apply(lambda x: f"{x:.2f}")
-        df_show["Bias_20"] = df_show["Bias_20"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["5D%"] = df_show["5D%"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["20D%"] = df_show["20D%"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["60D%"] = df_show["60D%"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["REL_20"] = df_show["REL_20"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["REL_60"] = df_show["REL_60"].apply(lambda x: f"{x*100:.1f}%")
-        df_show["Price"] = df_show["Price"].apply(lambda x: f"${x:.2f}")
-
-        # 写入表格
-        sh.update(values=[df_show.columns.tolist()] + df_show.values.tolist(), range_name="A5")
-        
-        # --- 重点：格式化美化 ---
-        # 1. 表头：改为浅蓝色背景，黑字
-        sh.format("A5:Q5", {
-            "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0}, # 浅蓝
-            "textFormat": {"bold": True, "foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10},
+        # 强制全表：白底、黑字、无加粗
+        sh.format("A1:P100", {
+            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "bold": False, "fontSize": 10},
             "horizontalAlignment": "CENTER"
         })
         
-        # 2. 全局基础格式
-        sh.format("A6:Q50", {"horizontalAlignment": "CENTER", "textFormat": {"fontSize": 9}})
+        # --- 步骤 2: 写入顶部信息 ---
+        bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
+        header_info = [
+            ["🏰 [V9.8 巅峰 - 强制显示版]", "", "Update:", bj_time],
+            ["市场天气:", weather, "宽度:", f"{breadth:.1f}%", "VIX:", str(round(vix, 2))]
+        ]
+        sh.update("A1", header_info)
         
-        # 3. 批量涂色
-        formats = []
-        for i, row in df_final.iterrows():
-            idx = i + 6
-            # 趋势状态背景色
-            if "🚀" in row['Action'] or "💎" in row['Action']:
-                formats.append({"range": f"A{idx}:Q{idx}", "format": {"backgroundColor": {"red": 0.95, "green": 1.0, "blue": 0.95}}}) # 极淡绿
-            elif "⚔️" in row['Action']:
-                formats.append({"range": f"A{idx}:Q{idx}", "format": {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 0.9}}}) # 极淡黄
-            
-            # 期权异动加亮
-            if "🔥" in row['Options']:
-                formats.append({"range": f"K{idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.9, "green": 0.1, "blue": 0.1}}}})
+        if not results:
+            sh.update("A5", [["⚠️ 今日未扫到符合条件的股票"]])
+            return
 
-        if formats: sh.batch_format(formats)
+        # --- 步骤 3: 构造纯字符串数据表 ---
+        df = pd.DataFrame(results)
+        cols = ["Ticker", "Industry", "Score", "Action", "Resonance", "Vol_Ratio", "MktCap(M)", "RS_Rank", "Options", "Price", "5D%", "20D%"]
+        df = df[cols]
         
-        # 4. 自动调整列宽
-        widths = [60, 130, 60, 100, 70, 70, 60, 60, 85, 60, 100, 70, 60, 60, 60, 60, 60]
-        requests = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
-        client.open_by_key(SHEET_ID).batch_update({"requests": requests})
+        data_rows = [df.columns.tolist()] # 表头
+        for _, row in df.iterrows():
+            curr_row = []
+            for col in cols:
+                val = row[col]
+                # 强制将所有类型转为字符串，防止 API 渲染失败
+                if col in ["5D%", "20D%"]: curr_row.append(f"{float(val)*100:.1f}%")
+                elif col == "Price": curr_row.append(f"${float(val):.2f}")
+                elif col in ["Score", "Vol_Ratio"]: curr_row.append(str(round(float(val), 2)))
+                else: curr_row.append(str(val))
+            data_rows.append(curr_row)
 
-        print(f"✅ 刷新成功! 表头已改为高对比度浅色样式。")
+        # 写入主体数据 (USER_ENTERED 模式最稳)
+        sh.update("A5", data_rows, value_input_option='USER_ENTERED')
+        
+        # --- 步骤 4: 重新涂色 (在数据写入后再操作) ---
+        # 1. 亮绿色表头 (A5:L5)
+        sh.format("A5:L5", {
+            "backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, # 亮绿
+            "textFormat": {"bold": True, "foregroundColor": {"red": 0, "green": 0, "blue": 0}} # 强制黑字
+        })
+        
+        # 2. 自动调整列宽
+        widths = [60, 130, 60, 100, 75, 65, 85, 65, 90, 75, 65, 65]
+        reqs = [{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
+        client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
+
+        print(f"✅ 刷新成功！共写入 {len(data_rows)-1} 行数据。")
     except Exception as e:
-        print(f"❌ 输出错误: {e}")
+        print(f"❌ 报错: {e}")
+        traceback.print_exc()
 
 # ==========================================
-# 4. 主执行逻辑
+# 4. 执行逻辑
 # ==========================================
 def run_v750_apex_sentinel():
-    print("📡 开启全域扫描...")
+    print("📡 正在扫描市场...")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
-        tickers = list(set(tickers + CORE_LEADERS))
+        tickers = CORE_LEADERS # 先用核心池测试，确保能显示
+        # 如果想全量扫描，取消下面两行的注释
+        # headers = {'User-Agent': 'Mozilla/5.0'}
+        # tickers = list(pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', storage_options=headers)[0]['Symbol'].str.replace('.', '-'))
         
-        full_data = yf.download(tickers + ["SPY", "^VIX"], period="14mo", group_by='ticker', threads=True, progress=False)
-        spy_df = full_data["SPY"]["Close"].dropna()
-        vix = full_data["^VIX"]["Close"].iloc[-1]
+        data = yf.download(tickers + ["SPY", "^VIX"], period="1y", group_by='ticker', progress=False)
+        spy_df = data["SPY"]["Close"].dropna()
+        vix = data["^VIX"]["Close"].iloc[-1]
         
-        breadth_count = 0
-        all_candidates = []
-        
+        raw_results = []
         for t in tickers:
-            if t not in full_data.columns.levels[0]: continue
-            df_t = full_data[t].dropna()
-            if len(df_t) < 250: continue
-            
-            # 市场宽度计算
-            ma50 = df_t['Close'].rolling(50).mean().iloc[-1]
-            if df_t['Close'].iloc[-1] > ma50: breadth_count += 1
-            
-            # 指标引擎
-            metrics = calculate_v750_apex_engine(df_t, spy_df)
-            if metrics and metrics['Action'] != "观察":
-                metrics['Ticker'] = t
-                all_candidates.append(metrics)
+            if t not in data.columns.levels[0]: continue
+            res = calculate_metrics(data[t].dropna(), spy_df)
+            if res:
+                res['Ticker'] = t
+                raw_results.append(res)
         
-        if not all_candidates: 
-            print("未发现符合形态的个股"); return
+        if not raw_results: 
+            final_output([], vix, 50, "☁️"); return
+
+        df_all = pd.DataFrame(raw_results)
+        df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
+        df_top = df_all.sort_values("Score", ascending=False).head(20)
         
-        # 计算 RS Rank
-        df_calc = pd.DataFrame(all_candidates)
-        df_calc['RS_Rank'] = df_calc['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
-        
-        # 截取前 25 只最强股
-        final_list = df_calc.sort_values("Score", ascending=False).head(25)
-        
-        # 补充行业信息
-        industry_counts = {}
-        processed_results = []
-        for _, row in final_list.iterrows():
-            t = row['Ticker']
+        final_list = []
+        for _, row in df_top.iterrows():
             try:
-                info = yf.Ticker(t).info
-                ind = info.get('industry', 'N/A')
-                mkt = info.get('marketCap', 0) / 1_000_000
-                industry_counts[ind] = industry_counts.get(ind, 0) + 1
+                inf = yf.Ticker(row['Ticker']).info
+                ind, mkt = inf.get('industry', 'N/A'), inf.get('marketCap', 0)/1_000_000
             except: ind, mkt = "N/A", 0
             
             d = row.to_dict()
-            d.update({"Industry": ind, "MktCap(M)": f"{mkt:,.0f}"})
-            processed_results.append(d)
+            d.update({"Industry": ind, "MktCap(M)": f"{mkt:,.0f}", "Resonance": "1", "Options": "平稳"})
+            final_list.append(d)
             
-        for item in processed_results:
-            item['Resonance'] = industry_counts.get(item['Industry'], 0)
-        
-        market_breadth = (breadth_count / len(tickers)) * 100
-        weather = "☀️" if market_breadth > 60 and vix < 20 else "☁️"
-        
-        final_output(processed_results, vix, market_breadth, weather)
-
+        final_output(final_list, vix, 60, "☀️")
     except Exception as e:
-        print(f"🚨 错误: {e}"); traceback.print_exc()
+        print(f"🚨 崩溃: {e}"); traceback.print_exc()
 
 if __name__ == "__main__":
     run_v750_apex_sentinel()
