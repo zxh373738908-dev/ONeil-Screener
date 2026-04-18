@@ -56,7 +56,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V14.1)
+# 3. 终极视觉输出引擎 (V15.1 极致排版版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -67,10 +67,17 @@ def final_output(results, vix, breadth):
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
-        header =[
-            ["🏰[V14.1 绝杀 - 暴力共振版]", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略说明:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "共振说明:", "Resonance ≥ 3 触发绝对红突"]
+        
+        # 巧妙利用空格和空列("")避开狭窄的 C 列，防止文字遮挡
+        header =[["🏰[V15.1 完美排版版]", "", "", "Update(BJ):", bj_time],["市场天气:", "☀️" if vix < 20 else "☁️", "", "大盘宽度:", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "", "共振说明:", "≥3 红色主线 / =2 紫色萌芽"]
         ]
         sh.update(values=header, range_name="A1")
+        
+        # 针对表头做精致的对齐
+        sh.format("A1:A3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
+        sh.format("B1:B3", {"horizontalAlignment": "LEFT"})
+        sh.format("D1:D3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
+        sh.format("E1:E3", {"horizontalAlignment": "LEFT"})
 
         if not results: return
         df = pd.DataFrame(results)
@@ -84,13 +91,13 @@ def final_output(results, vix, breadth):
                 if c in["ADR", "Bias", "5D", "20D", "60D", "R20", "R60"]: r.append(f"{float(val)*100:.2f}%")
                 elif c == "Price": r.append(f"${float(val):.2f}")
                 elif c in["Score", "Vol_Ratio"]: r.append(str(round(float(val), 2)))
-                elif c == "Resonance": r.append(str(int(val))) # 绝对保证写进去的是整数
+                elif c == "Resonance": r.append(str(int(val)))
                 else: r.append(str(val))
             data_rows.append(r)
 
         sh.update(values=data_rows, range_name="A5", value_input_option='USER_ENTERED')
         
-        # 表头涂色
+        # 表头背景涂色
         sh.format("A5:Q5", {"backgroundColor": {"red": 0.0, "green": 0.9, "blue": 0.0}, "textFormat": {"bold": True}})
         
         formats =[]
@@ -107,11 +114,13 @@ def final_output(results, vix, breadth):
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1}}})
             
-            # 期权涂色
+            # 期权异动高亮
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
+            elif "👀" in opt_text:
+                formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.9, "green": 0.4, "blue": 0}}}})
                 
-            # 共振阶梯涂色 (暴力高亮)
+            # 共振阶梯涂色
             if res_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif res_val == 2:
@@ -119,11 +128,12 @@ def final_output(results, vix, breadth):
         
         if formats: sh.batch_format(formats)
         
+        # 调整列宽
         widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 100, 85, 65, 65, 65, 65, 65]
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V14.1 刷新成功！请到 Google Sheets 查看。")
+        print(f"✅ V15.1 刷新成功！排版遮挡问题已完美修复。")
     except Exception as e:
         print(f"❌ 输出报错: {e}")
 
@@ -131,7 +141,7 @@ def final_output(results, vix, breadth):
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全域扫描 (V14.1)...")
+    print("📡 开启全域扫描 (V15.1)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -164,7 +174,6 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        # 1. 抓取基础数据
         print("🏢 正在抓取公司行业基础数据...")
         final_list =[]
         for _, row in df_top.iterrows():
@@ -181,22 +190,15 @@ def run_sentinel():
             d['MktCap'] = mkt
             final_list.append(d)
         
-        # 2. 暴力提取计算
         all_industries = [item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         
-        print("\n📊 === 终端数据验证 (如果这里>1，表格里就一定>1) ===")
         for item in final_list:
             current_industry = item['Industry']
             if current_industry == "N/A":
                 item['Resonance'] = 1
             else:
-                actual_count = all_industries.count(current_industry)
-                item['Resonance'] = actual_count
+                item['Resonance'] = all_industries.count(current_industry)
                 
-            print(f"{item['Ticker']:<5} | {item['Industry']:<30} | Resonance: {item['Resonance']}")
-        print("======================================================\n")
-        
-        # 3. 输出
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
