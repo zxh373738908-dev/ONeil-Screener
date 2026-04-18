@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/你的ID/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxL1JyJN81ZHaLvMKb0VHl8ddYLYpdj0C1qSm7FjTz_DuQvUexI0-L2NnDEWLqYuw3t/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
@@ -156,6 +156,11 @@ def run_v13_terminal():
         print("🎉 云端同步完成")
     except:
         print("⚠️ 云端已离线，仅本地输出")
-
-if __name__ == "__main__":
+        
+# 发送云端
+    try:
+        response = requests.post(WEBAPP_URL, json=final_matrix, timeout=15)
+        print(f"🎉 云端反馈: {response.text}") # 看到 Success 才算真正成功
+    except Exception as e:
+        print(f"⚠️ 同步失败原因: {e}")if __name__ == "__main__":
     run_v13_terminal()
