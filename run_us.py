@@ -56,7 +56,7 @@ def get_metrics(df, spy_df):
     except: return None
 
 # ==========================================
-# 3. 终极视觉输出引擎 (V16.0 终极排版)
+# 3. 终极视觉输出引擎 (V17.0 强制显示版)
 # ==========================================
 def final_output(results, vix, breadth):
     try:
@@ -64,20 +64,19 @@ def final_output(results, vix, breadth):
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID).worksheet("Screener")
         
-        # 彻底清空并重置所有样式
+        # 强制格式全清
         sh.format("A1:Q60", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}, "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}, "fontSize": 10}, "horizontalAlignment": "CENTER"})
 
         bj_time = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M')
         
-        # V16.0 强力排版：确保每一项都有足够的空间，不再遮挡
+        # V17.0 版本号绝对要变！
         header =[
-            ["🏰 [V16.0 全球终极版 - 视觉排版完全体]", "", "", "更新时间(BJ):", bj_time],
+            ["🏰 [V17.0 强制更新完全体]", "", "", "更新时间(BJ):", bj_time],
             ["当前天气:", "☀️" if vix < 20 else "☁️", "", "全美宽度(50MA):", f"{breadth:.1f}%", "VIX指数:", str(round(vix, 2))],
             ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心 / ⚔️反包", "", "共振说明:", "≥3 红色主线 / =2 紫色萌芽"]
         ]
         sh.update(values=header, range_name="A1")
         
-        # 专门针对 A1-A3 和 D1-D3 进行加粗和对齐美化
         sh.format("A1:A3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
         sh.format("D1:D3", {"horizontalAlignment": "RIGHT", "textFormat": {"bold": True}})
 
@@ -115,18 +114,19 @@ def final_output(results, vix, breadth):
             try: res_val = int(data_rows[i+1][4])
             except: res_val = 1
             
-            # Action 背景涂色
+            # Action 涂色
             if "🚀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.92, "green": 1.0, "blue": 0.92}}})
             elif "🌀" in action_text:
                 formats.append({"range": f"A{row_idx}:Q{row_idx}", "format": {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 1.0}}})
             
-            # 期权与共振高亮
+            # 期权高亮
             if "🔥" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif "👀" in opt_text:
                 formats.append({"range": f"K{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.9, "green": 0.4, "blue": 0}}}})
                 
+            # 共振高亮
             if res_val >= 3:
                 formats.append({"range": f"E{row_idx}", "format": {"textFormat": {"bold": True, "foregroundColor": {"red": 0.8, "green": 0, "blue": 0}}}})
             elif res_val == 2:
@@ -134,20 +134,20 @@ def final_output(results, vix, breadth):
         
         if formats: sh.batch_format(formats)
         
-        # 自动调整列宽
+        # 强制调整宽度
         widths =[65, 200, 60, 110, 80, 75, 75, 70, 95, 75, 110, 85, 65, 65, 65, 65, 65]
         reqs =[{"updateDimensionProperties": {"range": {"sheetId": sh.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(widths)]
         client.open_by_key(SHEET_ID).batch_update({"requests": reqs})
 
-        print(f"✅ V16.0 终极版已刷新！排版已完美对齐。")
+        print(f"✅ V17.0 刷新成功！")
     except Exception as e:
-        print(f"❌ 输出报错: {e}")
+        print(f"❌ 报错: {e}")
 
 # ==========================================
 # 4. 执行流程
 # ==========================================
 def run_sentinel():
-    print("📡 开启全量扫描 (V16.0)...")
+    print("📡 开启扫描 (V17.0)...")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -156,7 +156,6 @@ def run_sentinel():
             tickers = CORE_LEADERS
             
         tickers = list(set(tickers + CORE_LEADERS))
-        
         data = yf.download(tickers +["SPY", "^VIX"], period="2y", group_by='ticker', threads=True, progress=False)
         spy_df = data["SPY"]["Close"].dropna()
         vix = float(data["^VIX"]["Close"].iloc[-1])
@@ -180,7 +179,6 @@ def run_sentinel():
         df_all['RS_Rank'] = df_all['RS_Raw'].rank(pct=True).apply(lambda x: int(x * 99))
         df_top = df_all.sort_values("Score", ascending=False).head(28)
         
-        print("🏢 抓取行业基础数据...")
         final_list =[]
         for _, row in df_top.iterrows():
             t = row['Ticker']
@@ -196,17 +194,15 @@ def run_sentinel():
             d['MktCap'] = mkt
             final_list.append(d)
         
-        # 计算共振数
-        all_industries =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
+        # 统计共振
+        inds =[item['Industry'] for item in final_list if item['Industry'] != "N/A"]
         for item in final_list:
-            current_industry = item['Industry']
-            item['Resonance'] = all_industries.count(current_industry) if current_industry != "N/A" else 1
+            item['Resonance'] = inds.count(item['Industry']) if item['Industry'] != "N/A" else 1
                 
         final_output(final_list, vix, (breadth_cnt/len(tickers)*100))
         
     except Exception as e:
-        print(f"🚨 崩溃: {e}")
-        traceback.print_exc()
+        print(f"🚨 崩溃: {e}"); traceback.print_exc()
 
 if __name__ == "__main__":
     run_sentinel()
