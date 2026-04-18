@@ -26,31 +26,31 @@ def get_universe():
         sp500 = pd.read_html(urllib.request.urlopen(req).read())[0]['Symbol'].tolist()
         return [t.replace('.', '-') for t in sp500]
     except:
-        return ["AAPL", "MSFT", "GOOGL", "AVGO", "CAVA", "VRT", "MPWR", "NVDA", "LITE", "TER", "KEYS", "MRVL", "FIX"]
+        return ["AAPL", "MSFT", "GOOGL", "AVGO", "CAVA", "VRT", "MPWR", "NVDA", "LITE", "TER", "KEYS", "MRVL"]
 
 EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'REIT', 'Utilities', 'Oil & Gas']
 
 # ==========================================
-# 2. 核心避錯與數據函數
+# 2. 核心數據處理函數
 # ==========================================
-def fetch_info_safe(t):
-    """基本面獲取：增加延遲與錯誤重試，失敗則返回空字典"""
-    for i in range(2):
+def fetch_info_v13(t):
+    """基本面獲取：優化重試邏輯，減少 401 封鎖"""
+    for i in range(3):
         try:
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(0.6, 1.2)) # 模擬人類行為
             ticker = yf.Ticker(t)
             info = ticker.info
             if info and 'industry' in info:
                 return t, info
         except:
-            time.sleep(1)
+            time.sleep(2)
     return t, {}
 
 def sync_to_google_sheet(sheet_name, matrix):
     try:
         payload = {"sheet_name": sheet_name, "data": json.loads(json.dumps(matrix, default=str))}
         requests.post(WEBAPP_URL, json=payload, timeout=30)
-        print(f"🎉 同步成功至分頁: [{sheet_name}]")
+        print(f"🎉 同步至分頁 [{sheet_name}] 成功")
     except Exception as e: print(f"❌ 同步失敗: {e}")
 
 def get_return(series, days):
@@ -59,16 +59,16 @@ def get_return(series, days):
     return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
 
 # ==========================================
-# 3. 核心量化模型 V12 (17列精準版)
+# 3. 核心量化模型 V13 (修正寬度算法)
 # ==========================================
-def run_super_growth_v12():
+def run_super_growth_v13():
     update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     universe_tickers = get_universe()
     
     print("\n" + "="*50)
-    print(f"🚀 [超級成長股 V12] 啟動 | 正在執行全環境適配掃描...")
+    print(f"🚀 [超級成長股 V13] 正在計算全美寬度與行業共振...")
     
-    # 1. 大盤與 VIX 指標
+    # 1. 大盤與 VIX
     try:
         spy_hist = yf.download("SPY", period="1y", interval="1d", progress=False)['Close'].dropna()
         vix_val = float(yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1])
@@ -78,11 +78,14 @@ def run_super_growth_v12():
     except:
         weather_icon, vix_val, spy_ret = "❓", 0, {20:0, 60:0}
 
-    # 2. 下載技術面 (批量)
+    # 2. 技術面批量掃描
     hist = yf.download(universe_tickers, period="1y", interval="1d", progress=False, threads=True)
     close_df, vol_df, high_df, low_df = hist['Close'], hist['Volume'], hist['High'], hist['Low']
 
-    tech_data, perfect_tickers = {}, []
+    tech_data = {}
+    above_50ma_count = 0 # 用於計算標準全美寬度
+    perfect_trend_tickers = [] # 用於計算精確行业共振
+
     for t in universe_tickers:
         try:
             if t not in close_df.columns: continue
@@ -92,15 +95,17 @@ def run_super_growth_v12():
             p = float(c.iloc[-1])
             m20, m50, m200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            is_perfect = p > m20 > m50 > m200
-            if is_perfect: perfect_tickers.append(t)
+            # --- 核心邏輯修正 ---
+            # 全美寬度定義：站上 50MA 的比例
+            if p > m50: above_50ma_count += 1
             
-            # 過濾門檻：需在 50MA 上方，且流動性達標
+            # 行業共振定義：完美多頭排列
+            is_perfect = p > m20 > m50 > m200
+            if is_perfect: perfect_trend_tickers.append(t)
+            
+            # 入選模型過濾
             if not (p > m50 and m50 > m200): continue
             if v.tail(40).mean() * p < 20_000_000: continue
-            
-            # VCP 波動率過濾 (防止暴漲暴跌)
-            if float(c.tail(15).std() / c.tail(15).mean()) > 0.15: continue
             
             rs_score = (get_return(c, 20) * 0.4) + (get_return(c, 60) * 0.3) + (get_return(c, 120) * 0.3)
             tech_data[t] = {
@@ -113,73 +118,69 @@ def run_super_growth_v12():
             }
         except: continue
 
-    # 3. 獲取基本面 (慢速安全模式)
-    print(f"✅ 行情共振股: {len(perfect_tickers)} 隻 | 正在獲取基本面 (安全模式)...")
+    # 計算真正的全美寬度
+    us_breadth_50ma = (above_50ma_count / len(universe_tickers) * 100)
+
+    # 3. 獲取基本面 (限制併發以防 401)
+    print(f"✅ 全美寬度(50MA): {us_breadth_50ma:.1f}% | 完美共振股: {len(perfect_trend_tickers)} 隻")
     infos = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
-        for t, info in executor.map(fetch_info_safe, list(tech_data.keys())):
+        for t, info in executor.map(fetch_info_v13, list(tech_data.keys())):
             if info: infos[t] = info
 
-    # 行業共振映射
+    # 精確行業共振映射
     res_map = {}
-    for t in perfect_tickers:
+    for t in perfect_trend_tickers:
+        # 為了計算共振，如果完美股在 info 裡沒有，我們不顯示，保證數據純淨
         ind = infos.get(t, {}).get('industry', 'Unknown')
         res_map[ind] = res_map.get(ind, 0) + 1
 
-    # 4. 決策矩陣與評分
+    # 4. 最終篩選
     final_list = []
     rs_ranks = (pd.Series({t: d['RS_Raw'] for t, d in tech_data.items()}).rank(pct=True) * 100).to_dict()
     
     for t, data in tech_data.items():
-        # 如果 info 抓取失敗 (401)，我們依然保留該股，只是行業顯示 Missing
         info = infos.get(t, {})
         industry = info.get('industry', 'Data Missing')
         if any(ex.lower() in industry.lower() for ex in EXCLUDED_INDUSTRIES): continue
         
         rs = rs_ranks.get(t, 0)
-        # 評分：動能佔 70%，基本面增長佔 30% (數據缺失則基本面部分為0)
         score = (rs * 0.7) + ((info.get('revenueGrowth', 0) or 0) * 100 * 0.3)
         
-        # 智慧 Action 邏輯
-        if data['Bias'] < 4 and rs > 90: action = "🎯 買點區"
-        elif data['Bias'] > 12: action = "⌛ 等待回踩"
-        elif rs < 80: action = "⚠️ 觀察汰換"
-        else: action = "👀 觀察"
-        
-        # 期權建議
+        # Action & Options
+        action = "🎯 買點區" if data['Bias'] < 4 and rs > 90 else ("⌛ 等待回踩" if data['Bias'] > 12 else "👀 觀察")
         opt = "🔥 Call" if data['ADR'] > 3.5 and rs > 90 else "N/A"
 
         final_list.append({
             "Ticker": t, "Industry": industry[:18], "Score": score, "Action": action,
-            "Resonance": f"{res_map.get(industry, 0)} 隻", "ADR": data['ADR'],
-            "Vol": data['VolRatio'], "Bias": data['Bias'], "MktCap": info.get('marketCap', 0) / 1_000_000,
-            "RS": rs, "Opt": opt, "Price": data['Price'], "5D": data['5D'], "20D": data['20D'],
-            "60D": data['60D'], "R20": data['R20'], "R60": data['R60']
+            "Resonance": f"{res_map.get(industry, 0)} 隻", "ADR": f"{round(data['ADR'], 2)}%",
+            "Vol": f"{round(data['VolRatio'], 2)}x", "Bias": f"{round(data['Bias'], 2)}%",
+            "MCap": round(info.get('marketCap', 0) / 1_000_000, 1), "RS": round(rs, 1),
+            "Opt": opt, "Price": data['Price'], "5D": f"{round(data['5D']*100, 2)}%",
+            "20D": f"{round(data['20D']*100, 2)}%", "60D": f"{round(data['60D']*100, 2)}%",
+            "R20": f"{round(data['R20']*100, 2)}%", "R60": f"{round(data['R60']*100, 2)}%"
         })
 
-    # 行業冠軍選取與最終排序
+    # 排序並取 Top 10
     top_10 = sorted(final_list, key=lambda x: x['Score'], reverse=True)[:10]
 
     # ==========================================
-    # 5. 輸出至 Google Sheets (精確對齊 17 列)
+    # 5. 輸出至 Google Sheets (17列)
     # ==========================================
-    m_text = f"天气:{weather_icon} | 宽度:{(len(perfect_tickers)/len(universe_tickers)*100):.1f}% | 共振:{len(perfect_tickers)}隻 | VIX:{vix_val:.1f}"
-    row1 = [f"SuperGrowth Portfolio V12", f"更新: {update_time}", m_text, ""] + [""] * 13
+    header_text = f"天气:{weather_icon} | 全美宽度(50MA):{us_breadth_50ma:.1f}% | 行业共振:{len(perfect_trend_tickers)}隻 | VIX:{vix_val:.1f}"
+    row1 = [f"SuperGrowth Portfolio V13", f"更新: {update_time}", header_text, ""] + [""] * 13
     row2 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap(M)", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
     
     matrix = [row1, row2]
     for r in top_10:
         matrix.append([
             r['Ticker'], r['Industry'], round(r['Score'], 1), r['Action'], r['Resonance'],
-            f"{round(r['ADR'], 2)}%", f"{round(r['Vol'], 2)}x", f"{round(r['Bias'], 2)}%",
-            round(r['MktCap'], 1), round(r['RS'], 1), r['Opt'],
-            float(r['Price']), # Price 是數字，L列請在Sheets設為「數值」
-            f"{round(r['5D']*100, 2)}%", f"{round(r['20D']*100, 2)}%", f"{round(r['60D']*100, 2)}%",
-            f"{round(r['R20']*100, 2)}%", f"{round(r['R60']*100, 2)}%"
+            r['ADR'], r['Vol'], r['Bias'], r['MCap'], r['RS'], r['Opt'],
+            float(r['Price']), # L列請手動設為「數值」
+            r['5D'], r['20D'], r['60D'], r['R20'], r['R60']
         ])
 
     sync_to_google_sheet(TARGET_SHEET, matrix)
-    print(f"✅ V12 同步完畢。已對 401 錯誤標的執行數據補償。")
 
 if __name__ == "__main__":
-    run_super_growth_v12()
+    run_super_growth_v13()
