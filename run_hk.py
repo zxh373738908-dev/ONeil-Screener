@@ -87,7 +87,6 @@ def calculate_advanced_v750(df, hsi_series):
 
         action, prio = "观察", 50
         
-        # 🟢 V45.4 规则触发
         if rs_nh and setup_price < np.max(close[-20:]) * 1.04 and tightness < 2.5:
             action, prio = "👁️ 奇點先行(Stealth)", 98 
         elif rs_nh and setup_price >= np.max(close[-252:]) and vol_surge > 1.3:
@@ -99,7 +98,6 @@ def calculate_advanced_v750(df, hsi_series):
         elif is_reversal:
             action, prio = "🌊 底部巨龙(Reversal)", 88
 
-        # 延伸度校验
         hist_close, hist_vol = close[-126:], vol[-126:]
         hist_min, hist_max = np.min(hist_close), np.max(hist_close)
         if hist_max > hist_min:
@@ -130,22 +128,18 @@ def calculate_advanced_v750(df, hsi_series):
         # ========== 高级扩展指标计算 ==========
         bias20 = ((live_price - ma20) / ma20) * 100
         
-        # 绝对收益率 REL5/20/60/120
         ret_5d = ((live_price - close[-5]) / close[-5]) * 100
         ret_20d = ((live_price - close[-20]) / close[-20]) * 100
         ret_60d = ((live_price - close[-60]) / close[-60]) * 100
         ret_120d = ((live_price - close[-120]) / close[-120]) * 100
         
-        # 相对恒指强度 R20/60/120
         r20 = ((rs_line[-1] - rs_line[-20]) / rs_line[-20]) * 100
         r60 = ((rs_line[-1] - rs_line[-60]) / rs_line[-60]) * 100
         r120 = ((rs_line[-1] - rs_line[-120]) / rs_line[-120]) * 100
         
-        # 60日趋势判定
         ma60 = np.mean(close[-60:])
         trend_60d = f"↗ {(live_price - ma60)/ma60*100:.1f}%" if live_price >= ma60 else f"↘ {(live_price - ma60)/ma60*100:.1f}%"
 
-        # 2024-12-31 至今涨幅
         df_2024 = df_setup[df_setup.index <= '2024-12-31']
         if not df_2024.empty:
             price_2024_end = float(df_2024['Close'].iloc[-1])
@@ -153,7 +147,6 @@ def calculate_advanced_v750(df, hsi_series):
             price_2024_end = float(close[-252]) if len(close) >= 252 else float(close[0])
         ret_from_2024 = ((live_price - price_2024_end) / price_2024_end) * 100
 
-        # 共振雷达
         if pocket_pivot and rs_nh: resonance = "🔥 量价共振"
         elif pocket_pivot: resonance = "🔥 口袋支点"
         elif rs_nh: resonance = "✨ 相对强势"
@@ -176,14 +169,13 @@ def calculate_advanced_v750(df, hsi_series):
 
 def main():
     now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%m-%d %H:%M')
-    print(f"[{now_str}] 🦅 V45.4 矩阵增强版启动...")
+    print(f"[{now_str}] 🦅 V45.4 矩阵增强版 (排版优化) 启动...")
     
     hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
     hsi_series = hsi_raw.iloc[:,0] if isinstance(hsi_raw, pd.DataFrame) else hsi_raw
     hsi_p, hsi_ma50 = hsi_series.iloc[-1], hsi_series.rolling(50).mean().iloc[-1]
     
     url = "https://scanner.tradingview.com/hongkong/scan"
-    # 使用 industry 代替 sector 获取更精准的行业
     payload = {"columns":["name", "description", "close", "market_cap_basic", "industry"],
                "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}],
                "range":[0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
@@ -215,7 +207,6 @@ def main():
     if not final_list: return
     res_df = pd.DataFrame(final_list)
 
-    # 计算最终得分与全局 RS 排名
     res_df['Score'] = (res_df['Base_Score'] * 1.5 + res_df['rs_raw'].rank(pct=True) * 20 + np.maximum(0, (5 - res_df['Tight']) * 4)).round(2)
     res_df['Rank'] = (res_df['rs_raw'].rank(pct=True) * 100).round(1)
     
@@ -229,7 +220,6 @@ def main():
     header = [[f"🏰 V45.4 全列矩阵版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8%"]]
     sh.update(range_name="A1", values=header)
     
-    # 🎯 全新指定的 21 个核心展示列
     cols =[
         "Ticker", "Industry", "Score", "1D%", "60D Trend", "Action", "Resonance", 
         "ADR", "Vol_Ratio", "Bias", "MktCap", "Rank", 
@@ -239,10 +229,55 @@ def main():
     
     sh.update(range_name="A3", values=[cols] + top_picks[cols].values.tolist(), value_input_option="USER_ENTERED")
 
-    # 冻结表头与格式化
+    # ===============================
+    # 📏 间距与排版优化 (Spacing)
+    # ===============================
     set_frozen(sh, rows=3)
-    format_cell_range(sh, 'A3:U3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
     
+    # 全局数据区域水平/垂直居中对齐
+    format_cell_range(sh, 'A3:U100', cellFormat(
+        horizontalAlignment='CENTER', 
+        verticalAlignment='MIDDLE'
+    ))
+    
+    # 表头特定高亮 (黑底白字加粗)
+    format_cell_range(sh, 'A3:U3', cellFormat(
+        textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), 
+        backgroundColor=color(0,0,0),
+        horizontalAlignment='CENTER', 
+        verticalAlignment='MIDDLE'
+    ))
+
+    # 精确设定各列的列宽 (像素值)
+    col_widths = {
+        'A': 65,   # Ticker
+        'B': 95,   # Industry (字稍多)
+        'C': 55,   # Score
+        'D': 55,   # 1D%
+        'E': 85,   # 60D Trend
+        'F': 160,  # Action (含 Emoji 及说明，需较宽空间)
+        'G': 95,   # Resonance
+        'H': 50,   # ADR
+        'I': 70,   # Vol_Ratio
+        'J': 55,   # Bias
+        'K': 65,   # MktCap
+        'L': 50,   # Rank
+        'M': 55,   # REL5
+        'N': 55,   # REL20
+        'O': 55,   # REL60
+        'P': 55,   # REL120
+        'Q': 55,   # R20
+        'R': 55,   # R60
+        'S': 55,   # R120
+        'T': 55,   # Price
+        'U': 110   # From 2024-12-31 (标题较长)
+    }
+    for col_letter, width in col_widths.items():
+        set_column_width(sh, col_letter, width)
+
+    # ===============================
+    # 🎨 条件格式高亮设置 (红绿涂装)
+    # ===============================
     rules = get_conditional_format_rules(sh)
     rules.clear() 
     
@@ -255,10 +290,10 @@ def main():
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🌊']), format=cellFormat(backgroundColor=color(0.8, 0.9, 1.0), textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0.5))))))
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['☠️']), format=cellFormat(backgroundColor=color(0.85, 0.85, 0.85), textFormat=textFormat(bold=True, strikethrough=True, foregroundColor=color(0.5, 0.5, 0.5))))))
     
-    # [G列] Resonance 共振标签
+    #[G列] Resonance 共振标签
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('G4:G100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['🔥']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.9, 0.1, 0.1))))))
 
-    # [E列] 60D Trend 趋势文字颜色
+    #[E列] 60D Trend 趋势文字颜色
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['↗']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0))))))
     rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['↘']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.6, 0))))))
 
@@ -273,7 +308,7 @@ def main():
     rules.append(ConditionalFormatRule(ranges=ranges_to_color, booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_LESS', ['0']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.6, 0))))))
     
     rules.save()
-    print(f"✅ V45.4 矩阵列同步完毕！")
+    print(f"✅ V45.4 排版列间距优化已应用！")
 
 if __name__ == "__main__":
     main()
