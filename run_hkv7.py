@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 # 1. 配置中心
 # ==========================================
 # 使用你最新提供的 WebApp URL
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxyU65vHlyMg-RvIEz9TyXRDLT-M830EIAFUZIjsicSooiLnkmkMVNfaC5ccSLiDD7t/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxX8U58rAicY4MZoG-mp5ndb7AGBNDDXUyUxEl5rTa7iWicRIzEzbL0YbTAILNPdNJ6/exec"
 
 TOTAL_CAPITAL = 1000000 
 MAX_RISK_PER_STOCK = 0.008 
