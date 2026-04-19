@@ -7,7 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# 核心配置 (已填入你的 URL)
+# ==========================================
+# 1. 核心配置 (已填入你最新的 URL)
+# ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzvPeX4tmdjaa-2z6j6J7Za1s1owhbXJLLz_Qd5mDp2YTrdc51WccQ1SlmpHXfkYWRD/exec"
 
 CORE_TICKERS = [
@@ -92,7 +94,10 @@ def run_v20_engine():
     weather = "☀️" if breadth > 60 else ("☁️" if breadth > 40 else "🌧️")
     
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    row1 = ["🏰 [V20.0 终极共振对齐版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", ""]
+    
+    # 👇 这里就是修改 A1 单元格文案的地方
+    row1 = ["🏰 [V20.2 机构研报对齐版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", ""]
+    
     row2 = ["市场天气:", weather, "", "", "核心池多头:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", ""]
     row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色 / =2 紫色", "", "", "", "", "", "", "", "", "", "", ""]
     row4 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
@@ -101,7 +106,7 @@ def run_v20_engine():
 
     try:
         resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=30)
-        print(f"✨ 云端同步完成 | 反馈: {resp.text}")
+        print(f"✨ 云端同步完成 | 核心池多头: {breadth:.1f}% | 反馈: {resp.text}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
