@@ -18,6 +18,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycby1pIM7iO43lcLQpOmi5LCJIn3VN9a0Ilf9amoy1EtQV_GBXJkk_A4PpsrJxKzH7i51/exec"
 TARGET_SHEET = "super"
+START_DATE_YTD = "2025-12-31"
 
 def get_universe():
     try:
@@ -31,12 +32,12 @@ def get_universe():
 EXCLUDED_INDUSTRIES = ['Banks', 'Insurance', 'Financial', 'REIT', 'Utilities', 'Oil & Gas']
 
 # ==========================================
-# 2. 核心數據處理函數
+# 2. 核心數據處理
 # ==========================================
-def fetch_info_v14(t):
+def fetch_info_v15(t):
     for i in range(3):
         try:
-            time.sleep(random.uniform(0.5, 1.0)) 
+            time.sleep(random.uniform(0.5, 0.8)) 
             ticker = yf.Ticker(t)
             info = ticker.info
             if info and ('industry' in info): return t, info
@@ -46,70 +47,81 @@ def fetch_info_v14(t):
 def sync_to_google_sheet(sheet_name, matrix):
     try:
         payload = {"sheet_name": sheet_name, "data": json.loads(json.dumps(matrix, default=str))}
-        requests.post(WEBAPP_URL, json=payload, timeout=35)
-        print(f"🎉 V14 同步成功！")
+        requests.post(WEBAPP_URL, json=payload, timeout=40)
+        print(f"🎉 V15 同步成功！")
     except Exception as e: print(f"❌ 同步失敗: {e}")
 
-def get_return(series, days):
-    s = series.dropna()
-    if len(s) < days + 1: return 0
-    return (float(s.iloc[-1]) - float(s.iloc[-(days+1)])) / float(s.iloc[-(days+1)])
+def get_ret(series, days):
+    if len(series) < days + 1: return 0
+    return (series.iloc[-1] / series.iloc[-(days+1)]) - 1
 
 # ==========================================
-# 3. 核心量化模型 V14
+# 3. 核心量化模型 V15
 # ==========================================
-def run_super_growth_v14():
+def run_super_growth_v15():
     update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    universe_tickers = get_universe()
+    tickers = get_universe()
     
     print("\n" + "="*50)
-    print(f"🚀 [超級成長股 V14] 啟動 | 精確 17 列格式校對...")
+    print(f"🚀 [超級成長股 V15] 啟動 | YTD起始日: {START_DATE_YTD}")
     
-    # 1. 指標獲取
+    # 1. 基準與大盤下載
     try:
-        spy_hist = yf.download("SPY", period="1y", interval="1d", progress=False)['Close'].dropna()
-        vix_val = float(yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1])
-        curr_spy, ma50_spy = float(spy_hist.iloc[-1]), float(spy_hist.tail(50).mean())
-        spy_ret = {20: get_return(spy_hist, 20), 60: get_return(spy_hist, 60)}
-        weather_icon = "☀️" if curr_spy > ma50_spy and vix_val < 20 else ("☁️" if curr_spy > ma50_spy or vix_val < 25 else "⛈️")
-    except: weather_icon, vix_val, spy_ret = "❓", 0, {20:0, 60:0}
+        spy = yf.download("SPY", start="2025-01-01", progress=False)['Close'].dropna()
+        vix = float(yf.download("^VIX", period="5d", progress=False)['Close'].iloc[-1])
+        curr_spy, ma50_spy = spy.iloc[-1], spy.tail(50).mean()
+        
+        # 基準報酬
+        spy_r = {5: get_ret(spy, 5), 20: get_ret(spy, 20), 60: get_ret(spy, 60), 120: get_ret(spy, 120)}
+        weather = "☀️" if curr_spy > ma50_spy and vix < 20 else ("☁️" if curr_spy > ma50_spy or vix < 25 else "⛈️")
+    except: weather, vix, spy_r = "❓", 0, {5:0, 20:0, 60:0, 120:0}
 
-    # 2. 技術面
-    hist = yf.download(universe_tickers, period="1y", interval="1d", progress=False, threads=True)
-    close_df, vol_df, high_df, low_df = hist['Close'], hist['Volume'], hist['High'], hist['Low']
+    # 2. 全市場技術掃描
+    hist = yf.download(tickers, start="2025-01-01", progress=False, threads=True)
+    close_df = hist['Close']
 
-    tech_results, above_50ma_count, perfect_tickers = {}, 0, []
+    tech_results, above_50ma, perfect_tickers = {}, 0, []
 
-    for t in universe_tickers:
+    for t in tickers:
         try:
             if t not in close_df.columns: continue
-            c, v, h, l_ = close_df[t].dropna(), vol_df[t].dropna(), high_df[t].dropna(), low_df[t].dropna()
+            c = close_df[t].dropna()
             if len(c) < 150: continue
+            
             p = float(c.iloc[-1])
             m20, m50, m200 = c.tail(20).mean(), c.tail(50).mean(), c.tail(200).mean()
             
-            if p > m50: above_50ma_count += 1
+            if p > m50: above_50ma += 1
             if p > m20 > m50 > m200: perfect_tickers.append(t)
             
+            # 過濾門檻
             if not (p > m50 and m50 > m200): continue
-            if v.tail(40).mean() * p < 20_000_000: continue
             
-            rs_raw = (get_return(c, 20) * 0.4) + (get_return(c, 60) * 0.3) + (get_return(c, 120) * 0.3)
+            # YTD 報酬計算 (從 2025-12-31 到現在)
+            # 如果數據從 2025-01-01 開始，我們找最近的一個價格
+            ytd_price = c.iloc[0] 
+            ytd_ret = (p / ytd_price) - 1
+            
+            # 趨勢簡化符號 (60-Day Trend)
+            trend_60 = "📈" if p > c.tail(60).mean() else "📉"
+            
+            rs_score = (get_ret(c, 20) * 0.4) + (get_ret(c, 60) * 0.3) + (get_ret(c, 120) * 0.3)
+            
             tech_results[t] = {
-                "Price": p, "ADR": ((h - l_) / l_).tail(20).mean() * 100,
-                "Vol": v.iloc[-1] / v.tail(20).mean() if v.tail(20).mean() > 0 else 1,
-                "Bias": ((p - m20) / m20) * 100, "RS_Raw": rs_raw,
-                "5D": get_return(c, 5), "20D": get_return(c, 20), "60D": get_return(c, 60),
-                "R20": get_return(c, 20) - spy_ret[20], "R60": get_return(c, 60) - spy_ret[60]
+                "Price": p, "1D": (c.iloc[-1]/c.iloc[-2])-1, "Trend": trend_60,
+                "R20": get_ret(c, 20), "R60": get_ret(c, 60), "R120": get_ret(c, 120),
+                "REL5": get_ret(c, 5) - spy_r[5], "REL20": get_ret(c, 20) - spy_r[20],
+                "REL60": get_ret(c, 60) - spy_r[60], "REL120": get_ret(c, 120) - spy_r[120],
+                "YTD": ytd_ret, "RS_Raw": rs_score
             }
         except: continue
 
-    us_breadth = (above_50ma_count / len(universe_tickers) * 100)
+    us_breadth = (above_50ma / len(tickers) * 100)
 
-    # 3. 基本面 (Fetch)
+    # 3. 基本面
     infos = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
-        for t, info in executor.map(fetch_info_v14, list(tech_results.keys()) + perfect_tickers):
+        for t, info in executor.map(fetch_info_v15, list(tech_results.keys())):
             if info: infos[t] = info
 
     res_map = {}
@@ -117,40 +129,47 @@ def run_super_growth_v14():
         ind = infos.get(t, {}).get('industry', 'Unknown')
         res_map[ind] = res_map.get(ind, 0) + 1
 
-    final_pool = []
+    # 4. 排名與構建矩陣
     rs_ranks = (pd.Series({t: d['RS_Raw'] for t, d in tech_results.items()}).rank(pct=True) * 100).to_dict()
     
+    final_list = []
     for t, data in tech_results.items():
         info = infos.get(t, {})
         industry = info.get('industry', 'Data Missing')
         if any(ex.lower() in industry.lower() for ex in EXCLUDED_INDUSTRIES): continue
         
-        rs = rs_ranks.get(t, 0)
-        score = (rs * 0.7) + ((info.get('revenueGrowth', 0) or 0) * 100 * 0.3)
-        
-        # 精確 Action 文字 (不包含共振數)
-        if data['Bias'] < 5 and rs > 92: action = "🎯 買點"
-        elif data['Bias'] > 12: action = "⌛ 等待"
-        else: action = "👀 觀察"
-        
-        final_pool.append([
-            t, industry[:18], round(score, 1), action, f"{res_map.get(industry, 0)} 隻",
-            f"{round(data['ADR'], 2)}%", f"{round(data['Vol'], 2)}x", f"{round(data['Bias'], 2)}%",
-            round(info.get('marketCap', 0)/1000000, 1), round(rs, 1),
-            "🔥 Call" if data['ADR'] > 3.5 and rs > 90 else "N/A",
-            round(data['Price'], 2), # Price 以 float 傳入
-            f"{round(data['5D']*100, 2)}%", f"{round(data['20D']*100, 2)}%", f"{round(data['60D']*100, 2)}%",
-            f"{round(data['R20']*100, 2)}%", f"{round(data['R60']*100, 2)}%"
+        rank = rs_ranks.get(t, 0)
+        score = (rank * 0.7) + ((info.get('revenueGrowth', 0) or 0) * 100 * 0.3)
+
+        final_list.append([
+            t, industry[:16], 
+            round(data['Price'], 2), 
+            f"{round(data['1D']*100, 2)}%", 
+            data['Trend'],
+            f"{round(data['R20']*100, 2)}%", 
+            f"{round(data['R60']*100, 2)}%", 
+            f"{round(data['R120']*100, 2)}%", 
+            round(rank, 1),
+            f"{round(data['REL5']*100, 2)}%",
+            f"{round(data['REL20']*100, 2)}%", 
+            f"{round(data['REL60']*100, 2)}%", 
+            f"{round(data['REL120']*100, 2)}%",
+            f"{round(data['YTD']*100, 2)}%",
+            round(info.get('marketCap', 0)/1000000, 1),
+            f"{res_map.get(industry, 0)} 隻",
+            round(score, 1)
         ])
 
-    # 4. 排序並輸出
-    top_10 = sorted(final_pool, key=lambda x: x[2], reverse=True)[:10]
+    top_10 = sorted(final_list, key=lambda x: x[-1], reverse=True)[:10]
 
-    h_text = f"天气:{weather_icon} | 全美宽度(50MA):{us_breadth:.1f}% | 行业共振:{len(perfect_tickers)}隻 | VIX:{vix_val:.1f}"
-    row1 = [f"SuperGrowth Portfolio V14", f"更新: {update_time}", h_text, ""] + [""] * 13
-    row2 = ["Ticker", "Industry", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap(M)", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+    # ==========================================
+    # 5. 17列精確對齊輸出
+    # ==========================================
+    header_text = f"天气:{weather} | 全美宽度(50MA):{us_breadth:.1f}% | 完美共振:{len(perfect_tickers)}隻 | VIX:{vix:.1f}"
+    row1 = [f"SuperGrowth Portfolio V15", f"更新: {update_time}", header_text, ""] + [""] * 13
+    row2 = ["Ticker", "Industry", "Price", "1D%", "60-Day Trend", "R20", "R60", "R120", "Rank", "REL5", "REL20", "REL60", "REL120", "From 2025-12-31", "MktCap(M)", "Resonance", "Score"]
     
     sync_to_google_sheet(TARGET_SHEET, [row1, row2] + top_10)
 
 if __name__ == "__main__":
-    run_super_growth_v14()
+    run_super_growth_v15()
