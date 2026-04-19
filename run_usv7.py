@@ -8,14 +8,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 warnings.filterwarnings('ignore')
 
-# 1. 核心配置
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzQ2REEAG-DuyhbygkXeNlBvAcmVDjIK1IBauAjoSqLH22chYCZrzf-vBBmYYN7nUU/exec"
+# ==========================================
+# 1. 核心配置 - 请务必填入刚刚“新部署”后获取的完整 URL
+# ==========================================
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwOeFrqRcFb-MzMYe61qMwV36gqRMlyEmI7Mvjn_FdwsBVmNXL805kr0iT7ySr2G2Db/exec"
 
 CORE_TICKERS = [
     "NVDA", "TSLA", "PLTR", "MSTR", "AMD", "AVGO", "SMCI", "META", 
     "AMZN", "AAPL", "MSFT", "GOOGL", "COIN", "MARA", "CLSK", "VRT", 
     "ANET", "HOOD", "BITF", "LLY", "SOXL", "ARM", "MU", "TSM"
 ]
+
+# 模拟浏览器请求头，防止 401 Crumb 错误
+YF_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
 
 def get_perf(series, days):
     try:
@@ -25,8 +32,11 @@ def get_perf(series, days):
 
 def process_ticker(symbol, spy_data):
     try:
-        tk = yf.Ticker(symbol)
-        # 使用 2y 确保能覆盖 2024-12-31 和 120日均线
+        # 使用 Session 加 Headers 解决 Crumb 问题
+        session = requests.Session()
+        session.headers.update(YF_HEADERS)
+        
+        tk = yf.Ticker(symbol, session=session)
         df = tk.history(period="2y")
         if df.empty or len(df) < 130: return None
         
@@ -34,31 +44,22 @@ def process_ticker(symbol, spy_data):
         close = df['Close'].astype(float)
         curr_price = float(close.iloc[-1])
         
-        # 1. 1D% 与 多周期表现
+        # 1. 指标计算
         p1d = ((curr_price / float(close.iloc[-2])) - 1) * 100
         p5d, p20d, p60d, p120d = get_perf(close, 5), get_perf(close, 20), get_perf(close, 60), get_perf(close, 120)
         
-        # 2. YTD 计算 (From 2024-12-31)
-        # 寻找最接近 2024-12-31 的价格
+        # 2. YTD 计算 (2024-12-31)
         ytd_target = pd.Timestamp("2024-12-31")
-        if ytd_target in close.index:
-            ytd_price = close.loc[ytd_target]
-        else:
-            ytd_price = close.asof(ytd_target)
-        
+        ytd_price = close.asof(ytd_target)
         ytd_perf = ((curr_price / ytd_price) - 1) * 100 if ytd_price else 0.0
 
-        # 3. 相对强度 (vs SPY)
-        r20 = p20d - get_perf(spy_data, 20)
-        r60 = p60d - get_perf(spy_data, 60)
-        r120 = p120d - get_perf(spy_data, 120)
-
-        # 4. 60-Day Trend
+        # 3. 相对强度与趋势
+        r20, r60, r120 = p20d - get_perf(spy_data, 20), p60d - get_perf(spy_data, 60), p120d - get_perf(spy_data, 120)
         ma60 = close.rolling(60).mean()
         slope = (ma60.iloc[-1] - ma60.iloc[-10]) / ma60.iloc[-10] * 100
         trend = "📈Strong Up" if slope > 1.5 else ("📉Down" if slope < -1.5 else "➡️Side")
 
-        # 5. 评分与动作
+        # 4. 评分
         ma20, ma50 = close.rolling(20).mean().iloc[-1], close.rolling(50).mean().iloc[-1]
         ema10 = close.ewm(span=10).mean().iloc[-1]
         score = 0
@@ -84,21 +85,17 @@ def process_ticker(symbol, spy_data):
             "p5d": p5d, "p20d": p20d, "p60d": p60d, "p120d": p120d,
             "above_ma50": curr_price > ma50
         }
-    except Exception as e:
-        print(f"Error processing {symbol}: {e}")
-        return None
+    except: return None
 
 def run_v21_engine():
-    print(f"🚀 [V21.1 修复版] 启动 | {datetime.datetime.now().strftime('%H:%M:%S')}")
+    print(f"🚀 [V21.1 深度全能版] 启动 | {datetime.datetime.now().strftime('%H:%M:%S')}")
     
-    # 修复 SPY 数据获取
-    spy_df = yf.download("SPY", period="2y", progress=False)
-    if isinstance(spy_df.columns, pd.MultiIndex):
-        spy_df.columns = spy_df.columns.get_level_values(0)
-    spy_close = spy_df['Close'].astype(float)
+    spy_raw = yf.download("SPY", period="2y", progress=False)
+    if isinstance(spy_raw.columns, pd.MultiIndex): spy_raw.columns = spy_raw.columns.get_level_values(0)
+    spy_close = spy_raw['Close'].astype(float)
     
-    vix_df = yf.download("^VIX", period="1d", progress=False)
-    vix = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 0.0
+    vix_raw = yf.download("^VIX", period="1d", progress=False)
+    vix = float(vix_raw['Close'].iloc[-1]) if not vix_raw.empty else 0.0
     
     raw_results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -107,22 +104,15 @@ def run_v21_engine():
             res = f.result()
             if res: raw_results.append(res)
 
-    if not raw_results:
-        print("❌ 未获取到任何有效数据，任务终止")
-        return
+    if not raw_results: return
 
-    # --- 计算 REL 排名 ---
-    def calculate_ranks(key_name):
-        vals = [r[key_name] for r in raw_results]
-        # 计算百分比排名
-        return {r['symbol']: (sum(1 for v in vals if v < r[key_name]) / len(vals)) * 100 for r in raw_results}
+    # 计算排名
+    def get_ranks(key):
+        vals = [r[key] for r in raw_results]
+        return {r['symbol']: (sum(1 for v in vals if v < r[key]) / len(raw_results)) * 100 for r in raw_results}
 
-    rel5 = calculate_ranks('p5d')
-    rel20 = calculate_ranks('p20d')
-    rel60 = calculate_ranks('p60d')
-    rel120 = calculate_ranks('p120d')
+    rel5, rel20, rel60, rel120 = get_ranks('p5d'), get_ranks('p20d'), get_ranks('p60d'), get_ranks('p120d')
 
-    # --- 构造数据行 ---
     final_rows = []
     for r in raw_results:
         s = r['symbol']
@@ -136,22 +126,16 @@ def run_v21_engine():
         ])
 
     final_rows.sort(key=lambda x: (x[2], x[16]), reverse=True)
-    
-    # --- 仪表盘 ---
     header = ["Ticker", "Industry", "Score", "1D%", "60D Trend", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "Rank", "REL5", "REL20", "REL60", "REL120", "R20", "R60", "R120", "Price", "From 2024-12-31"]
     
     breadth = (sum(1 for r in raw_results if r['above_ma50']) / len(raw_results)) * 100
-    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    row1 = ["🏰 [V21.1 终极深度对齐版]", "", "", "", "更新时间(BJ):", datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+    row2 = ["市场天气:", "☀️" if breadth > 60 else "☁️", "", "", "核心多头:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+    row3 = ["策略雷达:", "🚀爆发 / 🌀VCP / 💎核心", "", "", "共振说明:", "≥3 红色", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
     
-    row1 = ["🏰 [V21.1 终极深度修复版]", "", "", "", "更新时间(BJ):", now, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-    row2 = ["市场天气:", "☀️" if breadth > 60 else "☁️", "", "", "核心池多头:", f"{breadth:.1f}%", "VIX指数:", f"{vix:.2f}", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-    row3 = ["策略雷达:", "🚀 爆发 / 🌀 VCP / 💎 核心", "", "", "共振说明:", "≥3 红色 / =2 紫色", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
-    
-    final_matrix = [row1, row2, row3, header] + final_rows
-
     try:
-        resp = requests.post(WEBAPP_URL, json=final_matrix, timeout=30)
-        print(f"✨ 云端同步完成 | 有效标的: {len(raw_results)} | 反馈: {resp.text}")
+        requests.post(WEBAPP_URL, json=[row1, row2, row3, header] + final_rows, timeout=30)
+        print(f"✨ 同步成功 | 有效标的: {len(raw_results)}")
     except Exception as e:
         print(f"❌ 同步失败: {e}")
 
