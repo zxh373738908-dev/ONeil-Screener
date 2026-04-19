@@ -1,7 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime, time, requests, json, math, warnings
+import datetime, time, requests, math, warnings
 
 warnings.filterwarnings('ignore')
 
@@ -23,7 +23,7 @@ CORE_TICKERS_HK = list(set(LEADER_WATCH +[
 ]))
 
 # ==========================================
-# 🧠 2. 量子哨兵演算法 (V1001 极速稳定版)
+# 🧠 2. 量子哨兵演算法 (V1002 全景矩阵版)
 # ==========================================
 def calculate_sentinel_metrics(df, hsi_series, rs_rank_series):
     try:
@@ -35,9 +35,15 @@ def calculate_sentinel_metrics(df, hsi_series, rs_rank_series):
         vol = df['Volume'].ffill()
         cp = float(close.iloc[-1])
         
-        # A. 均线与偏离度 (Bias/Ext_50)
+        # A. 均线与偏离度 (Bias/Ext_50) & 60D Trend
         ma10 = float(close.rolling(10).mean().iloc[-1])
         ma50 = float(close.rolling(50).mean().iloc[-1])
+        
+        ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else cp
+        ma60_prev = float(close.rolling(60).mean().iloc[-5]) if len(close) >= 65 else ma60
+        # 判断 60日线 趋势斜率
+        trend_60d = "↑ 向上" if ma60 > ma60_prev else ("↓ 向下" if ma60 < ma60_prev else "→ 走平")
+
         is_bull = cp > ma50
         ext_50 = ((cp - ma50) / ma50) * 100 
         
@@ -68,78 +74,89 @@ def calculate_sentinel_metrics(df, hsi_series, rs_rank_series):
         vol_ma20 = float(vol.rolling(20).mean().iloc[-1])
         vol_ratio = float(vol.iloc[-1] / vol_ma20) if vol_ma20 > 0 else 0
 
-        # E. V1000 核武探测器
+        # E. 核武探测器
         is_singularity = (tightness < 2.5) and (current_rs_rank > 75) and (-2.0 <= ext_50 <= 2.0)
-        
         p_min_10 = float(close.iloc[-10:].min())
         rs_max_10 = float(rs_line.iloc[-10:-1].max())  
         is_price_weak = cp <= (p_min_10 * 1.02)
         is_rs_breakout = float(rs_line.iloc[-1]) > rs_max_10
         is_rs_divergence = is_price_weak and is_rs_breakout
 
-        # F. 动态评分与信号 (Resonance / Action)
+        # F. 动态评分与信号
         score = 0
         signals =[]
-        
-        if is_singularity: signals.append("👑圣杯共振"); score += 8
-        if is_rs_divergence: signals.append("★RS背离"); score += 6
-        if is_pocket: signals.append("🎯口袋枢轴"); score += 4
-        if rs_awakening: signals.append("🔔RS觉醒"); score += 3
+        if is_singularity: signals.append("👑圣杯"); score += 8
+        if is_rs_divergence: signals.append("★背离"); score += 6
+        if is_pocket: signals.append("🎯口袋"); score += 4
+        if rs_awakening: signals.append("🔔觉醒"); score += 3
         if tightness < 1.8: signals.append("👁️紧致"); score += 2
         if cp > ma10: score += 1
 
         is_zombie = (vol_ratio < 0.5) and not (is_singularity or is_rs_divergence or is_pocket)
         
-        if is_singularity: rating = "🏆 奇点觉醒 (圣杯)"
-        elif is_rs_divergence: rating = "☢️ 机构暗吸 (背离)"
+        if is_singularity: rating = "🏆 奇点觉醒"
+        elif is_rs_divergence: rating = "☢️ 机构暗吸"
         elif is_zombie: rating = "🧟 缩量僵尸"; score -= 3
-        elif is_bull and score >= 6: rating = "💎 SSS 统帅"
+        elif is_bull and score >= 6: rating = "💎 SSS统帅"
         elif is_bull: rating = "🔥 多头趋势"
         elif cp > ma10: rating = "✅ 短线转强"
         else: rating = "❄️ 均线压制"
 
-        # G. 绝对与相对动量矩阵计算 (5D, 20D, 60D, R20, R60)
-        ret_5d  = float(close.pct_change(5).iloc[-1] * 100) if len(close) > 5 else 0
-        ret_20d = float(close.pct_change(20).iloc[-1] * 100) if len(close) > 20 else 0
-        ret_60d = float(close.pct_change(60).iloc[-1] * 100) if len(close) > 60 else 0
+        # G. 全景绝对与相对动量矩阵计算
+        ret_1d   = float(close.pct_change(1).iloc[-1] * 100) if len(close) > 1 else 0
+        ret_5d   = float(close.pct_change(5).iloc[-1] * 100) if len(close) > 5 else 0
+        ret_20d  = float(close.pct_change(20).iloc[-1] * 100) if len(close) > 20 else 0
+        ret_60d  = float(close.pct_change(60).iloc[-1] * 100) if len(close) > 60 else 0
+        ret_120d = float(close.pct_change(120).iloc[-1] * 100) if len(close) > 120 else 0
         
         rs_20d  = float(rs_line.pct_change(20).iloc[-1] * 100) if len(rs_line) > 20 else 0
         rs_60d  = float(rs_line.pct_change(60).iloc[-1] * 100) if len(rs_line) > 60 else 0
+        rs_120d = float(rs_line.pct_change(120).iloc[-1] * 100) if len(rs_line) > 120 else 0
 
-        # 风控计算
-        stop_p = max(ma50 * 0.98, cp * (1 - (adr * 0.01 * 1.5)))
-        shares = (TOTAL_CAPITAL * MAX_RISK_PER_STOCK) // (cp - stop_p) if cp > stop_p else 0
+        # H. 计算 2024年底至今收益率 (From 2024-12-31)
+        try:
+            historical_close = close.loc[close.index.year <= 2024]
+            if not historical_close.empty:
+                p_2024_end = float(historical_close.iloc[-1])
+                ret_2024 = ((cp - p_2024_end) / p_2024_end) * 100
+            else:
+                ret_2024 = 0.0
+        except:
+            ret_2024 = 0.0
 
         return {
-            "Rating": rating, "Action": " + ".join(signals) if signals else "震荡/无信号",
+            "Rating": rating, "Action": " + ".join(signals) if signals else "震荡",
             "Price": cp, "Tightness": tightness, "Score": score,
-            "Shares": int(shares), "Stop": stop_p, "is_bull": is_bull, 
-            "Ext50": ext_50, "RSRank": current_rs_rank,
-            "ADR": adr, "Vol_Ratio": vol_ratio,
-            "5D": ret_5d, "20D": ret_20d, "60D": ret_60d,
-            "R20": rs_20d, "R60": rs_60d
+            "is_bull": is_bull, "Ext50": ext_50, "RSRank": current_rs_rank,
+            "ADR": adr, "Vol_Ratio": vol_ratio, "Trend60": trend_60d,
+            "1D": ret_1d, "5D": ret_5d, "20D": ret_20d, "60D": ret_60d, "120D": ret_120d,
+            "R20": rs_20d, "R60": rs_60d, "R120": rs_120d,
+            "Ret2024": ret_2024
         }
     except Exception as e:
         return None
 
 # ==========================================
-# 极速获取市值 (防御性函数)
+# 行业与市值聚合信息查询器
 # ==========================================
-def get_market_cap_billions(ticker_str):
+def get_extended_info(ticker_str):
     try:
-        # 使用 fast_info 拒绝下载庞大 JSON，提升速度 10 倍
-        mcap = yf.Ticker(ticker_str).fast_info.get("marketCap", 0)
-        return mcap / 1e9
+        tkr = yf.Ticker(ticker_str)
+        # fast_info 获取市值 (光速)
+        mcap = tkr.fast_info.get("marketCap", 0) / 1e9
+        # info 获取行业分类
+        industry = tkr.info.get("industry", "N/A")
+        return mcap, industry
     except:
-        return 0.0
+        return 0.0, "N/A"
 
 # ==========================================
-# 🚀 3. 执行引擎 (多维矩阵极速版)
+# 🚀 3. 执行引擎 (全维排雷扩充版)
 # ==========================================
 def run_sentinel_commander():
     start_t = time.time()
     bj_now = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    print(f"🚀[{bj_now}] 启动 V1001 量子哨兵 [极速全维版]...")
+    print(f"🚀[{bj_now}] 启动 V1002 量子哨兵 [21列超矩阵版]...")
 
     try:
         data = yf.download(CORE_TICKERS_HK, period="2y", progress=False, threads=False)
@@ -178,9 +195,11 @@ def run_sentinel_commander():
             res = calculate_sentinel_metrics(df_t, bench_series, rs_rank_series)
             
             if res:
-                # 注入额外信息
+                # 获取行业和市值信息
+                mcap, industry = get_extended_info(t)
                 res["Ticker"] = t.replace(".HK", "")
-                res["MktCap"] = get_market_cap_billions(t)
+                res["MktCap"] = mcap
+                res["Industry"] = industry
                 
                 if res["is_bull"]: bull_count += 1
                 
@@ -201,34 +220,48 @@ def run_sentinel_commander():
     
     mkt_breadth = f"{round((bull_count / len(CORE_TICKERS_HK)) * 100, 1)}%"
     
-    # 🚨 Header构建，确保前后列数完全一致（15列）
-    matrix = [
-        ["🏰 V1001 量子哨兵[全维重构版]", f"大盘波动: {round(hsi_vol,1)}%", "多头广度:", mkt_breadth, "北京时间:", bj_now, "", "", "", "", "", "", "", "", ""],["代码", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Price", "5D", "20D", "60D", "R20", "R60"]
+    # 🚨 构建超级矩阵 Header：前后严格保证 21 列
+    # Title 行: 6列有内容 + 15列空字符串 = 21列
+    title_row = ["🏰 V1002 量子哨兵[全景重构版]", f"大盘波动: {round(hsi_vol,1)}%", "多头广度:", mkt_breadth, "北京时间:", bj_now] + [""] * 15
+    
+    # Header 行: 严格对应要求的 21 个列名
+    header_row =[
+        "Ticker", "Industry", "Score", "1D%", "60D Trend", "Action", "Resonance", 
+        "ADR", "Vol_Ratio", "Bias", "MktCap", "Rank", "REL5", "REL20", "REL60", 
+        "REL120", "R20", "R60", "R120", "Price", "From 2024-12-31"
     ]
+    
+    matrix = [title_row, header_row]
 
-    # 格式化灌注数据，阻断 Google Sheet 数字解析 BUG
+    # 格式化灌注数据，确保对应 21 列数据格式完美契合
     for item in candidates[:30]:
         matrix.append([
-            item["Ticker"], 
-            f'{item["Score"]}',                    # 强度评分
-            item["Action"],                        # 核心信号
-            item["Rating"],                        # 共振评级
-            f'{item["ADR"]:.2f}%',                 # ADR波动率
-            f'{item["Vol_Ratio"]:.2f}',            # 量比
-            f'{item["Ext50"]:.2f}%',               # 乖离率 (Bias)
-            f'{item["MktCap"]:.1f}B',              # 市值 (十亿港币)
-            f'{int(item["RSRank"])}',              # RS 相对排名分数(1-100)
-            f'{item["Price"]:.2f}',                # 现价
-            f'{item["5D"]:.2f}%',                  # 5日绝对收益
-            f'{item["20D"]:.2f}%',                 # 20日绝对收益
-            f'{item["60D"]:.2f}%',                 # 60日绝对收益
-            f'{item["R20"]:.2f}%',                 # RS线20日变动(超额动量)
-            f'{item["R60"]:.2f}%'                  # RS线60日变动(超额动量)
+            item["Ticker"],                            # 1. Ticker
+            item["Industry"],                          # 2. Industry (行业分类)
+            f'{item["Score"]}',                        # 3. Score (动能得分)
+            f'{item["1D"]:.2f}%',                      # 4. 1D% (1日涨幅)
+            item["Trend60"],                           # 5. 60D Trend (60日均线趋势)
+            item["Action"],                            # 6. Action
+            item["Rating"],                            # 7. Resonance
+            f'{item["ADR"]:.2f}%',                     # 8. ADR
+            f'{item["Vol_Ratio"]:.2f}',                # 9. Vol_Ratio
+            f'{item["Ext50"]:.2f}%',                   # 10. Bias
+            f'{item["MktCap"]:.1f}B',                  # 11. MktCap
+            f'{int(item["RSRank"])}',                  # 12. Rank
+            f'{item["5D"]:.2f}%',                      # 13. REL5 (绝对收益)
+            f'{item["20D"]:.2f}%',                     # 14. REL20 (绝对收益)
+            f'{item["60D"]:.2f}%',                     # 15. REL60 (绝对收益)
+            f'{item["120D"]:.2f}%',                    # 16. REL120 (绝对收益)
+            f'{item["R20"]:.2f}%',                     # 17. R20 (相对动能)
+            f'{item["R60"]:.2f}%',                     # 18. R60 (相对动能)
+            f'{item["R120"]:.2f}%',                    # 19. R120 (相对动能)
+            f'{item["Price"]:.2f}',                    # 20. Price
+            f'{item["Ret2024"]:.2f}%'                  # 21. From 2024-12-31 (YTD收益)
         ])
 
     try:
-        resp = requests.post(WEBAPP_URL, json=matrix, timeout=25)
-        print(f"🎉 V1001 全维矩阵同步成功！用时: {round(time.time() - start_t, 2)}秒 | 入围标的: {len(candidates)} 只")
+        resp = requests.post(WEBAPP_URL, json=matrix, timeout=30)
+        print(f"🎉 V1002 超矩阵同步成功！用时: {round(time.time() - start_t, 2)}秒 | 入围标的: {len(candidates)} 只")
     except Exception as e:
         print(f"❌ 网络同步失败: {e}")
 
