@@ -23,7 +23,7 @@ def init_sheet():
 
 def run_v53_optimizer():
     now = datetime.datetime.now(TZ_SHANGHAI)
-    print(f"[{now.strftime('%H:%M:%S')}] 🚀 启动 V54.0 Multi-Factor Leader Scan...")
+    print(f"[{now.strftime('%H:%M:%S')}] 🚀 启动 V54.1 Pro-Layout 优化版...")
 
     # 1. 扫描池子
     tv_url = "https://scanner.tradingview.com/china/scan"
@@ -41,7 +41,7 @@ def run_v53_optimizer():
         tickers.append(yf_code)
         meta[yf_code] = {
             "name": item['d'][0], 
-            "industry": item['d'][1] or "Others", 
+            "ind": (item['d'][1] or "Misc")[:6], # 截断行业名节省空间
             "mktcap": item['d'][2],
             "symbol": code
         }
@@ -49,30 +49,30 @@ def run_v53_optimizer():
     # 2. 批量获取数据
     all_data = yf.download(tickers, period="260d", group_by='ticker', progress=True, threads=True)
     
-    # 3. 全局相对强度 (REL) 预计算
+    # 3. REL 预计算
     stats = []
     for t in tickers:
         try:
             df = all_data[t].dropna()
-            if len(df) < 120: continue
+            if len(df) < 130: continue
             c = df['Close']
             stats.append({
                 "code": t,
-                "ret_1d": (c.iloc[-1] / c.iloc[-2]) - 1,
-                "ret_5d": (c.iloc[-1] / c.iloc[-5]) - 1,
-                "ret_20d": (c.iloc[-1] / c.iloc[-20]) - 1,
-                "ret_60d": (c.iloc[-1] / c.iloc[-60]) - 1,
-                "ret_120d": (c.iloc[-1] / c.iloc[-120]) - 1,
-                "ret_ytd": (c.iloc[-1] / c.loc[c.index >= START_DATE_REF].iloc[0]) - 1 if any(c.index >= START_DATE_REF) else 0
+                "r1": (c.iloc[-1] / c.iloc[-2]) - 1,
+                "r5": (c.iloc[-1] / c.iloc[-5]) - 1,
+                "r20": (c.iloc[-1] / c.iloc[-20]) - 1,
+                "r60": (c.iloc[-1] / c.iloc[-60]) - 1,
+                "r120": (c.iloc[-1] / c.iloc[-120]) - 1,
+                "rytd": (c.iloc[-1] / c.loc[c.index >= START_DATE_REF].iloc[0]) - 1 if any(c.index >= START_DATE_REF) else 0
             })
         except: continue
     
     full_df = pd.DataFrame(stats)
     for p in [5, 20, 60, 120]:
-        full_df[f'REL{p}'] = full_df[f'ret_{p}d'].rank(pct=True) * 99
+        full_df[f'REL{p}'] = full_df[f'r{p}'].rank(pct=True) * 99
     full_df['Final_Rank'] = (full_df['REL60'] * 0.4 + full_df['REL20'] * 0.4 + full_df['REL120'] * 0.2)
 
-    # 4. 详细指标扫描
+    # 4. 指标扫描与格式化
     results = []
     for t in tickers:
         try:
@@ -82,69 +82,72 @@ def run_v53_optimizer():
             c, v, h, l = df['Close'], df['Volume'], df['High'], df['Low']
             curr_p = float(c.iloc[-1])
             ma20, ma50, ma120 = c.rolling(20).mean().iloc[-1], c.rolling(50).mean().iloc[-1], c.rolling(120).mean().iloc[-1]
-            ma60 = c.rolling(60).mean().iloc[-1]
             
-            # --- 新增指标计算 ---
-            # ADR (20日平均日行波幅百分比)
+            # 指标计算
             adr = ((h - l) / l).rolling(20).mean().iloc[-1] * 100
-            # Vol_Ratio (量比)
             vol_ratio = v.iloc[-1] / v.iloc[-5:-1].mean()
-            # Bias (20日乖离率)
             bias = ((curr_p - ma20) / ma20) * 100
-            # Resonance (三线共振)
-            resonance = "Triple" if curr_p > ma20 > ma50 > ma120 else "None"
-            # 60D Trend
-            trend_60 = "Up" if curr_p > ma60 and ma60 > c.rolling(60).mean().iloc[-10] else "Consol"
             
-            # REL 数据
+            # 状态与共振 (使用紧凑符号)
+            res = "3-Line" if curr_p > ma20 > ma50 > ma120 else "---"
+            trend = "Up ↑" if curr_p > c.rolling(60).mean().iloc[-1] else "Side →"
+            
             row = full_df[full_df['code'] == t].iloc[0]
             
             # Action 逻辑
             volat_5 = (c.iloc[-5:].std() / c.iloc[-5:].mean()) * 100
-            if volat_5 < 2.5 and vol_ratio < 1.0: action = "Setup"
-            elif curr_p > h.iloc[-2] and vol_ratio > 1.5: action = "Breakout"
+            if volat_5 < 2.2 and vol_ratio < 0.9: action = "🎯Setup"
+            elif curr_p > h.iloc[-2] and vol_ratio > 1.4: action = "🚀Break"
             else: action = "Hold"
 
-            # Score 综合评分
-            score = row['Final_Rank'] + (15 if action == "Setup" else 0) + (10 if resonance == "Triple" else 0)
+            # 最终打分
+            score = row['Final_Rank'] + (15 if "Setup" in action else 0) + (10 if "3-Line" in res else 0)
 
-            # 过滤：只看高强度或有信号的
-            if row['Final_Rank'] > 75 or action != "Hold":
+            if row['Final_Rank'] > 70:
                 results.append({
                     "Ticker": meta[t]['symbol'],
-                    "Industry": meta[t]['industry'],
+                    "Ind.": meta[t]['ind'],
                     "Score": int(score),
-                    "1D%": f"{round(row['ret_1d']*100, 2)}%",
-                    "60D Trend": trend_60,
+                    "1D%": f"{row['r1']*100:+.2f}%", # 强制显示符号
                     "Action": action,
-                    "Resonance": resonance,
+                    "Reson.": res,
+                    "60D Tr.": trend,
+                    "Price": round(curr_p, 2),
                     "ADR": round(adr, 2),
-                    "Vol_Ratio": round(vol_ratio, 2),
-                    "Bias": f"{round(bias, 1)}%",
-                    "MktCap": f"{round(meta[t]['mktcap']/1e8, 1)}亿",
+                    "Vol.R": round(vol_ratio, 1),
+                    "Bias": f"{bias:+.1f}%",
                     "Rank": int(row['Final_Rank']),
                     "REL5": int(row['REL5']),
                     "REL20": int(row['REL20']),
                     "REL60": int(row['REL60']),
                     "REL120": int(row['REL120']),
-                    "R20": round(curr_p / c.iloc[-20], 3),
-                    "R60": round(curr_p / c.iloc[-60], 3),
-                    "R120": round(curr_p / c.iloc[-120], 3),
-                    "Price": round(curr_p, 2),
-                    "From 2024-12-31": f"{round(row['ret_ytd']*100, 1)}%"
+                    "R20": f"{curr_p/c.iloc[-20]:.2f}",
+                    "R60": f"{curr_p/c.iloc[-60]:.2f}",
+                    "R120": f"{curr_p/c.iloc[-120]:.2f}",
+                    "MktCap": f"{meta[t]['mktcap']/1e8:.0f}Y",
+                    "From241231": f"{row['rytd']*100:+.1f}%"
                 })
         except: continue
 
-    # 5. 写入 Google Sheets
+    # 5. 写入与格式化
     sh = init_sheet()
     sh.clear()
     if results:
-        df_final = pd.DataFrame(results).sort_values("Score", ascending=False).head(60)
-        # 强制列顺序
-        cols = ["Ticker", "Industry", "Score", "1D%", "60D Trend", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "Rank", "REL5", "REL20", "REL60", "REL120", "R20", "R60", "R120", "Price", "From 2024-12-31"]
+        # 排序并筛选
+        df_final = pd.DataFrame(results).sort_values("Score", ascending=False).head(50)
+        
+        # 规范化列顺序 (逻辑分组：核心 -> 信号 -> 动力 -> 排名 -> 长期)
+        cols = [
+            "Ticker", "Ind.", "Score", "Action", "Price", "1D%", 
+            "Reson.", "60D Tr.", "ADR", "Vol.R", "Bias", 
+            "Rank", "REL5", "REL20", "REL60", "REL120", 
+            "R20", "R60", "R120", "MktCap", "From241231"
+        ]
         df_final = df_final[cols]
+        
+        # 写入
         sh.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-        print(f"✅ 更新完成！已推送 {len(df_final)} 只标的。")
+        print(f"✅ 间距优化版同步完成。锁定 {len(df_final)} 只标的。")
 
 if __name__ == "__main__":
     run_v53_optimizer()
