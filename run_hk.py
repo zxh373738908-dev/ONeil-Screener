@@ -87,19 +87,19 @@ def calculate_advanced_v750(df, hsi_series):
 
         action, prio = "观察", 50
         
-        # 🟢 V45.4 核心修改：放宽 VCP 紧致度要求到 2.5，距离前高放宽到 4%
+        # 🟢 V45.4 规则触发
         if rs_nh and setup_price < np.max(close[-20:]) * 1.04 and tightness < 2.5:
             action, prio = "👁️ 奇點先行(Stealth)", 98 
         elif rs_nh and setup_price >= np.max(close[-252:]) and vol_surge > 1.3:
             action, prio = "🚀 巔峰突破(Breakout)", 95 
         elif is_momentum_attack:
             action, prio = "⚔️ 凌厉进攻(Momentum)", 92 
-        # 🟢 放宽老龙回头的紧致度要求到 2.0
         elif is_stage_2 and vdu and tightness < 2.0:
             action, prio = "🐉 老龍回頭(V-Dry)", 90
         elif is_reversal:
             action, prio = "🌊 底部巨龙(Reversal)", 88
 
+        # 延伸度校验
         hist_close, hist_vol = close[-126:], vol[-126:]
         hist_min, hist_max = np.min(hist_close), np.max(hist_close)
         if hist_max > hist_min:
@@ -127,16 +127,33 @@ def calculate_advanced_v750(df, hsi_series):
                 action += " 🩸(破位取消)"
                 prio = 10 
 
-        # ========== 扩展指标计算 ==========
+        # ========== 高级扩展指标计算 ==========
         bias20 = ((live_price - ma20) / ma20) * 100
+        
+        # 绝对收益率 REL5/20/60/120
         ret_5d = ((live_price - close[-5]) / close[-5]) * 100
         ret_20d = ((live_price - close[-20]) / close[-20]) * 100
         ret_60d = ((live_price - close[-60]) / close[-60]) * 100
+        ret_120d = ((live_price - close[-120]) / close[-120]) * 100
         
+        # 相对恒指强度 R20/60/120
         r20 = ((rs_line[-1] - rs_line[-20]) / rs_line[-20]) * 100
         r60 = ((rs_line[-1] - rs_line[-60]) / rs_line[-60]) * 100
+        r120 = ((rs_line[-1] - rs_line[-120]) / rs_line[-120]) * 100
         
-        # 智能共振评价
+        # 60日趋势判定
+        ma60 = np.mean(close[-60:])
+        trend_60d = f"↗ {(live_price - ma60)/ma60*100:.1f}%" if live_price >= ma60 else f"↘ {(live_price - ma60)/ma60*100:.1f}%"
+
+        # 2024-12-31 至今涨幅
+        df_2024 = df_setup[df_setup.index <= '2024-12-31']
+        if not df_2024.empty:
+            price_2024_end = float(df_2024['Close'].iloc[-1])
+        else:
+            price_2024_end = float(close[-252]) if len(close) >= 252 else float(close[0])
+        ret_from_2024 = ((live_price - price_2024_end) / price_2024_end) * 100
+
+        # 共振雷达
         if pocket_pivot and rs_nh: resonance = "🔥 量价共振"
         elif pocket_pivot: resonance = "🔥 口袋支点"
         elif rs_nh: resonance = "✨ 相对强势"
@@ -148,30 +165,33 @@ def calculate_advanced_v750(df, hsi_series):
             "Tight": round(tightness, 2), "Vol_Ratio": round(vol_surge, 2), 
             "Resonance": resonance, "ADR": round(adr_20, 2),
             "Bias": round(bias20, 2), 
-            "5D": round(ret_5d, 2), "20D": round(ret_20d, 2), "60D": round(ret_60d, 2),
-            "R20": round(r20, 2), "R60": round(r60, 2),
+            "1D%": round(today_pct, 2), "60D Trend": trend_60d,
+            "REL5": round(ret_5d, 2), "REL20": round(ret_20d, 2), 
+            "REL60": round(ret_60d, 2), "REL120": round(ret_120d, 2),
+            "R20": round(r20, 2), "R60": round(r60, 2), "R120": round(r120, 2),
+            "From 2024-12-31": round(ret_from_2024, 2),
             "rs_raw": (setup_price/close[-63]*2 + setup_price/close[-126] + setup_price/close[-252])
         }
     except Exception as e: return None
 
 def main():
     now_str = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%m-%d %H:%M')
-    print(f"[{now_str}] 🦅 V45.4 视觉与引擎微调版启动 (全列数据扩展)...")
+    print(f"[{now_str}] 🦅 V45.4 矩阵增强版启动...")
     
     hsi_raw = yf.download("^HSI", period="300d", progress=False)['Close']
     hsi_series = hsi_raw.iloc[:,0] if isinstance(hsi_raw, pd.DataFrame) else hsi_raw
     hsi_p, hsi_ma50 = hsi_series.iloc[-1], hsi_series.rolling(50).mean().iloc[-1]
     
     url = "https://scanner.tradingview.com/hongkong/scan"
-    payload = {"columns":["name", "description", "close", "market_cap_basic", "sector"],
+    # 使用 industry 代替 sector 获取更精准的行业
+    payload = {"columns":["name", "description", "close", "market_cap_basic", "industry"],
                "filter":[{"left": "market_cap_basic", "operation": "greater", "right": 1.2e10}],
                "range":[0, 400], "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"}}
     try:
         resp = requests.post(url, json=payload, timeout=15).json().get('data',[])
-        # 提取市值 (market_cap_basic) 存在 index = 3
         df_pool = pd.DataFrame([{
             "code": re.sub(r'[^0-9]', '', d['d'][0]), 
-            "sector": d['d'][4] or "其他",
+            "industry": d['d'][4] or "其他",
             "mkt_cap": d['d'][3] or 0
         } for d in resp])
     except: return
@@ -187,59 +207,73 @@ def main():
             res = calculate_advanced_v750(data[t], hsi_series)
             if res and res['Action'] != "观察":
                 row_data = df_pool[df_pool['code']==code_raw].iloc[0]
-                mkt_cap_fmt = f"{round(row_data['mkt_cap'] / 1e8, 1)}亿" # 转换成人民币/港币 "亿" 单位
-                res.update({"Ticker": t.split('.')[0], "Sector": row_data['sector'], "MktCap": mkt_cap_fmt})
+                mkt_cap_fmt = f"{round(row_data['mkt_cap'] / 1e8, 1)}亿" 
+                res.update({"Ticker": t.split('.')[0], "Industry": row_data['industry'], "MktCap": mkt_cap_fmt})
                 final_list.append(res)
         except: continue
 
     if not final_list: return
     res_df = pd.DataFrame(final_list)
 
-    # 计算最终得分与 RS_Rank 排名
+    # 计算最终得分与全局 RS 排名
     res_df['Score'] = (res_df['Base_Score'] * 1.5 + res_df['rs_raw'].rank(pct=True) * 20 + np.maximum(0, (5 - res_df['Tight']) * 4)).round(2)
-    res_df['RS_Rank'] = (res_df['rs_raw'].rank(pct=True) * 100).round(1)
-    res_df['Options'] = "-" # 期权状态占位符，以防 API 调用拖慢速度
+    res_df['Rank'] = (res_df['rs_raw'].rank(pct=True) * 100).round(1)
     
     res_df = res_df.sort_values(by=["Base_Score", "Score"], ascending=[False, False])
-    top_picks = res_df.groupby('Sector').head(5).head(60)
+    top_picks = res_df.groupby('Industry').head(5).head(60)
 
     sh = init_sheet()
     sh.clear()
     
     weather = "☀️ 激进" if hsi_p > hsi_ma50 else "❄️ 观望"
-    header = [[f"🏰 V45.4 架构进化版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8%"]]
+    header = [[f"🏰 V45.4 全列矩阵版", f"环境: {weather}", f"刷新: {now_str}", "风控: 单笔风险 0.8%"]]
     sh.update(range_name="A1", values=header)
     
-    # ======== 自定义列映射 ========
-    cols =["Ticker", "Score", "Action", "Resonance", "ADR", "Vol_Ratio", "Bias", "MktCap", "RS_Rank", "Options", "Price", "5D", "20D", "60D", "R20", "R60"]
+    # 🎯 全新指定的 21 个核心展示列
+    cols =[
+        "Ticker", "Industry", "Score", "1D%", "60D Trend", "Action", "Resonance", 
+        "ADR", "Vol_Ratio", "Bias", "MktCap", "Rank", 
+        "REL5", "REL20", "REL60", "REL120", "R20", "R60", "R120", 
+        "Price", "From 2024-12-31"
+    ]
     
     sh.update(range_name="A3", values=[cols] + top_picks[cols].values.tolist(), value_input_option="USER_ENTERED")
 
+    # 冻结表头与格式化
     set_frozen(sh, rows=3)
-    format_cell_range(sh, 'A3:P3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
+    format_cell_range(sh, 'A3:U3', cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(1,1,1)), backgroundColor=color(0,0,0)))
     
     rules = get_conditional_format_rules(sh)
     rules.clear() 
     
-    # Action (第 C 列) 动态警告标签
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['已飞勿追']), format=cellFormat(backgroundColor=color(1.0, 0.7, 0.7), textFormat=textFormat(bold=True, foregroundColor=color(0.5, 0, 0))))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['破位取消']), format=cellFormat(backgroundColor=color(0.3, 0.3, 0.3), textFormat=textFormat(bold=True, strikethrough=True, foregroundColor=color(0.8, 0.8, 0.8))))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['🚀']), format=cellFormat(backgroundColor=color(1.0, 0.6, 0.2), textFormat=textFormat(bold=True, foregroundColor=color(0.4, 0.1, 0.0))))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['👁️']), format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True)))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['⚔️']), format=cellFormat(backgroundColor=color(1.0, 0.84, 0.0), textFormat=textFormat(bold=True, foregroundColor=color(0.5, 0.2, 0.0))))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🌊']), format=cellFormat(backgroundColor=color(0.8, 0.9, 1.0), textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0.5))))))
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('C4:C100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['☠️']), format=cellFormat(backgroundColor=color(0.85, 0.85, 0.85), textFormat=textFormat(bold=True, strikethrough=True, foregroundColor=color(0.5, 0.5, 0.5))))))
-                                
-    # 数据列红绿对齐 (Bias(G), 5D(L), 20D(M), 60D(N), R20(O), R60(P))
-    ranges_to_color =[GridRange.from_a1_range('G4:G100', sh), GridRange.from_a1_range('L4:P100', sh)]
+    # [F列] Action 动态警告标签
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['已飞勿追']), format=cellFormat(backgroundColor=color(1.0, 0.7, 0.7), textFormat=textFormat(bold=True, foregroundColor=color(0.5, 0, 0))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['破位取消']), format=cellFormat(backgroundColor=color(0.3, 0.3, 0.3), textFormat=textFormat(bold=True, strikethrough=True, foregroundColor=color(0.8, 0.8, 0.8))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['🚀']), format=cellFormat(backgroundColor=color(1.0, 0.6, 0.2), textFormat=textFormat(bold=True, foregroundColor=color(0.4, 0.1, 0.0))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['👁️']), format=cellFormat(backgroundColor=color(0.9, 0.8, 1), textFormat=textFormat(bold=True)))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['⚔️']), format=cellFormat(backgroundColor=color(1.0, 0.84, 0.0), textFormat=textFormat(bold=True, foregroundColor=color(0.5, 0.2, 0.0))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['🌊']), format=cellFormat(backgroundColor=color(0.8, 0.9, 1.0), textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0.5))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('F4:F100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['☠️']), format=cellFormat(backgroundColor=color(0.85, 0.85, 0.85), textFormat=textFormat(bold=True, strikethrough=True, foregroundColor=color(0.5, 0.5, 0.5))))))
+    
+    # [G列] Resonance 共振标签
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('G4:G100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['🔥']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.9, 0.1, 0.1))))))
+
+    # [E列] 60D Trend 趋势文字颜色
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['↗']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0))))))
+    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('E4:E100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS', ['↘']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.6, 0))))))
+
+    # 数值类红绿配色对齐 D(1D%), J(Bias), M:S(REL/R指标), U(From 2024-12-31)
+    ranges_to_color =[
+        GridRange.from_a1_range('D4:D100', sh), 
+        GridRange.from_a1_range('J4:J100', sh), 
+        GridRange.from_a1_range('M4:S100', sh), 
+        GridRange.from_a1_range('U4:U100', sh)
+    ]
     rules.append(ConditionalFormatRule(ranges=ranges_to_color, booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_GREATER', ['0']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.8, 0, 0))))))
     rules.append(ConditionalFormatRule(ranges=ranges_to_color, booleanRule=BooleanRule(condition=BooleanCondition('NUMBER_LESS', ['0']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0, 0.6, 0))))))
     
-    # Resonance 共振高亮 (第 D 列)
-    rules.append(ConditionalFormatRule(ranges=[GridRange.from_a1_range('D4:D100', sh)], booleanRule=BooleanRule(condition=BooleanCondition('TEXT_CONTAINS',['🔥']), format=cellFormat(textFormat=textFormat(bold=True, foregroundColor=color(0.9, 0.1, 0.1))))))
-
     rules.save()
-    print(f"✅ V45.4 全景数据视图执行完毕！极品 VCP 的封印已解除。")
+    print(f"✅ V45.4 矩阵列同步完毕！")
 
 if __name__ == "__main__":
     main()
