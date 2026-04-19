@@ -8,7 +8,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
-WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwfstK4Xq1DXft4U3_Qg9pjCQ5Qp0FiIskzrKnT1VFdRiH5FFyk6Iikv0FAcZNrPtp-/exec"
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxyU65vHlyMg-RvIEz9TyXRDLT-M830EIAFUZIjsicSooiLnkmkMVNfaC5ccSLiDD7t/exec"
 
 TOTAL_CAPITAL = 1000000 
 MAX_RISK_PER_STOCK = 0.008 
