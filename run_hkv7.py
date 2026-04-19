@@ -8,6 +8,7 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. 配置中心
 # ==========================================
+# 使用你最新提供的 WebApp URL
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxyU65vHlyMg-RvIEz9TyXRDLT-M830EIAFUZIjsicSooiLnkmkMVNfaC5ccSLiDD7t/exec"
 
 TOTAL_CAPITAL = 1000000 
@@ -16,7 +17,7 @@ MAX_RISK_PER_STOCK = 0.008
 # 核心监控（必出标的）
 LEADER_WATCH =["0700.HK", "3690.HK", "9988.HK", "1211.HK", "1810.HK"]
 
-# 股票池 (此处可自行添加或修改)
+# 股票池
 CORE_TICKERS_HK = list(set(LEADER_WATCH +[
     "0941.HK", "2318.HK", "0005.HK", "9999.HK", "0883.HK",
     "1024.HK", "1299.HK", "2015.HK", "9618.HK", "0939.HK",
@@ -24,7 +25,7 @@ CORE_TICKERS_HK = list(set(LEADER_WATCH +[
 ]))
 
 # ==========================================
-# 🧠 2. 量子哨兵演算法 (V54.1 全景矩阵版)
+# 🧠 2. 量子哨兵演算法 (V54.1 Pro-Layout)
 # ==========================================
 def calculate_sentinel_metrics(df, hsi_series, rs_rank_series):
     try:
@@ -155,7 +156,7 @@ def get_extended_info(ticker_str):
         return 0.0, "N/A"
 
 # ==========================================
-# 🚀 3. 执行引擎 (多层校验版)
+# 🚀 3. 执行引擎 (终极校验制导版)
 # ==========================================
 def run_sentinel_commander():
     start_t = time.time()
@@ -289,6 +290,8 @@ def run_sentinel_commander():
         if resp.status_code == 200 and "<html" not in response_text[:20].lower() and "Exception:" not in response_text:
             print(f"✅ V54.1 间距优化版同步完成。用时: {round(time.time() - start_t, 2)}秒 | 锁定 {len(candidates[:50])} 只标的。")
             print(f"⏱️ 更新时间截面: {bj_now}")
+            # ★ 终极诊断：把谷歌的底层回复完整打出来
+            print(f"📡 谷歌服务器底层回传: {response_text}")
         else:
             print(f"⚠️ 警告: 网络已连接，但 Google Sheet 端可能写入崩溃或失败！")
             print(f"HTTP 状态码: {resp.status_code}")
